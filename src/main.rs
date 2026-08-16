@@ -1,3 +1,3 @@
 fn main() {
-    println!("I am skillator!");
+    println!("I Am Skillator!");
 }
