@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skillator Library Management Prototype</title>
+  <!-- Three variants of the Library-management workflow, switchable via ?variant=A|B|C. -->
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d10;
+      --panel: #12161b;
+      --panel-2: #171c22;
+      --line: #2a323d;
+      --muted: #8994a3;
+      --text: #e7ebf0;
+      --green: #73d19c;
+      --yellow: #f3c969;
+      --red: #ff7c7c;
+      --blue: #79b8ff;
+      --purple: #c69cff;
+      --shadow: 0 24px 70px rgba(0, 0, 0, .48);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at 50% -20%, #1c2530, var(--bg) 48%); color: var(--text); min-height: 100vh; }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    .shell { width: min(1500px, calc(100vw - 32px)); margin: 22px auto 100px; border: 1px solid #384250; border-radius: 13px; background: var(--panel); box-shadow: var(--shadow); overflow: hidden; }
+    .titlebar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: #0f1318; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .traffic { display: flex; gap: 7px; margin-right: 6px; }
+    .traffic i { display: block; width: 10px; height: 10px; border-radius: 50%; background: #46505c; }
+    .traffic i:first-child { background: #ff6b68; }.traffic i:nth-child(2) { background: #e7ba52; }.traffic i:last-child { background: #58c37b; }
+    .spacer { flex: 1; }
+    .topnav { display: flex; align-items: center; padding: 0 18px; min-height: 56px; border-bottom: 1px solid var(--line); background: #11161b; gap: 18px; }
+    .brand { font-weight: 800; letter-spacing: -.04em; font-size: 18px; }
+    .brand span { color: var(--green); }
+    .nav-item { color: var(--muted); padding: 17px 3px 15px; border-bottom: 2px solid transparent; }
+    .nav-item.active { color: var(--text); border-color: var(--green); }
+    .repo { margin-left: auto; color: var(--muted); font-size: 12px; }
+    .repo b { color: var(--text); }
+    .statusline { display: flex; gap: 18px; align-items: center; padding: 8px 18px; background: #0d1115; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+    .statusline .dirty { color: var(--yellow); }
+    .statusline .ok { color: var(--green); }
+    .key { border: 1px solid #46515f; background: #20262d; color: #cbd2db; border-radius: 4px; padding: 1px 5px; font-size: 10px; box-shadow: inset 0 -1px #111; }
+    .content { min-height: 720px; }
+    .screen-title { padding: 20px 22px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: flex-start; gap: 18px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 5px; font-size: 21px; letter-spacing: -.03em; }
+    h2 { font-size: 15px; margin-bottom: 12px; }
+    h3 { font-size: 13px; }
+    p { color: var(--muted); line-height: 1.55; font-size: 12px; }
+    .actions { margin-left: auto; display: flex; gap: 8px; }
+    .btn { border: 1px solid #3a4552; background: #1b222a; border-radius: 6px; padding: 7px 11px; cursor: pointer; font-size: 12px; }
+    .btn:hover { border-color: #657384; background: #222b34; }
+    .btn.primary { color: #07130c; background: var(--green); border-color: var(--green); font-weight: 700; }
+    .btn.danger { color: var(--red); }
+    .btn.small { padding: 4px 8px; font-size: 11px; }
+    .btn:disabled { opacity: .4; cursor: default; }
+    .badge { border: 1px solid var(--line); border-radius: 999px; padding: 2px 7px; font-size: 10px; white-space: nowrap; color: var(--muted); }
+    .badge.good { color: var(--green); border-color: #305944; background: #11261a; }
+    .badge.warn { color: var(--yellow); border-color: #5a4a27; background: #251e0f; }
+    .badge.bad { color: var(--red); border-color: #633334; background: #291415; }
+    .badge.info { color: var(--blue); border-color: #2e4e70; background: #101e2c; }
+    .section-label { color: #687584; text-transform: uppercase; letter-spacing: .12em; font-size: 9px; font-weight: 700; margin-bottom: 8px; }
+    .row { display: flex; align-items: center; gap: 10px; }
+    .muted { color: var(--muted); }.green { color: var(--green); }.yellow { color: var(--yellow); }.red { color: var(--red); }.blue { color: var(--blue); }
+    .check { width: 16px; height: 16px; border: 1px solid #546171; border-radius: 3px; display: inline-grid; place-items: center; color: #08140d; flex: 0 0 auto; }
+    .check.on { background: var(--green); border-color: var(--green); }.check.on::after { content: "✓"; font-size: 12px; font-weight: 900; }
+    .check.mixed::after { content: "−"; color: var(--yellow); }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }.dot.green { background: var(--green); }.dot.yellow { background: var(--yellow); }.dot.red { background: var(--red); }
+    .path { color: #b6c0cc; font-size: 11px; }
+
+    /* Variant A: hierarchy + inspector */
+    .a-layout { display: grid; grid-template-columns: minmax(560px, 1fr) 340px; min-height: 650px; }
+    .sidebar, .inspector { background: #0f1317; padding: 16px; }
+    .sidebar { border-right: 1px solid var(--line); }.inspector { border-left: 1px solid var(--line); }
+    .tree-item { padding: 7px 8px; border-radius: 5px; cursor: pointer; font-size: 11px; display: flex; align-items: center; gap: 7px; margin: 2px 0; }
+    .tree-item:hover, .tree-item.selected { background: #202730; color: white; }
+    .tree-item.indent { padding-left: 24px; }.tree-item.deep { padding-left: 42px; }
+    .tree-count { margin-left: auto; color: var(--muted); }
+    .main-pane { padding: 18px 20px; }
+    .source-card { border: 1px solid var(--line); border-radius: 7px; margin-bottom: 10px; overflow: hidden; }
+    .source-head { padding: 12px; background: var(--panel-2); display: flex; align-items: center; gap: 10px; }
+    .source-body { padding: 6px 12px 10px; }
+    .skill-line { min-height: 38px; display: grid; grid-template-columns: 22px 1fr auto; align-items: center; border-top: 1px solid #202730; font-size: 11px; cursor: pointer; }
+    .skill-line:first-child { border-top: 0; }
+    .skill-line .desc { color: var(--muted); font-size: 10px; margin-top: 3px; }
+    .diagnostic { border-left: 2px solid var(--yellow); background: #211b10; color: #dac791; padding: 9px 10px; font-size: 10px; line-height: 1.5; margin: 10px 0; }
+    .kv { display: grid; grid-template-columns: 88px 1fr; gap: 7px 10px; font-size: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    .kv dt { color: var(--muted); }.kv dd { margin: 0; overflow-wrap: anywhere; }
+    .library-list { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .table-head, .table-row { display: grid; grid-template-columns: 84px minmax(220px, 310px) 1fr; align-items: center; gap: 12px; }
+    .table-head { min-height: 32px; padding: 6px 12px; background: #0a0d10; color: #758292; font-size: 9px; letter-spacing: .12em; text-transform: uppercase; font-weight: 800; }
+    .location-divider { display: flex; align-items: center; gap: 9px; min-height: 36px; padding: 7px 12px; background: #0d1115; border-top: 1px solid #46515e; border-bottom: 1px solid #303945; color: #d8dee7; font-size: 11px; }
+    .location-divider:first-child { border-top: 0; }
+    .location-divider .kind { color: var(--blue); font-size: 9px; letter-spacing: .12em; text-transform: uppercase; font-weight: 800; }
+    .table-row { min-height: 39px; padding: 6px 12px; border-top: 1px solid #222a32; cursor: pointer; font-size: 11px; }
+    .table-row:hover, .table-row.selected { background: #202832; }
+    .table-row.source { background: #171d23; font-weight: 700; }
+    .table-row.source:hover, .table-row.source.selected { background: #222b35; }
+    .table-row.skill .name { padding-left: 18px; position: relative; }
+    .table-row.skill .name::before { content: "└"; color: #566474; position: absolute; left: 0; }
+    .tui-status { font-weight: 900; font-size: 12px; white-space: nowrap; }
+    .tui-status.checked { color: var(--green); }.tui-status.empty { color: #91a0b0; }.tui-status.mixed { color: var(--yellow); }.tui-status.alert { color: var(--red); }
+    .row-description { color: var(--muted); line-height: 1.4; }
+
+    /* Variant B: inbox */
+    .b-layout { display: grid; grid-template-columns: minmax(500px, 1fr) 330px; min-height: 650px; }
+    .inbox { padding: 18px 20px; }
+    .tray { border-left: 1px solid var(--line); background: #0f1317; padding: 18px; }
+    .filterbar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
+    .filter { border: 1px solid var(--line); background: #12171d; color: var(--muted); border-radius: 999px; padding: 6px 10px; font-size: 10px; cursor: pointer; }
+    .filter.active { color: white; border-color: #4c6177; background: #23303d; }
+    .inbox-group { margin-bottom: 21px; }
+    .inbox-item { display: grid; grid-template-columns: 24px 1fr auto; align-items: start; gap: 10px; padding: 13px; border: 1px solid var(--line); border-bottom: 0; background: #13181e; cursor: pointer; }
+    .inbox-item:first-of-type { border-radius: 7px 7px 0 0; }.inbox-item:last-child { border-bottom: 1px solid var(--line); border-radius: 0 0 7px 7px; }
+    .inbox-item:only-of-type { border-bottom: 1px solid var(--line); border-radius: 7px; }
+    .inbox-title { font-size: 12px; margin-bottom: 5px; }.inbox-meta { color: var(--muted); font-size: 10px; line-height: 1.5; }
+    .staged-row { padding: 9px 0; border-bottom: 1px solid #232a32; font-size: 10px; line-height: 1.5; }
+    .empty { padding: 20px; border: 1px dashed #37414d; border-radius: 7px; text-align: center; color: var(--muted); font-size: 11px; }
+
+    /* Variant C: guided */
+    .c-layout { display: grid; grid-template-columns: 230px 1fr; min-height: 650px; }
+    .steps { border-right: 1px solid var(--line); background: #0f1317; padding: 22px 16px; }
+    .step { display: grid; grid-template-columns: 25px 1fr; gap: 9px; padding: 9px 5px 18px; position: relative; cursor: pointer; }
+    .step:not(:last-child)::after { content: ""; position: absolute; left: 17px; top: 34px; bottom: -2px; width: 1px; background: #35404c; }
+    .step-num { width: 24px; height: 24px; border: 1px solid #465361; border-radius: 50%; display: grid; place-items: center; font-size: 10px; z-index: 1; background: #0f1317; }
+    .step.active .step-num { background: var(--blue); border-color: var(--blue); color: #08121d; font-weight: 800; }.step.done .step-num { color: var(--green); border-color: var(--green); }
+    .step strong { font-size: 11px; display: block; margin: 3px 0; }.step span { color: var(--muted); font-size: 9px; line-height: 1.4; display: block; }
+    .wizard { padding: 24px 28px; max-width: 920px; }
+    .wizard-card { border: 1px solid var(--line); background: #12171d; border-radius: 8px; padding: 17px; margin: 12px 0; }
+    .field { margin-bottom: 14px; }.field label { display: block; color: var(--muted); font-size: 10px; margin-bottom: 6px; }.field input { width: 100%; background: #0d1115; border: 1px solid #3a4552; border-radius: 5px; color: var(--text); padding: 8px 9px; }
+    .option { display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 6px; padding: 11px; margin: 7px 0; cursor: pointer; }
+    .option.selected { border-color: #426489; background: #14202c; }
+    .wizard-footer { display: flex; justify-content: space-between; margin-top: 18px; }
+
+    /* Shared prototype controls */
+    .switcher { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; align-items: center; gap: 5px; padding: 7px; background: #eef2f6; color: #101318; border-radius: 999px; box-shadow: 0 12px 35px rgba(0,0,0,.5); z-index: 20; }
+    .switcher button { border: 0; background: transparent; color: #101318; cursor: pointer; width: 32px; height: 28px; border-radius: 99px; }
+    .switcher button:hover { background: #d8dee6; }.switcher-label { min-width: 245px; text-align: center; font-size: 11px; font-weight: 800; }
+    .state-peek { position: fixed; right: 18px; bottom: 18px; z-index: 21; }
+    .state-peek summary { list-style: none; cursor: pointer; background: #202733; border: 1px solid #465363; border-radius: 7px; padding: 9px 11px; color: var(--muted); font-size: 10px; }
+    .state-peek[open] summary { border-radius: 7px 7px 0 0; color: var(--text); }
+    .state-peek pre { position: absolute; right: 0; bottom: 34px; width: 370px; max-height: 380px; overflow: auto; margin: 0; padding: 12px; background: #0a0d10; border: 1px solid #465363; border-radius: 7px 7px 0 7px; color: #aeb9c6; font-size: 9px; line-height: 1.5; }
+    .toast { position: fixed; top: 18px; left: 50%; transform: translate(-50%, -120px); background: #e7ebf0; color: #11161b; border-radius: 7px; padding: 10px 14px; font-size: 11px; font-weight: 700; transition: .2s ease; z-index: 30; }.toast.show { transform: translate(-50%, 0); }
+    @media (max-width: 1050px) { .a-layout { grid-template-columns: 1fr; }.a-layout .inspector { display: none; }.b-layout { grid-template-columns: 1fr; }.tray { border-left: 0; border-top: 1px solid var(--line); }.state-peek { display: none; } }
+  </style>
+</head>
+<body>
+  <main id="app"></main>
+  <div class="toast" id="toast"></div>
+  <details class="state-peek"><summary>prototype state</summary><pre id="state"></pre></details>
+  <nav class="switcher" aria-label="Prototype variant switcher">
+    <button id="prev" aria-label="Previous variant">←</button>
+    <div class="switcher-label" id="variant-label"></div>
+    <button id="next" aria-label="Next variant">→</button>
+  </nav>
+
+  <script>
+    const variants = {
+      A: { name: 'Library workspace', render: renderA },
+      B: { name: 'Registration inbox', render: renderB },
+      C: { name: 'Guided setup', render: renderC },
+    };
+
+    const state = {
+      firstRun: true,
+      saved: false,
+      stagedDefault: true,
+      selectedSource: 'elastic/agent-skills',
+      wizardStep: 1,
+      filter: 'Needs review',
+      locations: [
+        { path: './library', available: true, staged: true },
+        { path: '~/Development/elastic', available: true, staged: false },
+        { path: '${WORK_SKILLS}', available: false, staged: false },
+      ],
+      sources: [
+        { key: 'local/library', location: './library', path: './library', git: false, registered: true, staged: true, status: 'valid', skills: [
+          { path: 'personal/release-checklist', name: 'release-checklist', description: 'Prepare a consistent project release.', registered: true, valid: true },
+        ]},
+        { key: 'elastic/agent-skills', location: '~/Development/elastic', path: '~/Development/elastic/agent-skills', git: true, registered: true, status: 'valid', skills: [
+          { path: 'skills/esql', name: 'esql', description: 'Write and explain Elasticsearch ES|QL queries.', registered: false, valid: true },
+          { path: 'skills/release-manager', name: 'release-manager', description: 'Coordinate release branches and notes.', registered: true, valid: true },
+          { path: 'skills/legacy-helper', name: 'Legacy Helper', description: 'Frontmatter name does not match the directory.', registered: false, valid: false },
+        ]},
+        { key: 'mattpocock/skills', location: '~/Development/community', path: '~/Development/community/skills', git: true, registered: false, status: 'valid', skills: [
+          { path: 'skills/tdd', name: 'tdd', description: 'Build features test-first using red, green, refactor.', registered: false, valid: true },
+          { path: 'skills/grilling', name: 'grilling', description: 'Stress-test a plan through focused questions.', registered: false, valid: true },
+        ]},
+        { key: 'local/old-skills', location: '${WORK_SKILLS}', path: '${WORK_SKILLS}/archived', git: false, registered: true, status: 'unavailable', skills: [] },
+      ],
+      staged: [
+        { kind: 'create', text: 'Create ~/.skillator/library.yml' },
+        { kind: 'register', text: 'Register local/library' },
+      ],
+    };
+
+    function currentVariant() {
+      const key = new URLSearchParams(location.search).get('variant')?.toUpperCase();
+      return variants[key] ? key : 'A';
+    }
+
+    function shell(body) {
+      return `<section class="shell">
+        <div class="titlebar"><span class="traffic"><i></i><i></i><i></i></span> skillator · ${currentVariant()} <span class="spacer"></span> PROTOTYPE — no files will be written</div>
+        <div class="topnav"><div class="brand"><span>skill</span>ator</div><div class="nav-item">Target</div><div class="nav-item active">Library</div><div class="repo">target <b>commandzero/skillator</b></div></div>
+        <div class="statusline"><span>${state.sources.filter(s => s.registered).length} registered Sources</span><span>${registeredSkills().length} registered Skills</span><span class="${state.staged.length ? 'dirty' : 'ok'}">${state.staged.length ? `● ${state.staged.length} staged changes` : '✓ saved'}</span><span class="spacer"></span><span><span class="key">Tab</span> focus</span><span><span class="key">?</span> help</span></div>
+        <div class="content">${body}</div>
+      </section>`;
+    }
+
+    function registeredSkills() {
+      return state.sources.flatMap(source => source.skills.filter(skill => skill.registered));
+    }
+
+    function render() {
+      const key = currentVariant();
+      document.getElementById('app').innerHTML = variants[key].render();
+      document.getElementById('variant-label').textContent = `${key} — ${variants[key].name}`;
+      document.getElementById('state').textContent = JSON.stringify(state, null, 2);
+      bindActions();
+    }
+
+    function screenTitle(title, copy, actions = '') {
+      return `<header class="screen-title"><div><h1>${title}</h1><p>${copy}</p></div><div class="actions">${actions}</div></header>`;
+    }
+
+    function sourceBadge(source) {
+      if (source.status === 'unavailable') return '<span class="badge bad">unavailable</span>';
+      return source.registered ? '<span class="badge good">registered</span>' : '<span class="badge warn">unregistered</span>';
+    }
+
+    function renderA() {
+      const selected = state.sources.find(s => s.key === state.selectedSource) || state.sources[0];
+      const inventory = state.locations.map(location => {
+        const sources = state.sources.filter(source => source.location === location.path);
+        return `<div class="location-divider"><span class="kind">Location</span><b>${location.path}</b>${location.staged ? '<span class="badge info">new</span>' : ''}<span class="spacer"></span><span class="${location.available ? 'green' : 'red'}">${location.available ? 'available' : 'unavailable'}</span></div>${sources.length ? sources.map(source => {
+          const validSkills = source.skills.filter(skill => skill.valid);
+          const selectedCount = validSkills.filter(skill => skill.registered).length;
+          const rollup = source.status === 'unavailable' ? { text: '[!]', className: 'alert' } : selectedCount === 0 ? { text: '[ ]', className: 'empty' } : selectedCount === validSkills.length ? { text: '[x]', className: 'checked' } : { text: '[-]', className: 'mixed' };
+          return `<div class="table-row source ${source.key === selected.key ? 'selected' : ''}" data-source="${source.key}"><span class="tui-status ${rollup.className}" data-toggle-source-skills="${source.key}">${rollup.text}</span><span class="name">${source.key}</span><span class="row-description">${source.status === 'unavailable' ? 'WARN: Source unavailable; registration preserved' : `${source.registered ? 'Registered' : 'Unregistered'} ${source.git ? 'Git Source' : 'local Source'} · ${source.path}${source.registered ? '' : ' · NEW'}`}</span></div>${source.status === 'unavailable' ? '' : source.skills.map(skill => `<div class="table-row skill" data-skill="${source.key}|${skill.path}"><span class="tui-status ${!skill.valid ? 'alert' : skill.registered ? 'checked' : 'empty'}">${!skill.valid ? '[!]' : skill.registered ? '[x]' : '[ ]'}</span><span class="name">${skill.name}</span><span class="row-description ${!skill.valid ? 'red' : ''}">${!skill.valid ? `WARN: ${skill.description}` : skill.description}</span></div>`).join('')}`;
+        }).join('') : '<div class="table-row"><span>—</span><span class="muted">No Sources</span><span class="row-description">Nothing discovered in this Location</span></div>'}`;
+      }).join('');
+      return shell(`${screenTitle('Library workspace', 'One grouped inventory of Locations, their Sources, and every discovered Skill.', '<button class="btn" data-add-location>+ Location</button><button class="btn primary" data-save>Save Library</button>')}
+        <div class="a-layout">
+          <section class="main-pane">
+            <div class="row" style="margin-bottom:12px"><div><h2 style="margin-bottom:3px">Library inventory</h2><div class="path">↑/↓ select · Space toggles Skill/all Skills · r registers or unregisters Source · Enter details</div></div><span class="spacer"></span><span class="badge">${state.locations.length} Locations</span><span class="badge">${state.sources.filter(s => state.locations.some(l => l.path === s.location)).length} Sources</span></div>
+            <div class="library-list"><div class="table-head"><span>Status</span><span>Name</span><span>Description</span></div>${inventory}</div>
+          </section>
+          <aside class="inspector"><div class="section-label">Selected Source</div><h2>${selected.key}</h2><dl class="kv"><dt>Location</dt><dd>${selected.location}</dd><dt>Kind</dt><dd>${selected.git ? 'Git repository' : 'Location-local Source'}</dd><dt>Path</dt><dd>${selected.path}</dd><dt>Git remote</dt><dd>${selected.git ? `git@github.com:${selected.key}.git` : '—'}</dd><dt>Registration</dt><dd>${selected.registered ? 'Persisted or staged' : 'Not in library.yml'}</dd></dl>${selected.status === 'unavailable' ? '<div class="diagnostic">WORK_SKILLS is not set. Registration and Target references remain intact.</div>' : selected.skills.some(s => !s.valid) ? '<div class="diagnostic">One Skill has invalid metadata and cannot be registered.</div>' : ''}<h3>Independent controls</h3><p>The divider checkbox selects all or none of the valid Skills. Source registration remains independent and uses <span class="key">r</span>.</p><div class="row"><button class="btn small" data-toggle-source-skills="${selected.key}" ${selected.status === 'unavailable' ? 'disabled' : ''}>Toggle all Skills</button><button class="btn small ${selected.registered ? 'danger' : 'primary'}" data-toggle-source="${selected.key}">${selected.registered ? 'Unregister Source' : 'Register Source'}</button></div></aside>
+        </div>`);
+    }
+
+    function renderB() {
+      const unregisteredSources = state.sources.filter(s => !s.registered);
+      const unregisteredSkills = state.sources.filter(s => s.registered).flatMap(source => source.skills.filter(skill => !skill.registered).map(skill => ({source, skill})));
+      const issues = state.sources.filter(s => s.status === 'unavailable');
+      return shell(`${screenTitle('Registration inbox', 'Review discoveries and problems as a queue; leave stable registered content out of sight.', '<button class="btn">Manage locations</button><button class="btn primary" data-save>Apply staged changes</button>')}
+        <div class="b-layout"><section class="inbox">
+          <div class="filterbar"><span class="filter active">Needs review <b>${unregisteredSources.length + unregisteredSkills.length + issues.length}</b></span><span class="filter">Registered <b>${registeredSkills().length}</b></span><span class="filter">All Sources <b>${state.sources.length}</b></span><span class="spacer"></span><span class="muted" style="font-size:10px">discovered moments ago</span></div>
+          <div class="inbox-group"><div class="section-label">New Sources</div>${unregisteredSources.length ? unregisteredSources.map(source => `<div class="inbox-item"><span class="check"></span><div><div class="inbox-title">${source.key}</div><div class="inbox-meta">${source.path}<br>${source.git ? 'Git repository · origin-derived key' : 'Local Source'}</div></div><button class="btn small" data-toggle-source="${source.key}">Review & register</button></div>`).join('') : '<div class="empty">No new Sources</div>'}</div>
+          <div class="inbox-group"><div class="section-label">New Skills in registered Sources</div>${unregisteredSkills.map(({source, skill}) => `<div class="inbox-item ${skill.valid ? '' : 'invalid'}"><span class="check ${skill.registered ? 'on' : ''}"></span><div><div class="inbox-title">${skill.name} <span class="muted">in ${source.key}</span></div><div class="inbox-meta">${skill.path}<br>${skill.description}</div></div>${skill.valid ? `<button class="btn small" data-skill="${source.key}|${skill.path}">Register</button>` : '<span class="badge bad">invalid</span>'}</div>`).join('')}</div>
+          <div class="inbox-group"><div class="section-label">Needs attention</div>${issues.map(source => `<div class="inbox-item"><span class="dot red"></span><div><div class="inbox-title red">${source.key} is unavailable</div><div class="inbox-meta">${source.path}<br>Environment variable WORK_SKILLS is not set. Registration is preserved.</div></div><button class="btn small">Open Location</button></div>`).join('')}</div>
+        </section><aside class="tray"><div class="section-label">Staged changes</div>${state.staged.length ? state.staged.map(change => `<div class="staged-row"><span class="${change.kind === 'remove' ? 'red' : 'green'}">${change.kind === 'remove' ? '−' : '+'}</span> ${change.text}</div>`).join('') : '<div class="empty">Nothing staged</div>'}<p style="margin-top:16px">Nothing writes until you apply the entire batch. Unavailable registrations are preserved.</p><button class="btn primary" style="width:100%" data-save ${state.staged.length ? '' : 'disabled'}>Apply ${state.staged.length} changes</button><button class="btn" style="width:100%;margin-top:8px">Discard staged changes</button></aside></div>`);
+    }
+
+    function renderC() {
+      const steps = [
+        ['Locations', 'Choose where discovery runs'],
+        ['Sources', 'Accept portable identities'],
+        ['Skills', 'Curate the Target picker'],
+        ['Review', 'Write one Library config'],
+      ];
+      return shell(`${screenTitle(state.firstRun ? 'Set up your Library' : 'Edit your Library', 'A guided path from local folders to a curated set of Skills.', '<span class="badge info">First run · nothing written</span>')}
+        <div class="c-layout"><aside class="steps">${steps.map((step, i) => `<div class="step ${state.wizardStep === i+1 ? 'active' : state.wizardStep > i+1 ? 'done' : ''}" data-step="${i+1}"><span class="step-num">${state.wizardStep > i+1 ? '✓' : i+1}</span><div><strong>${step[0]}</strong><span>${step[1]}</span></div></div>`).join('')}<div class="diagnostic" style="margin-top:24px">You can leave at any time. No files change until the Review step.</div></aside><section class="wizard">${renderWizardStep()}</section></div>`);
+    }
+
+    function renderWizardStep() {
+      if (state.wizardStep === 1) return `<div class="section-label">Step 1 of 4</div><h2>Where do your Skills live?</h2><p>The default Library Location is relative to ~/.skillator/library.yml. Add other folders that contain Git repositories or loose Skills.</p><div class="wizard-card"><div class="field"><label>Library Location</label><input value="./library"></div><div class="row"><span class="badge good">available</span><span class="path">resolves to ~/.skillator/library</span></div></div><div class="wizard-card"><div class="field"><label>Additional Location</label><input value="~/Development/elastic"></div><div class="row"><span class="badge good">3 Git Sources found</span><span class="path">recursive; nested symlinks not followed</span></div></div><button class="btn">+ Add another Location</button>${wizardFooter(false, 'Scan Sources')}`;
+      if (state.wizardStep === 2) return `<div class="section-label">Step 2 of 4</div><h2>Register discovered Sources</h2><p>A Source Key is the portable identity stored in Target Repository configurations. Paths remain local to this machine.</p>${state.sources.map(source => `<div class="option ${source.registered ? 'selected' : ''}" data-toggle-source="${source.key}"><span class="check ${source.registered ? 'on' : ''}"></span><div><b>${source.key}</b><div class="path">${source.path}</div></div>${sourceBadge(source)}</div>`).join('')}${wizardFooter(true, 'Choose Skills')}`;
+      if (state.wizardStep === 3) return `<div class="section-label">Step 3 of 4</div><h2>Choose Skills for the Library</h2><p>Only Registered Skills appear in the normal Target Repository enablement table. Invalid Skills stay visible here for diagnosis.</p>${state.sources.filter(s => s.registered && s.status === 'valid').map(source => `<div class="wizard-card"><div class="row"><b>${source.key}</b><span class="spacer"></span><button class="btn small" data-select-all="${source.key}">Select all valid</button></div>${source.skills.map(skill => `<div class="option ${skill.registered ? 'selected' : ''}" data-skill="${source.key}|${skill.path}"><span class="check ${skill.registered ? 'on' : ''}"></span><div><b>${skill.name}</b><div class="path">${skill.path}</div></div>${skill.valid ? '' : '<span class="badge bad">invalid</span>'}</div>`).join('')}</div>`).join('')}${wizardFooter(true, 'Review')}`;
+      return `<div class="section-label">Step 4 of 4</div><h2>Review staged Library configuration</h2><p>Saving writes ~/.skillator/library.yml and creates the default Location. It does not enable Skills in this Target Repository.</p><div class="wizard-card"><h3>${state.locations.length} Library Locations</h3>${state.locations.map(l => `<div class="staged-row">${l.path} ${l.available ? '<span class="green">available</span>' : '<span class="red">unavailable</span>'}</div>`).join('')}</div><div class="wizard-card"><h3>${state.sources.filter(s=>s.registered).length} Sources · ${registeredSkills().length} Skills</h3>${state.sources.filter(s=>s.registered).map(s => `<div class="staged-row"><b>${s.key}</b> · ${s.skills.filter(k=>k.registered).length} selected ${s.status === 'unavailable' ? '<span class="red">· unavailable</span>' : ''}</div>`).join('')}</div><div class="diagnostic">Saving retains local/old-skills, but it remains unavailable until WORK_SKILLS is set.</div>${wizardFooter(true, 'Save Library', true)}`;
+    }
+
+    function wizardFooter(back, nextLabel, save = false) {
+      return `<div class="wizard-footer">${back ? '<button class="btn" data-wizard-back>← Back</button>' : '<span></span>'}<button class="btn primary" ${save ? 'data-save' : 'data-wizard-next'}>${nextLabel} →</button></div>`;
+    }
+
+    function stage(kind, text) {
+      const existing = state.staged.findIndex(change => change.text === text);
+      if (existing >= 0) state.staged.splice(existing, 1); else state.staged.push({kind, text});
+    }
+
+    function bindActions() {
+      document.querySelectorAll('[data-add-location]').forEach(el => el.onclick = () => {
+        if (state.locations.some(location => location.path === '~/Development/community')) return notify('That Location is already in the Library');
+        state.locations.push({ path: '~/Development/community', available: true, staged: true });
+        stage('create', 'Add Location ~/Development/community');
+        notify('Location and its discovered Source appended to the inventory');
+        render();
+      });
+      document.querySelectorAll('[data-source]').forEach(el => el.onclick = () => { state.selectedSource = el.dataset.source; render(); });
+      document.querySelectorAll('[data-toggle-source-skills]').forEach(el => el.onclick = event => {
+        event.stopPropagation();
+        const source = state.sources.find(s => s.key === el.dataset.toggleSourceSkills);
+        const validSkills = source.skills.filter(skill => skill.valid);
+        const registerAll = validSkills.some(skill => !skill.registered);
+        validSkills.forEach(skill => {
+          if (skill.registered === registerAll) return;
+          skill.registered = registerAll;
+          stage(registerAll ? 'register' : 'remove', `${registerAll ? 'Register' : 'Unregister'} ${source.key}/${skill.path}`);
+        });
+        render();
+      });
+      document.querySelectorAll('[data-toggle-source]').forEach(el => el.onclick = event => {
+        event.stopPropagation();
+        const source = state.sources.find(s => s.key === el.dataset.toggleSource);
+        source.registered = !source.registered;
+        stage(source.registered ? 'register' : 'remove', `${source.registered ? 'Register' : 'Unregister'} ${source.key}`);
+        render();
+      });
+      document.querySelectorAll('[data-skill]').forEach(el => el.onclick = () => {
+        const [key, path] = el.dataset.skill.split('|');
+        const source = state.sources.find(s => s.key === key);
+        const skill = source.skills.find(s => s.path === path);
+        if (!skill.valid) return notify('Invalid Skills cannot be registered');
+        skill.registered = !skill.registered;
+        stage(skill.registered ? 'register' : 'remove', `${skill.registered ? 'Register' : 'Unregister'} ${key}/${path}`);
+        render();
+      });
+      document.querySelectorAll('[data-select-all]').forEach(el => el.onclick = event => {
+        event.stopPropagation();
+        const source = state.sources.find(s => s.key === el.dataset.selectAll);
+        source.skills.filter(s => s.valid && !s.registered).forEach(skill => { skill.registered = true; stage('register', `Register ${source.key}/${skill.path}`); });
+        render();
+      });
+      document.querySelectorAll('[data-step]').forEach(el => el.onclick = () => { state.wizardStep = Number(el.dataset.step); render(); });
+      document.querySelectorAll('[data-wizard-next]').forEach(el => el.onclick = () => { state.wizardStep = Math.min(4, state.wizardStep + 1); render(); });
+      document.querySelectorAll('[data-wizard-back]').forEach(el => el.onclick = () => { state.wizardStep = Math.max(1, state.wizardStep - 1); render(); });
+      document.querySelectorAll('[data-save]').forEach(el => el.onclick = () => { state.saved = true; state.firstRun = false; state.stagedDefault = false; state.staged = []; state.locations.forEach(l => l.staged = false); state.sources.forEach(s => s.staged = false); notify('Prototype save complete — no real files were written'); render(); });
+    }
+
+    function setVariant(key) {
+      const params = new URLSearchParams(location.search);
+      params.set('variant', key);
+      history.replaceState(null, '', `${location.pathname}?${params}`);
+      render();
+    }
+
+    function cycle(delta) {
+      const keys = Object.keys(variants);
+      const i = keys.indexOf(currentVariant());
+      setVariant(keys[(i + delta + keys.length) % keys.length]);
+    }
+
+    function notify(message) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message; toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 1800);
+    }
+
+    document.getElementById('prev').onclick = () => cycle(-1);
+    document.getElementById('next').onclick = () => cycle(1);
+    window.addEventListener('keydown', event => {
+      if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
+      if (event.key === 'ArrowLeft') cycle(-1);
+      if (event.key === 'ArrowRight') cycle(1);
+    });
+    window.addEventListener('popstate', render);
+    render();
+  </script>
+</body>
+</html>
