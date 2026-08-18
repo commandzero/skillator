@@ -1,3 +1,3 @@
-fn main() {
-    println!("I Am Skillator!");
+fn main() -> std::process::ExitCode {
+    skillator::run()
 }
