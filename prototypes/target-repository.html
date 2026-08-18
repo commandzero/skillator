@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skillator Target Repository TUI Prototype</title>
+  <!-- Three variants of the Target Repository workflow, switchable via ?variant=A|B|C. -->
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080b0f;
+      --panel: #10151b;
+      --panel-2: #151c24;
+      --panel-3: #1b242e;
+      --line: #293441;
+      --line-hi: #46566a;
+      --text: #e7edf5;
+      --muted: #8e9aaa;
+      --faint: #5f6c7a;
+      --green: #68d391;
+      --blue: #78b7ff;
+      --yellow: #f1c75b;
+      --red: #ff7d7d;
+      --purple: #c99cff;
+      --cyan: #66d9d2;
+      --shadow: 0 24px 80px rgba(0, 0, 0, .55);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: var(--text); background: radial-gradient(circle at 50% -30%, #203044 0, var(--bg) 52%); }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 4px; font-size: 19px; letter-spacing: -.035em; }
+    h2 { margin-bottom: 8px; font-size: 14px; }
+    h3 { margin-bottom: 7px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+    p { color: var(--muted); font-size: 11px; line-height: 1.55; }
+    .shell { width: min(1520px, calc(100vw - 28px)); min-height: 820px; margin: 18px auto 96px; overflow: hidden; border: 1px solid #3a4859; border-radius: 12px; background: var(--panel); box-shadow: var(--shadow); }
+    .terminal-bar { display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 13px; border-bottom: 1px solid var(--line); background: #0b0f14; color: var(--muted); font-size: 10px; }
+    .traffic { display: flex; gap: 6px; }
+    .traffic i { width: 9px; height: 9px; border-radius: 50%; background: #475362; }
+    .traffic i:first-child { background: #f66; }.traffic i:nth-child(2) { background: #e6b84f; }.traffic i:last-child { background: #5cc47b; }
+    .topbar { display: flex; align-items: center; gap: 16px; min-height: 57px; padding: 0 17px; border-bottom: 1px solid var(--line); background: #10161c; }
+    .brand { font-size: 18px; font-weight: 900; letter-spacing: -.05em; }.brand span { color: var(--green); }
+    .workspace-tab { align-self: stretch; display: grid; place-items: center; padding: 0 4px; border-bottom: 2px solid transparent; color: var(--muted); font-size: 11px; }
+    .workspace-tab.active { color: var(--text); border-color: var(--green); }
+    .target { margin-left: auto; font-size: 10px; color: var(--muted); }.target b { color: var(--text); }
+    .statusbar { display: flex; align-items: center; gap: 17px; min-height: 34px; padding: 7px 17px; border-bottom: 1px solid var(--line); background: #0c1116; color: var(--muted); font-size: 10px; }
+    .spacer { flex: 1; }
+    .good { color: var(--green); }.warn { color: var(--yellow); }.bad { color: var(--red); }.info { color: var(--blue); }.muted { color: var(--muted); }.faint { color: var(--faint); }
+    .key { display: inline-block; min-width: 18px; padding: 1px 5px; border: 1px solid #4a5766; border-radius: 4px; background: #202832; color: #d9e1ea; text-align: center; font-size: 9px; box-shadow: inset 0 -1px #10151a; }
+    .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border: 1px solid var(--line-hi); border-radius: 999px; color: var(--muted); font-size: 9px; white-space: nowrap; }
+    .badge.good { border-color: #2d5d42; background: #10261a; }.badge.warn { border-color: #665426; background: #271f0e; }.badge.bad { border-color: #6c3538; background: #2d1518; }.badge.info { border-color: #32567a; background: #112235; }
+    .btn { padding: 6px 10px; border: 1px solid #3c4a59; border-radius: 5px; background: #1a222b; color: var(--text); font-size: 10px; cursor: pointer; }
+    .btn:hover { border-color: #6b7b8d; background: #222d38; }.btn.primary { border-color: var(--green); background: var(--green); color: #08140d; font-weight: 800; }.btn.danger { color: var(--red); }.btn:disabled { opacity: .38; cursor: default; }
+    .screen-head { display: flex; align-items: flex-start; gap: 18px; min-height: 67px; padding: 14px 18px 11px; border-bottom: 1px solid var(--line); }
+    .screen-head p { margin: 0; }.actions { display: flex; gap: 7px; margin-left: auto; }
+    .select { display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px; border: 1px solid #425061; border-radius: 5px; background: #111820; cursor: pointer; font-size: 10px; }
+    .select.active { border-color: var(--blue); background: #142131; }
+    .search { min-width: 220px; padding: 6px 9px; border: 1px solid #3d4a59; border-radius: 5px; background: #0b1015; color: var(--text); font-size: 10px; }
+    .check { display: inline-grid; place-items: center; width: 17px; height: 17px; border: 1px solid #566476; border-radius: 3px; color: #09120c; cursor: pointer; }
+    .check.on { border-color: var(--green); background: var(--green); }.check.on::after { content: "✓"; font-weight: 900; font-size: 12px; }.check.blocked { border-color: var(--red); color: var(--red); }.check.blocked::after { content: "!"; font-weight: 900; }.check.mixed::after { content: "−"; color: var(--yellow); }
+    .mode { display: inline-flex; overflow: hidden; border: 1px solid #3c4a59; border-radius: 4px; }
+    .mode button { min-width: 38px; padding: 3px 6px; border: 0; border-right: 1px solid #3c4a59; background: #11171e; color: var(--faint); cursor: pointer; font-size: 9px; }.mode button:last-child { border-right: 0; }.mode button.active { background: #273545; color: var(--blue); font-weight: 900; }
+    .health { display: inline-flex; align-items: center; gap: 5px; font-size: 9px; white-space: nowrap; }.health i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }.health.good i { background: var(--green); }.health.warn i { background: var(--yellow); }.health.bad i { background: var(--red); }
+    .footer { display: flex; align-items: center; min-height: 37px; padding: 7px 15px; border-top: 1px solid var(--line); background: #0b1015; color: var(--muted); font-size: 9px; }
+
+    /* Variant A — focused directory table */
+    .directory-strip { display: flex; gap: 7px; align-items: center; overflow-x: auto; padding: 10px 18px; border-bottom: 1px solid var(--line); background: #0f141a; }.directory-strip .select, .directory-strip .btn { flex: none; }
+    .a-grid { display: grid; grid-template-columns: minmax(650px, 1fr) 330px; min-height: 640px; }
+    .table-pane { min-width: 0; padding: 14px 16px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+    .directory-alert { display: flex; align-items: center; gap: 8px; min-height: 34px; margin-bottom: 10px; padding: 7px 10px; border: 1px solid #5c4d27; border-radius: 6px; background: #241e10; color: #ddca91; font-size: 9px; cursor: pointer; }.directory-alert:hover, .directory-alert.selected { border-color: var(--yellow); background: #2b2412; }.directory-alert b { color: var(--yellow); }
+    .seg { display: inline-flex; overflow: hidden; border: 1px solid #3d4a59; border-radius: 5px; }.seg button { padding: 5px 8px; border: 0; border-right: 1px solid #3d4a59; background: #11171e; color: var(--muted); font-size: 9px; cursor: pointer; }.seg button:last-child { border-right: 0; }.seg button.active { background: #253140; color: var(--text); }
+    .skill-table { overflow: hidden; border: 1px solid var(--line); border-radius: 7px; }
+    .thead, .skill-row, .source-divider { display: grid; grid-template-columns: 58px 82px minmax(155px, .8fr) minmax(280px, 1.6fr) 112px; align-items: center; gap: 9px; }
+    .thead { min-height: 30px; padding: 5px 10px; background: #090d11; color: #748191; text-transform: uppercase; letter-spacing: .1em; font-size: 8px; font-weight: 900; }
+    .source-divider { min-height: 34px; padding: 7px 10px; border-top: 1px solid #344150; border-bottom: 1px solid #25303b; background: #121921; color: #b9c4d0; font-size: 9px; font-weight: 800; cursor: pointer; }
+    .source-divider:first-of-type { border-top: 0; }.source-divider:hover, .source-divider.selected { background: #1a2732; }.source-divider .source-name { grid-column: 3; }.source-divider .source-summary { grid-column: 4 / 6; color: var(--faint); font-weight: 400; }.tree-toggle { width: 25px; padding: 2px 4px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+    .skill-row { min-height: 47px; padding: 6px 10px; border-top: 1px solid #202934; cursor: pointer; font-size: 10px; }
+    .skill-row:hover, .skill-row.selected { background: #1c2732; }.skill-row .name { position: relative; padding-left: 19px; font-weight: 800; }.skill-row .name::before { content: "└"; position: absolute; left: 1px; color: #566576; font-weight: 400; }.skill-row .desc { color: var(--muted); line-height: 1.35; }.skill-row.unresolved { background: #25171a; }
+    .inspector { border-left: 1px solid var(--line); background: #0d1217; padding: 16px; }
+    .inspector .title { font-size: 14px; font-weight: 900; margin-bottom: 4px; }.kv { display: grid; grid-template-columns: 92px 1fr; gap: 7px 9px; margin: 13px 0; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); font-size: 9px; }.kv dt { color: var(--muted); }.kv dd { margin: 0; overflow-wrap: anywhere; }
+    .notice { margin: 9px 0; padding: 9px 10px; border-left: 2px solid var(--yellow); background: #251f11; color: #daca9b; font-size: 9px; line-height: 1.5; }.notice.bad { border-color: var(--red); background: #291619; color: #efb1b1; }.notice.good { border-color: var(--green); background: #11241a; color: #a9ddbd; }
+
+    /* Variant B — exposure matrix */
+    .matrix-wrap { padding: 16px 18px; min-height: 665px; }
+    .matrix-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .matrix { overflow: hidden; border: 1px solid var(--line); border-radius: 7px; }
+    .matrix-head, .matrix-row { display: grid; grid-template-columns: minmax(150px, .65fr) minmax(190px, 1fr) 175px 175px 105px; align-items: stretch; }
+    .matrix-head { min-height: 65px; background: #090d11; color: var(--muted); font-size: 9px; }
+    .matrix-head > div { display: flex; flex-direction: column; justify-content: center; padding: 9px 11px; border-left: 1px solid var(--line); }.matrix-head > div:first-child { border-left: 0; }
+    .matrix-head b { margin-bottom: 3px; color: var(--text); font-size: 10px; }.matrix-head span { line-height: 1.35; }
+    .matrix-source { padding: 7px 10px; border-top: 1px solid #3c4958; border-bottom: 1px solid #293441; background: #131a21; color: #b9c5d1; font-size: 9px; font-weight: 800; }
+    .matrix-row { min-height: 59px; border-top: 1px solid #202a34; font-size: 10px; }
+    .matrix-row > div { display: flex; flex-direction: column; justify-content: center; padding: 8px 11px; border-left: 1px solid #202a34; }.matrix-row > div:first-child { border-left: 0; }
+    .matrix-row:hover { background: #18212a; }.matrix-row .desc { color: var(--muted); line-height: 1.35; }.matrix-cell { gap: 5px; cursor: pointer; }.matrix-cell.active { background: #11251b; }.matrix-cell.drift { background: #29210f; }.matrix-cell.blocked { background: #2c171a; }.matrix-cell .line { display: flex; align-items: center; gap: 7px; }.matrix-cell small { color: var(--muted); font-size: 8px; }
+    .matrix-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }.summary-card { padding: 10px 11px; border: 1px solid var(--line); border-radius: 6px; background: #11171e; }.summary-card b { display: block; margin-bottom: 4px; font-size: 13px; }.summary-card span { color: var(--muted); font-size: 8px; }
+
+    /* Variant C — plan-first split workspace */
+    .c-layout { display: grid; grid-template-columns: 180px minmax(470px, 1fr) 390px; min-height: 685px; }
+    .rail { padding: 15px 11px; border-right: 1px solid var(--line); background: #0c1116; }.rail-label { margin: 4px 7px 8px; color: var(--faint); text-transform: uppercase; letter-spacing: .12em; font-size: 8px; font-weight: 900; }.rail-item { padding: 9px 8px; border-radius: 5px; color: var(--muted); font-size: 9px; cursor: pointer; }.rail-item.active, .rail-item:hover { background: #1d2731; color: var(--text); }.rail-item b { display: block; margin-bottom: 3px; font-size: 10px; }.rail-item span { display: block; color: var(--faint); line-height: 1.35; }
+    .picker { min-width: 0; padding: 15px; }.picker-head { display: flex; align-items: center; gap: 8px; margin-bottom: 11px; }.picker-list { border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }.pick-source { padding: 7px 10px; border-top: 1px solid #394655; border-bottom: 1px solid #27323d; background: #131a21; color: #b7c2cf; font-size: 9px; }.pick-source:first-child { border-top: 0; }.pick-row { display: grid; grid-template-columns: 26px minmax(120px, .65fr) minmax(210px, 1fr) 58px; align-items: center; min-height: 48px; gap: 8px; padding: 6px 10px; border-top: 1px solid #202a34; font-size: 9px; cursor: pointer; }.pick-row:hover { background: #1a242e; }.pick-row b { font-size: 10px; }.pick-row .desc { color: var(--muted); line-height: 1.35; }.mode-short { color: var(--blue); font-weight: 800; text-align: right; }
+    .plan { border-left: 1px solid var(--line); background: #0d1217; }.plan-head { padding: 14px 15px 10px; border-bottom: 1px solid var(--line); }.plan-head .row { display: flex; align-items: center; gap: 7px; }.plan-list { padding: 10px 12px; }.plan-group { margin-bottom: 14px; }.plan-group-title { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .09em; font-size: 8px; font-weight: 900; }.plan-item { padding: 8px 9px; border: 1px solid var(--line); border-bottom: 0; background: #121920; font-size: 9px; line-height: 1.4; }.plan-item:first-of-type { border-radius: 5px 5px 0 0; }.plan-item:last-child { border-bottom: 1px solid var(--line); border-radius: 0 0 5px 5px; }.plan-item:only-child { border-bottom: 1px solid var(--line); border-radius: 5px; }.plan-item b { display: block; margin-bottom: 2px; }.plan-item span { color: var(--muted); }.plan-actions { position: sticky; bottom: 0; display: flex; gap: 7px; padding: 11px 12px; border-top: 1px solid var(--line); background: #0b1015; }
+
+    /* Review modal and prototype controls */
+    .modal-backdrop { position: fixed; inset: 0; display: grid; place-items: center; z-index: 40; padding: 24px; background: rgba(3, 6, 9, .78); }
+    .modal { width: min(680px, 100%); max-height: 82vh; overflow: auto; border: 1px solid #536274; border-radius: 9px; background: #11171e; box-shadow: 0 30px 100px #000; }.modal-head { padding: 15px 17px 10px; border-bottom: 1px solid var(--line); }.modal-body { padding: 14px 17px; }.modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 11px 17px; border-top: 1px solid var(--line); background: #0c1116; }.review-item { display: grid; grid-template-columns: 76px 1fr; gap: 9px; padding: 8px 0; border-bottom: 1px solid #242e39; font-size: 9px; line-height: 1.45; }.review-item:last-child { border-bottom: 0; }
+    .switcher { position: fixed; left: 50%; bottom: 17px; z-index: 60; display: flex; align-items: center; gap: 5px; padding: 7px; transform: translateX(-50%); border-radius: 999px; background: #eef3f7; color: #101419; box-shadow: 0 12px 40px rgba(0,0,0,.55); }.switcher button { width: 33px; height: 27px; border: 0; border-radius: 99px; background: transparent; color: #101419; cursor: pointer; }.switcher button:hover { background: #d8e0e7; }.switcher-label { min-width: 260px; text-align: center; font-size: 10px; font-weight: 900; }
+    .state-peek { position: fixed; right: 16px; bottom: 17px; z-index: 61; }.state-peek summary { padding: 8px 10px; border: 1px solid #4a596a; border-radius: 6px; background: #17202a; color: var(--muted); font-size: 9px; cursor: pointer; list-style: none; }.state-peek pre { position: absolute; right: 0; bottom: 32px; width: 410px; max-height: 450px; overflow: auto; margin: 0; padding: 11px; border: 1px solid #4a596a; border-radius: 7px; background: #080c10; color: #aab7c5; font-size: 8px; line-height: 1.5; }
+    .toast { position: fixed; top: 17px; left: 50%; z-index: 70; padding: 9px 13px; transform: translate(-50%, -100px); border-radius: 6px; background: #edf2f6; color: #11161b; font-size: 10px; font-weight: 900; transition: .18s ease; }.toast.show { transform: translate(-50%, 0); }
+    @media (max-width: 1100px) { .a-grid { grid-template-columns: 1fr; }.inspector { display: none; }.c-layout { grid-template-columns: 155px 1fr; }.plan { display: none; }.state-peek { display: none; }.thead, .skill-row, .source-divider { grid-template-columns: 52px 75px 145px 1fr; }.thead > :last-child, .skill-row > :last-child { display: none; }.source-divider .source-name { grid-column: 3; }.source-divider .source-summary { grid-column: 4; } }
+  </style>
+</head>
+<body>
+  <main id="app"></main>
+  <div id="modal"></div>
+  <div id="toast" class="toast"></div>
+  <details class="state-peek"><summary>prototype state</summary><pre id="state"></pre></details>
+  <nav class="switcher" aria-label="Prototype variant switcher">
+    <button id="prev" aria-label="Previous variant">←</button>
+    <div id="variant-label" class="switcher-label"></div>
+    <button id="next" aria-label="Next variant">→</button>
+  </nav>
+
+  <script>
+    const variants = {
+      A: { name: 'Focused directory', render: renderA },
+      B: { name: 'Exposure matrix', render: renderB },
+      C: { name: 'Plan-first workspace', render: renderC },
+    };
+
+    const directories = [
+      { key: 'agents', label: 'Generic / OpenAI Codex', path: '.agents/skills', agents: 'Codex · Copilot · Cursor · Gemini' },
+      { key: 'claude', label: 'Claude Code', path: '.claude/skills', agents: 'Claude · Copilot · Cursor' },
+    ];
+
+    const state = {
+      target: '~/Development/commandzero/skillator',
+      directory: 'agents',
+      selected: 'elastic/agent-skills|skills/release-manager',
+      selectedSource: null,
+      selectedDiagnostic: null,
+      collapsedSources: [],
+      query: '',
+      filter: 'all',
+      reviewOpen: false,
+      saved: false,
+      skills: [
+        { source: 'elastic/agent-skills', path: 'skills/release-manager', name: 'release-manager', description: 'Coordinate release branches and release notes.', available: true, desired: { agents: 'linked', claude: null }, observed: { agents: 'in_sync', claude: 'absent' } },
+        { source: 'elastic/agent-skills', path: 'skills/esql', name: 'esql', description: 'Write and explain Elasticsearch ES|QL queries.', available: true, desired: { agents: null, claude: 'copied' }, observed: { agents: 'absent', claude: 'diverged' } },
+        { source: 'mattpocock/skills', path: 'skills/tdd', name: 'tdd', description: 'Build features test-first using red, green, refactor.', available: true, desired: { agents: 'linked', claude: 'linked' }, observed: { agents: 'missing', claude: 'in_sync' } },
+        { source: 'commandzero/agent-skills', path: 'code-review', name: 'code-review', description: 'Review code against repository standards and its specification.', available: true, desired: { agents: null, claude: null }, observed: { agents: 'absent', claude: 'absent' } },
+        { source: 'acme/private-skills', path: 'legacy-helper', name: 'legacy-helper', description: 'Unavailable on this machine; desired identity is preserved.', available: false, desired: { agents: 'linked', claude: null }, observed: { agents: 'broken', claude: 'absent' } },
+      ],
+      unmanaged: { agents: ['old-debugger'], claude: [] },
+      staged: [],
+    };
+
+    function variantKey() {
+      const key = new URLSearchParams(location.search).get('variant')?.toUpperCase();
+      return variants[key] ? key : 'A';
+    }
+
+    function currentDirectory() { return directories.find(directory => directory.key === state.directory); }
+    function skillId(skill) { return `${skill.source}|${skill.path}`; }
+    function currentSkill() { return state.skills.find(skill => skillId(skill) === state.selected) || state.skills[0]; }
+    function isEnabled(skill, directory = state.directory) { return Boolean(skill.desired[directory]); }
+    function stagedFor(skill, directory) { return state.staged.find(change => change.skill === skillId(skill) && change.directory === directory); }
+    function displayStatus(skill, directory) {
+      const staged = stagedFor(skill, directory);
+      if (staged) return staged.enabled ? 'staged_enable' : 'staged_disable';
+      if (!skill.available && isEnabled(skill, directory)) return 'unresolved';
+      return skill.observed[directory];
+    }
+
+    function shell(body) {
+      const drift = state.skills.filter(skill => isEnabled(skill, state.directory) && !['in_sync', 'staged_enable'].includes(displayStatus(skill, state.directory))).length + state.unmanaged[state.directory].length;
+      return `<section class="shell">
+        <div class="terminal-bar"><span class="traffic"><i></i><i></i><i></i></span> skillator ${state.target}<span class="spacer"></span>PROTOTYPE — all changes stay in memory</div>
+        <div class="topbar"><div class="brand"><span>skill</span>ator</div><div class="workspace-tab active">Target</div><div class="workspace-tab">Library</div><div class="target">Target Repository <b>commandzero/skillator</b> <span class="key">t</span></div></div>
+        <div class="statusbar"><span>${directories.length} Skill Directories</span><span>${state.skills.filter(skill => isEnabled(skill, state.directory)).length} enabled here</span><span class="${drift ? 'warn' : 'good'}">${drift ? `● ${drift} need attention` : '✓ in sync'}</span><span class="${state.staged.length ? 'warn' : 'muted'}">${state.staged.length ? `◆ ${state.staged.length} staged` : 'no staged edits'}</span><span class="spacer"></span><span><span class="key">?</span> help</span><span><span class="key">q</span> quit</span></div>
+        ${body}
+      </section>`;
+    }
+
+    function screenHead(title, text, actions = '') {
+      return `<header class="screen-head"><div><h1>${title}</h1><p>${text}</p></div><div class="actions">${actions}</div></header>`;
+    }
+
+    function directoryStrip() {
+      return `<nav class="directory-strip"><span class="muted" style="font-size:9px">Skill Directory</span>${directories.map(directory => `<button class="select ${directory.key === state.directory ? 'active' : ''}" data-directory="${directory.key}"><b>${directory.label}</b><span class="faint">${directory.path}</span>${directoryStatusBadge(directory.key)}</button>`).join('')}<button class="btn">+ Add</button></nav>`;
+    }
+
+    function directoryStatusBadge(key) {
+      const hasProblem = state.skills.some(skill => isEnabled(skill, key) && !['in_sync', 'staged_enable'].includes(displayStatus(skill, key))) || state.unmanaged[key].length;
+      return `<span class="${hasProblem ? 'warn' : 'good'}">${hasProblem ? '●' : '✓'}</span>`;
+    }
+
+    function filteredSkills() {
+      const query = state.query.toLowerCase();
+      return state.skills.filter(skill => {
+        const text = `${skill.source} ${skill.name} ${skill.description}`.toLowerCase();
+        const matchesQuery = !query || text.includes(query);
+        const status = displayStatus(skill, state.directory);
+        const matchesFilter = state.filter === 'all' || (state.filter === 'enabled' && isEnabled(skill)) || (state.filter === 'attention' && isEnabled(skill) && status !== 'in_sync');
+        return matchesQuery && matchesFilter;
+      }).sort((left, right) => left.source.localeCompare(right.source) || left.name.localeCompare(right.name));
+    }
+
+    function checkbox(skill, directory = state.directory) {
+      if (!skill.available && !isEnabled(skill, directory)) return '<span class="check blocked" title="Unavailable Skill">!</span>';
+      return `<span class="check ${isEnabled(skill, directory) ? 'on' : ''}" data-toggle="${skillId(skill)}" data-dir="${directory}"></span>`;
+    }
+
+    function modeControl(skill, directory = state.directory) {
+      if (!isEnabled(skill, directory)) return '<span class="faint">—</span>';
+      const value = skill.desired[directory];
+      return `<span class="mode"><button class="${value === 'linked' ? 'active' : ''}" data-mode="linked" data-skill="${skillId(skill)}" data-dir="${directory}" title="Linked">link</button><button class="${value === 'copied' ? 'active' : ''}" data-mode="copied" data-skill="${skillId(skill)}" data-dir="${directory}" title="Copied">copy</button></span>`;
+    }
+
+    function statusLabel(skill, directory = state.directory) {
+      const status = displayStatus(skill, directory);
+      const labels = {
+        in_sync: ['good', 'In Sync'], absent: ['muted', 'Disabled'], missing: ['warn', 'Missing'], diverged: ['warn', 'Diverged Copy'], broken: ['bad', 'Broken Link'], unresolved: ['bad', 'Unresolved'], staged_enable: ['info', 'Will enable'], staged_disable: ['info', 'Will disable'], staged_mode: ['info', 'Will convert'],
+      };
+      const item = labels[status] || ['muted', status];
+      return `<span class="health ${item[0]}"><i></i>${item[1]}</span>`;
+    }
+
+    function sourceRollup(skills, directory = state.directory) {
+      const enabled = skills.filter(skill => isEnabled(skill, directory)).length;
+      if (enabled === 0) return { className: '', mark: '' };
+      if (enabled === skills.length) return { className: 'on', mark: '' };
+      return { className: 'mixed', mark: '' };
+    }
+
+    function renderA() {
+      const skill = currentSkill();
+      const diagnostic = state.selectedDiagnostic;
+      const groups = Map.groupBy ? Map.groupBy(filteredSkills(), item => item.source) : filteredSkills().reduce((map, item) => ((map[item.source] ||= []).push(item), map), {});
+      const groupEntries = groups instanceof Map ? [...groups.entries()] : Object.entries(groups);
+      const rows = groupEntries.map(([source, skills]) => {
+        const sourceSkills = state.skills.filter(item => item.source === source);
+        const rollup = sourceRollup(sourceSkills);
+        const enabled = sourceSkills.filter(item => isEnabled(item)).length;
+        const collapsed = !state.query && state.collapsedSources.includes(source);
+        return `<div class="source-divider ${state.selectedSource === source ? 'selected' : ''}" data-select-source="${source}" data-nav-id="source:${source}"><div><span class="check ${rollup.className}" data-toggle-source-enablement="${source}"></span></div><div><button class="tree-toggle" data-collapse-source="${source}" aria-label="${collapsed ? 'Expand' : 'Collapse'} ${source}">${collapsed ? '▸' : '▾'}</button></div><div class="source-name">${source}</div><div class="source-summary">${sourceSkills.length} Registered Skill${sourceSkills.length === 1 ? '' : 's'} · ${enabled} enabled in ${state.directory}</div></div>${collapsed ? '' : skills.map(item => `<div class="skill-row ${!state.selectedSource && item === skill ? 'selected' : ''} ${!item.available ? 'unresolved' : ''}" data-select-skill="${skillId(item)}" data-nav-id="skill:${skillId(item)}"><div>${checkbox(item)}</div><div>${modeControl(item)}</div><div class="name">${item.name}</div><div class="desc">${item.description}</div><div>${statusLabel(item)}</div></div>`).join('')}`;
+      }).join('');
+      const directoryDiagnostic = state.unmanaged[state.directory].length ? `<div class="directory-alert ${diagnostic === 'unmanaged' ? 'selected' : ''}" data-select-diagnostic="unmanaged" data-nav-id="diagnostic:unmanaged"><b>● Directory conflict</b><span>${state.unmanaged[state.directory].length} Unmanaged Entr${state.unmanaged[state.directory].length === 1 ? 'y' : 'ies'} in ${currentDirectory().path}</span><span class="spacer"></span><span>preserved · Enter for details</span></div>` : '';
+      return shell(`${screenHead('Manage active Skills', `Enable Registered Library Skills in one selected Skill Directory. Nothing changes until Save & Exit.`, '<button class="btn">Change Target</button><button class="btn" data-review>Review</button><button class="btn primary" data-confirm-save-exit>Save & Exit</button>')}${directoryStrip()}
+        <div class="a-grid"><section class="table-pane"><div class="toolbar"><input class="search" data-search placeholder="/ Filter by Source, name, description" value="${state.query}"><div class="seg">${['all','enabled','attention'].map(filter => `<button class="${state.filter === filter ? 'active' : ''}" data-filter="${filter}">${filter[0].toUpperCase()+filter.slice(1)}</button>`).join('')}</div><span class="spacer"></span><span class="muted" style="font-size:9px"><span class="key">Space</span> enable · <span class="key">m</span> mode</span></div>${directoryDiagnostic}
+          <div class="skill-table"><div class="thead"><span>Enabled</span><span>Mode</span><span>Skill</span><span>Description</span><span>State</span></div>${rows || '<div class="notice">No Skills match this filter.</div>'}</div></section>
+          <aside class="inspector">${diagnostic === 'unmanaged' ? diagnosticInspector() : state.selectedSource ? sourceInspector(state.selectedSource) : skillInspector(skill)}</aside></div>
+        <footer class="footer"><span><span class="key">j/k</span> rows · <span class="key">J/K</span> Sources · <span class="key">h/l</span> collapse/expand · <span class="key">Tab</span> directory · <span class="key">Ctrl+L</span> toggle Library</span><span class="spacer"></span><span class="${state.staged.length ? 'warn' : 'muted'}"><span class="key">s</span> confirm save · <span class="key">Ctrl+S</span> fast save</span></footer>`);
+    }
+
+    function skillInspector(skill) {
+      return `<h3>Selected Skill</h3><div class="title">${skill.name}</div><div class="muted" style="font-size:9px">${skill.source}</div><dl class="kv"><dt>Skill Key</dt><dd>${skill.source}/${skill.path}</dd><dt>Directory</dt><dd>${currentDirectory().path}</dd><dt>Desired</dt><dd>${skill.desired[state.directory] || 'Disabled'}</dd><dt>Observed</dt><dd>${statusLabel(skill)}</dd><dt>Agents</dt><dd>${currentDirectory().agents}</dd></dl>${inspectorNotice(skill)}<h3>Controls</h3><p><span class="key">Space</span> toggles this Enablement. <span class="key">m</span> changes Linked/Copied. Edits are staged in Repository Configuration first.</p>`;
+    }
+
+    function sourceInspector(source) {
+      const skills = state.skills.filter(skill => skill.source === source);
+      const enabled = skills.filter(skill => isEnabled(skill)).length;
+      return `<h3>Selected Source</h3><div class="title">${source}</div><div class="muted" style="font-size:9px">${skills.length} Registered Skill${skills.length === 1 ? '' : 's'}</div><dl class="kv"><dt>Directory</dt><dd>${currentDirectory().path}</dd><dt>Enabled</dt><dd>${enabled} of ${skills.length}</dd><dt>Available</dt><dd>${skills.filter(skill => skill.available).length} of ${skills.length}</dd><dt>Group</dt><dd>${state.collapsedSources.includes(source) ? 'Collapsed' : 'Expanded'}</dd></dl><div class="notice good"><b>Bulk selection</b><br>From a mixed state, Space enables every available Skill. From an all-enabled state, Space disables every Skill.</div><h3>Navigation</h3><p><span class="key">h/l</span> collapses or expands this Source. <span class="key">J/K</span> moves directly between Source dividers.</p>`;
+    }
+
+    function diagnosticInspector() {
+      const entry = state.unmanaged[state.directory][0];
+      return `<h3>Directory Diagnostic</h3><div class="title">Unmanaged Entry</div><div class="muted" style="font-size:9px">${currentDirectory().path}/${entry}</div><dl class="kv"><dt>Directory</dt><dd>${currentDirectory().key}</dd><dt>Observed</dt><dd>Real directory</dd><dt>Git</dt><dd>Untracked · effectively ignored</dd><dt>Desired</dt><dd>No Enablement claims this path</dd></dl><div class="notice"><b>Guarded removal</b><br>Ordinary Save preserves this entry. Removing it requires batch confirmation and a recoverable backup.</div><h3>Why it is separate</h3><p>This is a Skill Directory conflict, not a Registered Library Skill. It therefore does not appear as a selectable Skill row.</p>`;
+    }
+
+    function inspectorNotice(skill) {
+      const status = displayStatus(skill, state.directory);
+      if (!skill.available) return '<div class="notice bad"><b>Unresolved Enablement</b><br>The Source is unavailable on this machine. Desired state is preserved, but this change is Blocked.</div>';
+      if (status === 'diverged') return '<div class="notice"><b>Guarded Change</b><br>This copy differs from its Source. Replacing or disabling it requires one batch confirmation.</div>';
+      if (status === 'missing') return '<div class="notice"><b>Safe Change</b><br>The expected entry is absent and can be created from the available Source.</div>';
+      if (status === 'in_sync') return '<div class="notice good"><b>In Sync</b><br>The observed Materialization matches desired state.</div>';
+      return '<div class="notice">Select an Enablement to inspect its planned outcome.</div>';
+    }
+
+    function renderB() {
+      const sources = [...new Set(state.skills.map(skill => skill.source))];
+      const rows = sources.map(source => `<div class="matrix-source">${source}</div>${state.skills.filter(skill => skill.source === source).map(skill => `<div class="matrix-row"><div><b>${skill.name}</b><span class="faint" style="font-size:8px">${skill.path}</span></div><div class="desc">${skill.description}</div>${directories.map(directory => `<div class="matrix-cell ${matrixClass(skill,directory.key)}" data-cell="${skillId(skill)}" data-dir="${directory.key}"><div class="line">${checkbox(skill,directory.key)}<b>${skill.desired[directory.key] ? skill.desired[directory.key][0].toUpperCase() + skill.desired[directory.key].slice(1) : 'Disabled'}</b>${skill.desired[directory.key] ? modeControl(skill,directory.key) : ''}</div><small>${stripStatus(statusLabel(skill,directory.key))}</small></div>`).join('')}<div>${skill.available ? '<span class="badge good">available</span>' : '<span class="badge bad">unavailable</span>'}</div></div>`).join('')}`).join('');
+      return shell(`${screenHead('Agent exposure matrix', 'Compare and edit every Skill Directory at once. Each checked cell is one independent Enablement.', '<button class="btn">Change Target</button><button class="btn" data-review>Review plan</button><button class="btn primary" data-review>Save & Exit</button>')}
+        <section class="matrix-wrap"><div class="matrix-toolbar"><input class="search" data-search placeholder="/ Filter Skills" value="${state.query}"><span class="badge info">L Linked</span><span class="badge info">C Copied</span><span class="spacer"></span><span class="muted" style="font-size:9px">Space toggles cell · m changes cell mode</span></div>
+          <div class="matrix"><div class="matrix-head"><div><b>Skill</b><span>Registered Library inventory</span></div><div><b>Description</b><span>Source context grouped below</span></div>${directories.map(directory => `<div><b>${directory.label}</b><span>${directory.path}<br>${directory.agents}</span></div>`).join('')}<div><b>Library</b><span>local resolution</span></div></div>${rows}</div>
+          <div class="matrix-summary"><div class="summary-card"><b>${state.skills.filter(skill => isEnabled(skill,'agents')).length}</b><span>Generic/Codex Enablements</span></div><div class="summary-card"><b>${state.skills.filter(skill => isEnabled(skill,'claude')).length}</b><span>Claude Enablements</span></div><div class="summary-card"><b class="warn">1</b><span>compatibility overlap advisory</span></div><div class="summary-card"><b class="${state.staged.length ? 'info' : 'muted'}">${state.staged.length}</b><span>staged edits</span></div></div></section>
+        <footer class="footer"><span>This view emphasizes cross-agent exposure; a Skill enabled in both directories is not necessarily exclusive to either agent.</span><span class="spacer"></span><span class="warn">● old-debugger is unmanaged in .agents/skills</span></footer>`);
+    }
+
+    function stripStatus(html) { const el = document.createElement('div'); el.innerHTML = html; return el.textContent; }
+    function matrixClass(skill, directory) { const status = displayStatus(skill,directory); if (['broken','unresolved'].includes(status)) return 'blocked'; if (['missing','diverged'].includes(status)) return 'drift'; return isEnabled(skill,directory) ? 'active' : ''; }
+
+    function renderC() {
+      const groups = [...new Set(filteredSkills().map(skill => skill.source))];
+      const picker = groups.map(source => `<div class="pick-source">${source}</div>${filteredSkills().filter(skill => skill.source === source).map(skill => `<div class="pick-row" data-select-skill="${skillId(skill)}"><div>${checkbox(skill)}</div><div><b>${skill.name}</b><div class="faint">${statusLabel(skill)}</div></div><div class="desc">${skill.description}</div><div class="mode-short">${skill.desired[state.directory] ? skill.desired[state.directory].toUpperCase() : '—'}</div></div>`).join('')}`).join('');
+      const plan = reconciliationPlan();
+      return shell(`${screenHead('Stage a reconciliation', 'Choose desired Skills on the left; understand exactly what Save will attempt on the right.', '<button class="btn">Change Target</button>')}
+        <div class="c-layout"><aside class="rail"><div class="rail-label">Skill Directories</div>${directories.map(directory => `<div class="rail-item ${state.directory === directory.key ? 'active' : ''}" data-directory="${directory.key}"><b>${directory.label}</b><span>${directory.path}</span><span class="${directoryStatusBadge(directory.key).includes('warn') ? 'warn' : 'good'}">${directoryStatusBadge(directory.key).includes('warn') ? '● needs attention' : '✓ in sync'}</span></div>`).join('')}<div class="rail-item"><b>＋ Add directory</b><span>preset or custom path</span></div><div class="rail-label" style="margin-top:20px">Target</div><div class="rail-item"><b>commandzero/skillator</b><span>${state.target}</span></div><div class="rail-item"><b>⇄ Change Target</b><span>choose another Git worktree</span></div></aside>
+          <section class="picker"><div class="picker-head"><div><h2 style="margin-bottom:3px">${currentDirectory().label}</h2><span class="faint" style="font-size:9px">${currentDirectory().path} · ${currentDirectory().agents}</span></div><span class="spacer"></span><input class="search" data-search placeholder="/ Filter Library" value="${state.query}"></div><div class="picker-list">${picker}</div></section>
+          <aside class="plan"><div class="plan-head"><div class="row"><div><h2 style="margin-bottom:3px">Reconciliation plan</h2><span class="faint" style="font-size:9px">Configuration + filesystem effects</span></div><span class="spacer"></span><span class="badge ${plan.guarded.length ? 'warn' : 'good'}">${plan.guarded.length} guarded</span></div></div><div class="plan-list">${planGroup('Staged edits','info',plan.edits)}${planGroup('Safe changes','good',plan.safe)}${planGroup('Guarded changes','warn',plan.guarded)}${planGroup('Blocked','bad',plan.blocked)}${planGroup('Advisories','muted',plan.advisory)}</div><div class="plan-actions"><button class="btn" data-discard ${state.staged.length ? '' : 'disabled'}>Discard edits</button><button class="btn primary" data-review>Review & Save</button></div></aside></div>
+        <footer class="footer"><span><span class="key">↑↓</span> move · <span class="key">Space</span> stage enablement · <span class="key">m</span> Linked/Copied</span><span class="spacer"></span><span>Plan updates immediately; filesystem remains untouched</span></footer>`);
+    }
+
+    function planGroup(title, tone, items) {
+      if (!items.length) return '';
+      return `<section class="plan-group"><div class="plan-group-title ${tone}">${title} <span class="badge">${items.length}</span></div>${items.map(item => `<div class="plan-item"><b>${item.title}</b><span>${item.detail}</span></div>`).join('')}</section>`;
+    }
+
+    function reconciliationPlan() {
+      const edits = state.staged.map(change => ({ title: `${change.enabled ? 'Enable' : 'Disable'} ${change.name}`, detail: `${change.directory} · ${change.mode || 'linked'} · Repository Configuration` }));
+      const safe = [];
+      const guarded = [];
+      const blocked = [];
+      state.skills.forEach(skill => directories.forEach(directory => {
+        if (!isEnabled(skill,directory.key)) return;
+        const status = displayStatus(skill,directory.key);
+        const item = { title: `${skill.name} → ${directory.path}`, detail: status === 'missing' ? 'Create missing Linked Materialization' : status === 'diverged' ? 'Replace Diverged Copy; backup deleted after verification' : status === 'broken' || status === 'unresolved' ? 'Source unavailable; desired Enablement preserved' : 'No write required' };
+        if (status === 'missing' || status === 'staged_enable') safe.push(item);
+        if (status === 'diverged') guarded.push(item);
+        if (status === 'broken' || status === 'unresolved') blocked.push(item);
+      }));
+      return { edits, safe, guarded, blocked, advisory: [{ title: 'Unmanaged entry', detail: '.agents/skills/old-debugger is preserved unless a guarded removal is confirmed.' }, { title: 'Compatibility overlap', detail: 'tdd may be visible to Copilot and Cursor through both Skill Directories.' }] };
+    }
+
+    function reviewModal() {
+      const plan = reconciliationPlan();
+      const all = [
+        ...plan.edits.map(item => ['Config', item]),
+        ...plan.safe.map(item => ['Safe', item]),
+        ...plan.guarded.map(item => ['Guarded', item]),
+        ...plan.blocked.map(item => ['Blocked', item]),
+      ];
+      document.getElementById('modal').innerHTML = `<div class="modal-backdrop"><section class="modal"><header class="modal-head"><h2>Review Save & Reconcile</h2><p>One configuration write is followed by independent Materialization changes. Blocked work remains reported.</p></header><div class="modal-body">${all.length ? all.map(([kind,item]) => `<div class="review-item"><span class="badge ${kind === 'Safe' ? 'good' : kind === 'Guarded' ? 'warn' : kind === 'Blocked' ? 'bad' : 'info'}">${kind}</span><div><b>${item.title}</b><br><span class="muted">${item.detail}</span></div></div>`).join('') : '<div class="notice good">No desired-state edits. Existing drift can still be reconciled.</div>'}${plan.guarded.length ? '<div class="notice"><b>Confirmation covers every Guarded Change above.</b><br>Return to editing if you do not want all guarded operations applied.</div>' : ''}</div><footer class="modal-foot"><button class="btn" data-close-review>Return to editing</button><button class="btn primary" data-confirm-save>${plan.guarded.length ? 'Confirm guarded changes & save' : 'Save & reconcile'}</button></footer></section></div>`;
+      bindModal();
+    }
+
+    function render() {
+      const key = variantKey();
+      document.getElementById('app').innerHTML = variants[key].render();
+      document.getElementById('variant-label').textContent = `${key} — ${variants[key].name}`;
+      document.getElementById('state').textContent = JSON.stringify(state, null, 2);
+      document.getElementById('modal').innerHTML = '';
+      bindActions();
+    }
+
+    function saveAndReconcile() {
+      const plan = reconciliationPlan();
+      if (plan.guarded.length) reviewModal();
+      else performSave();
+    }
+
+    function performSave() {
+      const plan = reconciliationPlan();
+      state.saved = true;
+      state.staged = [];
+      state.skills.forEach(skill => directories.forEach(directory => {
+        if (skill.available && isEnabled(skill,directory.key)) skill.observed[directory.key] = 'in_sync';
+        if (!isEnabled(skill,directory.key)) skill.observed[directory.key] = 'absent';
+      }));
+      render();
+      if (plan.blocked.length) resultModal(plan);
+      else notify('Prototype: safe changes applied; a real TUI would now exit successfully');
+    }
+
+    function resultModal(plan) {
+      const applied = plan.safe.length + plan.guarded.length;
+      document.getElementById('modal').innerHTML = `<div class="modal-backdrop"><section class="modal"><header class="modal-head"><h2>Saved with unresolved work</h2><p>Repository Configuration was saved and independent changes were attempted. Review what still needs attention.</p></header><div class="modal-body"><div class="review-item"><span class="badge good">Applied</span><div><b>${applied} independent change${applied === 1 ? '' : 's'}</b><br><span class="muted">Safe and confirmed Guarded Changes completed.</span></div></div>${plan.blocked.map(item => `<div class="review-item"><span class="badge bad">Blocked</span><div><b>${item.title}</b><br><span class="muted">${item.detail}</span></div></div>`).join('')}<div class="notice">The desired Unresolved Enablement remains in Repository Configuration. No successful change was rolled back.</div></div><footer class="modal-foot"><button class="btn primary" data-ack-result>Acknowledge & exit · status 1</button></footer></section></div>`;
+      document.querySelector('[data-ack-result]').onclick = () => { document.getElementById('modal').innerHTML = ''; notify('Prototype: acknowledged; a real TUI would exit with status 1'); };
+    }
+
+    function toggleSkill(id, directory, renderNow = true) {
+      const skill = state.skills.find(item => skillId(item) === id);
+      if (!skill.available && !isEnabled(skill,directory)) return notify('Unavailable Skills cannot receive a new Enablement');
+      const wasEnabled = isEnabled(skill,directory);
+      skill.desired[directory] = wasEnabled ? null : 'linked';
+      const existing = state.staged.findIndex(change => change.skill === id && change.directory === directory);
+      if (existing >= 0) state.staged.splice(existing, 1);
+      else state.staged.push({ skill: id, directory, name: skill.name, enabled: !wasEnabled, mode: skill.desired[directory] });
+      state.selected = id;
+      if (renderNow) render();
+    }
+
+    function toggleSourceEnablements(source, directory) {
+      const skills = state.skills.filter(skill => skill.source === source);
+      const available = skills.filter(skill => skill.available);
+      const selectAll = available.some(skill => !isEnabled(skill, directory));
+      const changing = selectAll ? available.filter(skill => !isEnabled(skill, directory)) : skills.filter(skill => isEnabled(skill, directory));
+      changing.forEach(skill => toggleSkill(skillId(skill), directory, false));
+      notify(selectAll ? `Enabled every available Skill from ${source}` : `Disabled every Skill from ${source}`);
+      render();
+    }
+
+    function setSourceCollapsed(source, collapsed) {
+      const exists = state.collapsedSources.includes(source);
+      if (collapsed && !exists) state.collapsedSources.push(source);
+      if (!collapsed && exists) state.collapsedSources = state.collapsedSources.filter(item => item !== source);
+      state.selectedSource = source;
+      state.selectedDiagnostic = null;
+      render();
+    }
+
+    function selectNavigationRow(id) {
+      if (!id) return;
+      if (id.startsWith('source:')) {
+        state.selectedSource = id.slice('source:'.length);
+        state.selectedDiagnostic = null;
+      } else if (id.startsWith('skill:')) {
+        state.selected = id.slice('skill:'.length);
+        state.selectedSource = null;
+        state.selectedDiagnostic = null;
+      } else if (id.startsWith('diagnostic:')) {
+        state.selectedDiagnostic = id.slice('diagnostic:'.length);
+        state.selectedSource = null;
+      }
+      render();
+    }
+
+    function moveRow(delta) {
+      const rows = [...document.querySelectorAll('[data-nav-id]')].map(element => element.dataset.navId);
+      if (!rows.length) return;
+      const current = state.selectedDiagnostic ? `diagnostic:${state.selectedDiagnostic}` : state.selectedSource ? `source:${state.selectedSource}` : `skill:${state.selected}`;
+      const index = rows.indexOf(current);
+      selectNavigationRow(rows[Math.max(0, Math.min(rows.length - 1, (index < 0 ? 0 : index) + delta))]);
+    }
+
+    function moveSource(delta) {
+      const sources = [...document.querySelectorAll('[data-select-source]')].map(element => element.dataset.selectSource);
+      if (!sources.length) return;
+      const currentSource = state.selectedSource || currentSkill().source;
+      const index = sources.indexOf(currentSource);
+      const next = sources[Math.max(0, Math.min(sources.length - 1, (index < 0 ? 0 : index) + delta))];
+      selectNavigationRow(`source:${next}`);
+    }
+
+    function moveDirectory(delta) {
+      const index = directories.findIndex(directory => directory.key === state.directory);
+      state.directory = directories[(index + delta + directories.length) % directories.length].key;
+      state.selectedSource = null;
+      state.selectedDiagnostic = null;
+      render();
+    }
+
+    function changeMode(id, directory, mode) {
+      const skill = state.skills.find(item => skillId(item) === id);
+      if (!isEnabled(skill,directory) || skill.desired[directory] === mode) return;
+      skill.desired[directory] = mode;
+      const existing = state.staged.find(change => change.skill === id && change.directory === directory);
+      if (existing) existing.mode = mode;
+      else state.staged.push({ skill: id, directory, name: skill.name, enabled: true, mode });
+      state.selected = id;
+      render();
+    }
+
+    function bindActions() {
+      document.querySelectorAll('[data-directory]').forEach(element => element.onclick = () => { state.directory = element.dataset.directory; state.selectedSource = null; state.selectedDiagnostic = null; render(); });
+      document.querySelectorAll('[data-select-skill]').forEach(element => element.onclick = event => { if (event.target.closest('[data-toggle],[data-mode]')) return; state.selected = element.dataset.selectSkill; state.selectedSource = null; state.selectedDiagnostic = null; render(); });
+      document.querySelectorAll('[data-select-source]').forEach(element => element.onclick = event => { if (event.target.closest('[data-toggle-source-enablement],[data-collapse-source]')) return; state.selectedSource = element.dataset.selectSource; state.selectedDiagnostic = null; render(); });
+      document.querySelectorAll('[data-select-diagnostic]').forEach(element => element.onclick = () => { state.selectedDiagnostic = element.dataset.selectDiagnostic; render(); });
+      document.querySelectorAll('[data-toggle]').forEach(element => element.onclick = event => { event.stopPropagation(); toggleSkill(element.dataset.toggle, element.dataset.dir); });
+      document.querySelectorAll('[data-toggle-source-enablement]').forEach(element => element.onclick = event => { event.stopPropagation(); toggleSourceEnablements(element.dataset.toggleSourceEnablement, state.directory); });
+      document.querySelectorAll('[data-collapse-source]').forEach(element => element.onclick = event => { event.stopPropagation(); const source = element.dataset.collapseSource; setSourceCollapsed(source, !state.collapsedSources.includes(source)); });
+      document.querySelectorAll('[data-cell]').forEach(element => element.onclick = event => { if (event.target.closest('[data-toggle],[data-mode]')) return; toggleSkill(element.dataset.cell, element.dataset.dir); });
+      document.querySelectorAll('[data-mode]').forEach(element => element.onclick = event => { event.stopPropagation(); changeMode(element.dataset.skill, element.dataset.dir, element.dataset.mode); });
+      document.querySelectorAll('[data-filter]').forEach(element => element.onclick = () => { state.filter = element.dataset.filter; render(); });
+      document.querySelectorAll('[data-search]').forEach(element => element.oninput = () => { state.query = element.value; render(); requestAnimationFrame(() => { const input = document.querySelector('[data-search]'); input?.focus(); input?.setSelectionRange(state.query.length,state.query.length); }); });
+      document.querySelectorAll('[data-review]').forEach(element => element.onclick = reviewModal);
+      document.querySelectorAll('[data-save-exit]').forEach(element => element.onclick = saveAndReconcile);
+      document.querySelectorAll('[data-confirm-save-exit]').forEach(element => element.onclick = reviewModal);
+      document.querySelectorAll('[data-discard]').forEach(element => element.onclick = () => { state.staged = []; notify('Staged edits discarded'); render(); });
+    }
+
+    function bindModal() {
+      document.querySelector('[data-close-review]').onclick = () => { document.getElementById('modal').innerHTML = ''; };
+      document.querySelector('[data-confirm-save]').onclick = () => {
+        performSave();
+      };
+    }
+
+    function notify(message) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message; toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 1900);
+    }
+
+    function setVariant(key) {
+      const params = new URLSearchParams(location.search); params.set('variant', key);
+      history.replaceState(null, '', `${location.pathname}?${params}`); render();
+    }
+    function cycle(delta) { const keys = Object.keys(variants); const index = keys.indexOf(variantKey()); setVariant(keys[(index + delta + keys.length) % keys.length]); }
+    document.getElementById('prev').onclick = () => cycle(-1);
+    document.getElementById('next').onclick = () => cycle(1);
+    window.addEventListener('keydown', event => {
+      if (['INPUT','TEXTAREA'].includes(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
+      if (event.key === 'ArrowLeft') cycle(-1);
+      if (event.key === 'ArrowRight') cycle(1);
+      if (event.ctrlKey && event.key.toLowerCase() === 's') { event.preventDefault(); saveAndReconcile(); return; }
+      if (event.key === 's') reviewModal();
+      if (event.ctrlKey && event.key.toLowerCase() === 'l') { event.preventDefault(); notify('Target and Library workspaces would toggle'); return; }
+      if (event.key === 'Tab') { event.preventDefault(); moveDirectory(event.shiftKey ? -1 : 1); return; }
+      if (event.key === 'j') moveRow(1);
+      if (event.key === 'k') moveRow(-1);
+      if (event.key === 'J') moveSource(1);
+      if (event.key === 'K') moveSource(-1);
+      if (event.key === 'h') {
+        const source = state.selectedSource || currentSkill().source;
+        setSourceCollapsed(source, true);
+      }
+      if (event.key === 'l') {
+        const source = state.selectedSource || currentSkill().source;
+        setSourceCollapsed(source, false);
+      }
+      if (event.key === ' ' && variantKey() === 'A') {
+        event.preventDefault();
+        if (state.selectedSource) toggleSourceEnablements(state.selectedSource, state.directory);
+        else toggleSkill(state.selected, state.directory);
+      }
+      if (event.key === 'm' && variantKey() === 'A' && !state.selectedSource) {
+        const skill = currentSkill();
+        if (isEnabled(skill, state.directory)) changeMode(skillId(skill), state.directory, skill.desired[state.directory] === 'linked' ? 'copied' : 'linked');
+      }
+    });
+    window.addEventListener('popstate', render);
+    render();
+  </script>
+</body>
+</html>
