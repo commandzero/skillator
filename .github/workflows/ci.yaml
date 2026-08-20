@@ -6,13 +6,17 @@ on:
 
 jobs:
   test:
+    env:
+      CARGO_BUILD_WARNINGS: deny
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy, rustfmt
       - run: cargo fmt --check
       - run: cargo test --all-targets
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets

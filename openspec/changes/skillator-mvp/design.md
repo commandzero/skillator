@@ -2,7 +2,7 @@
 
 The repository currently contains only a minimal Rust binary and the canonical domain glossary in `CONTEXT.md`. This change introduces the first functional version of Skillator, so there is no legacy runtime architecture or configuration to preserve. The behavior contracts live in the five capability specs in this change.
 
-The design must keep filesystem mutation understandable and testable across macOS, Linux, and WSL while serving both a synchronous TUI and a non-interactive command. The same validated configuration, discovery, observation, planning, and execution behavior must be shared by both interfaces.
+The design must keep filesystem mutation understandable and testable across macOS, Linux, and WSL while serving both a synchronous TUI and a non-interactive command. The same validated configuration, discovery, observation, planning, and execution behavior must be shared by both interfaces. First-run onboarding also needs a bounded transaction spanning Library initialization, import of existing user-scoped Skills, and User Scope desired state.
 
 ## Goals / Non-Goals
 
@@ -13,6 +13,7 @@ The design must keep filesystem mutation understandable and testable across macO
 - Preserve a complete trustworthy result when independent filesystem operations partially succeed.
 - Keep configuration codecs strict and prevent raw YAML or machine-local paths from leaking across module boundaries.
 - Test behavior at stable module and workflow seams with real temporary filesystems and Git repositories.
+- Treat User Scope as an inherited configuration layer in the current Target workspace without pretending it is a Git repository.
 
 **Non-Goals:**
 
@@ -74,7 +75,7 @@ Alternative considered: a comprehensive shared model graph. Rejected because it 
 
 ### Hide both YAML documents behind one strict configuration seam
 
-`config` owns separate Library and Repository document codecs behind a consistent interface. It performs version dispatch, syntax and structural validation, conversion into validated domain values, deterministic serialization, and conditional atomic replacement. Raw serialization structures never escape.
+`config` owns Library Configuration plus the shared desired-state codec used by Repository and User Scope Configuration behind a consistent interface. It performs version dispatch, syntax and structural validation, conversion into validated domain values, deterministic serialization, and conditional atomic replacement. Raw serialization structures never escape.
 
 Each successful load returns a validated document plus a content fingerprint. Save compares that fingerprint with the current file and refuses stale content rather than merging or overwriting external edits. Absent documents have an explicit absent fingerprint. Writes stage a sibling file and rename it into place where supported.
 
@@ -129,6 +130,28 @@ The prepared save is opaque and non-cloneable. A configuration-write failure pre
 
 Alternative considered: have CLI and TUI orchestrate lower modules directly. Rejected because the two interfaces would drift in validation, lock ordering, and partial-apply behavior.
 
+### Treat User Scope as an inherited layer, not a second Target picker
+
+The Target workspace flattens User Scope Skill Directories and Repository Skill Directories into one tab strip. The first tab is the primary User Scope at `~/.agents/skills`; repository tabs follow. User configuration remains independently saved at `~/.agents/skillator.yaml`. A User-only Enablement is projected into repository tables as read-only `[u] user`; an explicit repository Enablement remains visible and receives an overlap advisory.
+
+User Scope reuses desired-state validation and materialization inspection, but its root is the user's home directory and it has no Git control-file or index policy. The implementation must carry scope explicitly rather than fake a Git repository or overload `MaterializationKind` with `user`.
+
+Alternative considered: a separate User Target screen. Rejected because User Scope is inherited context for every repository and the user explicitly needs to see that relationship while configuring the current Target.
+
+### Make first-run onboarding one reviewed transaction
+
+Missing Library Configuration routes the root TUI into onboarding before Repository observation. The onboarding model stages the first Location, inventories `~/.agents/skills` physically, preselects valid physical Skills, and offers Source registration for existing valid symlinks. The final review names all moves, links, registrations, configuration files, collisions, and skipped entries.
+
+Execution stages and verifies destination content and both YAML documents before displacing originals. Original user-scoped entries and prior documents remain recoverable until all publication succeeds. A failure rolls back the whole onboarding attempt; rollback failure retains named Recovery Artifacts. Existing symlinks are never followed for movement and retain their original stored text.
+
+Alternative considered: saving the Library first and importing Skills incrementally. Rejected because it can strand a half-initialized User Scope and contradicts the single-confirmation onboarding contract.
+
+### Keep Library acquisition explicit and local
+
+Library inventory rows carry a presentation-level acquisition mode independent of Target Materialization mode. The first Location's `local/library` Source is the sole write destination: `move` transfers and is the default, `copy` retains both physical trees, `link` creates a local-Library symlink, and blank mode keeps registration in place. Acquisition is prepared as a reviewed batch with destination collision checks, sibling staging, retained move backups, conditional Library Configuration save, and rollback. Additional Locations remain discovery and acquisition sources rather than mutation destinations.
+
+The table model keeps metadata description, selected mode, observed diagnostics, and pending Save action in separate fields. This makes the final Action column trustworthy and permits `/pending` without parsing prose or conflating current state with future work.
+
 ### Keep Git integration fact-oriented and index-read-only
 
 `git` hides whether facts come from Git subprocesses or a library. It resolves worktree roots, identifies Source repository boundaries and remotes, and inspects exact paths for tracked, staged, unmerged, and ignored state. It returns structured facts and command failures but does not classify Drift or mutate the index.
@@ -146,6 +169,8 @@ Model + Action → Model + Effect
 The Model owns selection, filters, collapsed groups, overlays, typed staged edits, and any pending prepared-save capability. The event loop executes Effects through `app` workflows and feeds typed results back as Actions. Widgets do not inspect files, run Git, serialize configuration, or classify safety.
 
 Alternative considered: stateful widgets calling services. Rejected because navigation and save-confirmation behavior would require terminal-driven tests and could bypass application invariants.
+
+The renderer owns one indexed 256-color palette rather than scattering named terminal colors across widgets. Row selection contributes only a background layer so semantic warning, error, unavailable, and structural foreground treatments remain legible and testable.
 
 ### Keep CLI rendering downstream of semantic results
 
@@ -169,7 +194,8 @@ Tests assert observable outcomes through module interfaces rather than preservin
 ## Risks / Trade-offs
 
 - **Filesystem behavior differs across mounts and operating systems** → Probe required capabilities, stage on the destination filesystem, and return Blocked or capability diagnostics without fallback.
-- **Strict YAML support can vary between libraries** → Constrain the accepted and emitted data model, pin the selected implementation, and validate duplicate-key, multi-document, quoting, and deterministic-output fixtures before relying on it.
+- **Strict YAML support can vary between libraries** → Constrain the accepted and emitted data model, select a compatible semver range, retain the application lockfile, and validate duplicate-key, multi-document, quoting, and deterministic-output fixtures before relying on it.
+- **Onboarding spans two configurations and multiple filesystem roots** → Preflight the entire plan, stage before displacement, retain originals until complete, and test rollback at every publication boundary without claiming power-loss durability.
 - **Partial application is more complex than fail-fast mutation** → Keep one immutable reviewed Plan, isolate Expected Entry operations, retain recoverable backups, and always return fresh final observation.
 - **Absolute links are machine-specific** → Keep Source paths only in user-local Library configuration and recreate links from portable Repository Configuration on each machine.
 - **Synchronous scans may pause the TUI on large Libraries** → Keep the MVP synchronous and surface progress where useful; do not add async state until real measurements justify it.

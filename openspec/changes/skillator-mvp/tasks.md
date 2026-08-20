@@ -1,6 +1,6 @@
 ## 1. Project Foundation
 
-- [x] 1.1 Add the minimal pinned runtime and test dependencies for CLI parsing, TUI rendering, serialization, YAML handling, filesystem locking, terminal detection, and temporary test repositories.
+- [x] 1.1 Add minimal semver-compatible runtime and test dependencies plus an application lockfile for CLI parsing, TUI rendering, serialization, YAML handling, filesystem locking, terminal detection, and temporary test repositories.
 - [x] 1.2 Convert the package to a library plus thin binary and create the agreed `domain`, `config`, `git`, `library`, `target`, private `materialization`, `reconcile`, `app`, `cli`, and `tui` module boundaries.
 - [x] 1.3 Add isolated test-home, temporary filesystem, and real temporary Git repository fixtures that never read or write the developer's actual configuration.
 - [x] 1.4 Add cross-platform CI jobs for macOS and Linux and document the WSL acceptance run against its Linux filesystem.
@@ -69,7 +69,7 @@
 
 - [x] 8.1 Implement the pure TUI Model, Action, Effect reducer and terminal lifecycle with restoration on every exit path.
 - [x] 8.2 Implement the Library hierarchy table, Source and Skill registration controls, expansion state, contextual inspector, first-run staging, and save review.
-- [x] 8.3 Implement the Target Skill Directory strip and one-directory hierarchy table with Source rollups, Enabled, Mode, Skill, Description, State, and directory diagnostics.
+- [x] 8.3 Implement the Target Skill Directory strip and one-directory hierarchy table with Source rollups, checkbox, Mode, Skill, Description, Action, inspector state, and directory diagnostics.
 - [x] 8.4 Implement the complete Vim-style navigation, Source group movement, collapse and expand, filters, bulk selection, mode switching, and help overlay.
 - [x] 8.5 Implement validated Skill Directory add, edit, and delete overlays with Generic/Codex, Claude, and custom choices.
 - [x] 8.6 Implement Target switching and `Ctrl+L` workspace toggling with discard-or-return handling for staged edits.
@@ -83,3 +83,82 @@
 - [ ] 9.3 Run the core acceptance suite on macOS, Linux, and WSL's Linux filesystem and verify capability failures on mounted filesystems preserve content without fallback.
 - [x] 9.4 Perform the short manual terminal smoke check for table readability, navigation feel, confirmations, result acknowledgement, and terminal restoration.
 - [x] 9.5 Verify deferred features have no placeholder commands or accidental interfaces and validate the complete OpenSpec change in strict mode.
+
+## 10. First-run Onboarding and User Scope
+
+- [x] 10.1 Add User Scope terminology and strict `~/.agents/skillator.yaml` loading, validation, canonical serialization, fingerprints, and first-run defaults using home-relative Skill Directory paths.
+- [x] 10.2 Implement User Scope observation, planning, locking, and reconciliation without Repository Git control-file or index behavior.
+- [x] 10.3 Implement read-only onboarding inventory for physical Skills, existing Skill symlinks, invalid entries, inferred Git or local Sources, and collision diagnostics under `~/.agents/skills`.
+- [x] 10.4 Implement the staged first-Library path prompt with editable `./library` default and a complete import, registration, move, and relink review.
+- [x] 10.5 Implement transactional onboarding publication and rollback across Library content, `~/.skillator/library.yaml`, `~/.agents/skillator.yaml`, and user-scoped links, including deterministic fault-injection coverage.
+- [x] 10.6 Route missing Library Configuration into onboarding and open the current Target's first Repository tab after success without showing expected initialization as a warning.
+- [x] 10.7 Integrate User Scope Skill Directories as the first Target tabs, keep User and Repository staged saves separate, and support additional `User · <label>` tabs.
+- [x] 10.8 Project inherited User Enablements into Repository tables as read-only `[u] user`, preserve explicit Repository modes, and warn on simultaneous User and Repository activation.
+- [x] 10.9 Add reducer, rendered-screen, workflow, rollback, collision, existing-symlink, and end-to-end first-run acceptance tests.
+- [x] 10.10 Re-run macOS and Linux validation, document pending native WSL verification, and validate the amended OpenSpec change in strict mode.
+  - macOS and a read-only mounted `rust:latest` Linux container pass the complete 131-test suite; native WSL and mounted-filesystem capability checks remain tracked by 9.3.
+
+## 11. Library Acquisition and Action-focused Tables
+
+- [x] 11.1 Separate metadata Description, displayed Mode, observed inspector details, and pending Save Action in the TUI row model; use unlabeled checkbox, `Mode`, and final `Action` headers.
+- [x] 11.2 Add `move`, `copy`, `link`, and blank in-place Library acquisition modes with `move` as the default for newly selected external Skills and `m` cycling modes.
+- [x] 11.3 Implement collision-safe transactional acquisition into the first Location's `local/library` Source and integrate resulting registration changes.
+- [x] 11.4 Apply move/copy/link choices to first-run onboarding while preserving the agreed User Scope materialization result.
+- [x] 11.5 Add `/pending` and `/pending actions` filtering plus reducer, rendered-table, acquisition, collision, and rollback tests.
+- [x] 11.6 Run formatting, strict Clippy, macOS and Linux suites, strict OpenSpec validation, and record native WSL as the remaining platform task.
+
+## 12. TUI Copy and Save Affordance
+
+- [x] 12.1 Populate onboarding Skill descriptions from `SKILL.md` frontmatter instead of filesystem-kind prose.
+- [x] 12.2 Shorten Library and onboarding Action values to one-to-three-word phrases.
+- [x] 12.3 Show Save and Exit keys persistently in the Library footer and add focused regression coverage.
+
+## 13. Arrow-key Navigation
+
+- [x] 13.1 Map plain and Shift-modified arrow keys to the equivalent `h/j/k/l` navigation actions while leaving Ctrl-modified arrows unmapped.
+- [x] 13.2 Add exact key-event regression coverage and rerun TUI and strict validation suites.
+
+## 14. First-run Location Affordance
+
+- [x] 14.1 Start onboarding in the normal table with the staged `./library` Location selected instead of automatically opening the Location editor.
+- [x] 14.2 Advertise the explicit `e` edit action and the editor's Enter/Escape controls, with startup-model and rendered-screen regression coverage.
+
+## 15. TUI 256-color Palette
+
+- [x] 15.1 Centralize the indexed palette and apply purple workspace borders, blue modal borders, bone titles and hotkeys, yellow warnings, red errors, dim structural glyphs, and dark-blue background-only selection.
+- [x] 15.2 Add rendered-style regression coverage and rerun TUI, Rust, and strict OpenSpec validation.
+
+## 16. TUI Footer and Header Refinement
+
+- [x] 16.1 Brighten structural gray, move the right-aligned action legend into the main bottom border without a second rule, and label the Library hierarchy column `Location`.
+- [x] 16.2 Add exact rendered-buffer regression coverage and rerun TUI, Rust, and strict OpenSpec validation.
+
+## 17. Confirmation Semantics and Clean Paths
+
+- [x] 17.1 Remove redundant current-directory components from resolved Library paths and render confirmation questions and hotkeys separately from normal desired-action rows.
+- [x] 17.2 Add path and styled-confirmation regressions and rerun TUI, Rust, and strict OpenSpec validation.
+
+## 18. Modal Titles and Confirmation Borders
+
+- [x] 18.1 Give every modal a padded capitalized purpose title and move confirmation controls from modal bodies into bottom borders.
+- [x] 18.2 Add rendered modal-chrome regressions and rerun TUI, Rust, and strict OpenSpec validation.
+
+## 19. First Repository Diagnostic Noise
+
+- [x] 19.1 Stop classifying an absent first-save Skill Directory and control file as a diagnostic while preserving the Safe creation plan and genuine existing-directory diagnostics.
+- [x] 19.2 Add a first-save workflow regression and rerun TUI, Rust, and strict OpenSpec validation.
+
+## 20. Action-driven Row Color
+
+- [x] 20.1 Derive ordinary entry warning color only from non-empty Action and structured row classification, never from free-form Skill metadata or inspector text.
+- [x] 20.2 Add rendered regressions for status-like description words and pending Actions, then rerun TUI, Rust, and strict OpenSpec validation.
+
+## 21. Target-first Launch
+
+- [x] 21.1 Select the first Repository Skill Directory when root Skillator opens a Git Target, while retaining User tabs at the start of the strip and falling back to User only when no Repository tab exists.
+- [x] 21.2 Add launch-selection regression coverage and rerun TUI, Rust, and strict OpenSpec validation.
+
+## 22. Untouched First-run Tab Switching
+
+- [x] 22.1 Keep implicit first-run User and Repository defaults save-ready without classifying them as staged edits for tab navigation.
+- [x] 22.2 Add an untouched-startup scope-switch regression and rerun TUI, Rust, and strict OpenSpec validation.

@@ -1,8 +1,9 @@
 //! Terminal reducer, rendering, and lifecycle.
 
+use crate::acquisition::{LibraryAcquisition, LibraryAcquisitionMode};
 use crate::app::{
-    AppPaths, LibraryWorkflow, PreparedTargetSave, ReportStatus, TargetSession, TargetWorkflow,
-    WorkflowError,
+    AppPaths, LibraryWorkflow, PreparedTargetSave, PreparedUserScopeSave, ReportStatus,
+    TargetSession, TargetWorkflow, UserScopeSession, UserScopeWorkflow, WorkflowError,
 };
 use crate::config::{
     LibraryConfig, LibraryLocationConfig, RegisteredSkillConfig, RegisteredSourceConfig,
@@ -13,26 +14,43 @@ use crate::domain::{
     SkillPath, SourceKey,
 };
 use crate::library::{LibrarySnapshot, Registration, SkillValidity};
+use crate::onboarding::{OnboardingEntryKind, OnboardingWorkflow, PreparedOnboarding};
 use crate::reconcile::Authorization;
 use crate::target::{MaterializationState, ObservedState, observe};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row as TableRow, Table};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row as TableRow, Table};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+const PURPLE: Color = Color::Indexed(99);
+const BLUE: Color = Color::Indexed(33);
+const BONE: Color = Color::Indexed(230);
+const WARNING: Color = Color::Indexed(220);
+const ERROR: Color = Color::Indexed(196);
+const DIM_FOREGROUND: Color = Color::Indexed(244);
+const SELECTED_BACKGROUND: Color = Color::Indexed(24);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Workspace {
     Target,
     Library,
+    Onboarding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TargetTabScope {
+    User,
+    Repository,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckState {
     Checked,
+    User,
     Unchecked,
     Mixed,
     Invalid,
@@ -56,8 +74,10 @@ pub struct Row {
     check: Option<CheckState>,
     mode: Option<MaterializationKind>,
     state: String,
+    action: String,
     details: String,
     initial_state: String,
+    initial_action: String,
     initial_check: Option<CheckState>,
     initial_mode: Option<MaterializationKind>,
     available: bool,
@@ -67,6 +87,11 @@ pub struct Row {
     source_path: Option<String>,
     skill_path: Option<String>,
     key_collision: bool,
+    acquisition_mode: Option<LibraryAcquisitionMode>,
+    initial_acquisition_mode: Option<LibraryAcquisitionMode>,
+    acquisition_pending: bool,
+    acquisition_source: Option<std::path::PathBuf>,
+    acquisition_source_root_git: bool,
 }
 
 struct SkillInventoryRow {
@@ -95,8 +120,10 @@ impl Row {
             check: Some(check),
             mode: None,
             state: String::new(),
+            action: String::new(),
             details: String::new(),
             initial_state: String::new(),
+            initial_action: String::new(),
             initial_check: Some(check),
             initial_mode: None,
             available: true,
@@ -106,6 +133,11 @@ impl Row {
             source_path: None,
             skill_path: None,
             key_collision: false,
+            acquisition_mode: None,
+            initial_acquisition_mode: None,
+            acquisition_pending: false,
+            acquisition_source: None,
+            acquisition_source_root_git: false,
         }
     }
 
@@ -131,8 +163,10 @@ impl Row {
             }),
             mode: Some(mode),
             state: state.into(),
+            action: String::new(),
             details: String::new(),
             initial_state: String::new(),
+            initial_action: String::new(),
             initial_check: Some(if enabled {
                 CheckState::Checked
             } else {
@@ -146,8 +180,36 @@ impl Row {
             source_path: None,
             skill_path: None,
             key_collision: false,
+            acquisition_mode: None,
+            initial_acquisition_mode: None,
+            acquisition_pending: false,
+            acquisition_source: None,
+            acquisition_source_root_git: false,
         }
         .with_initial_state()
+    }
+
+    pub fn inherited_user(
+        group: impl Into<String>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        available: bool,
+        state: impl Into<String>,
+    ) -> Self {
+        let mut row = Self::skill(
+            group,
+            name,
+            description,
+            false,
+            available,
+            MaterializationKind::Linked,
+            state,
+        );
+        row.check = Some(CheckState::User);
+        row.initial_check = Some(CheckState::User);
+        row.mode = None;
+        row.initial_mode = None;
+        row
     }
 
     pub fn location(path: impl Into<String>) -> Self {
@@ -160,8 +222,10 @@ impl Row {
             check: None,
             mode: None,
             state: String::new(),
+            action: String::new(),
             details: String::new(),
             initial_state: String::new(),
+            initial_action: String::new(),
             initial_check: None,
             initial_mode: None,
             available: true,
@@ -171,6 +235,11 @@ impl Row {
             source_path: None,
             skill_path: None,
             key_collision: false,
+            acquisition_mode: None,
+            initial_acquisition_mode: None,
+            acquisition_pending: false,
+            acquisition_source: None,
+            acquisition_source_root_git: false,
         }
     }
 
@@ -184,8 +253,10 @@ impl Row {
             check: None,
             mode: None,
             state: "Warning".to_owned(),
+            action: String::new(),
             details: String::new(),
             initial_state: "Warning".to_owned(),
+            initial_action: String::new(),
             initial_check: None,
             initial_mode: None,
             available: false,
@@ -195,6 +266,11 @@ impl Row {
             source_path: None,
             skill_path: None,
             key_collision: false,
+            acquisition_mode: None,
+            initial_acquisition_mode: None,
+            acquisition_pending: false,
+            acquisition_source: None,
+            acquisition_source_root_git: false,
         }
     }
 
@@ -216,6 +292,10 @@ impl Row {
 
     pub fn state(&self) -> &str {
         &self.state
+    }
+
+    pub fn action(&self) -> &str {
+        &self.action
     }
 
     fn source_inventory(
@@ -269,6 +349,7 @@ impl Row {
 
     fn with_initial_state(mut self) -> Self {
         self.initial_state = self.state.clone();
+        self.initial_action = self.action.clone();
         self
     }
 }
@@ -295,6 +376,7 @@ pub enum Overlay {
     GuardedConfirmation(String),
     DiscardWorkspace,
     DiscardTarget,
+    SwitchScope { from: usize, to: usize },
     DirectoryEditor { edit: bool, input: String },
     LocationEditor { edit: bool, input: String },
     SourceKeyEditor(String),
@@ -318,6 +400,7 @@ pub struct Model {
     directory_count: usize,
     directory_labels: Vec<String>,
     directory_values: Vec<String>,
+    directory_scopes: Vec<TargetTabScope>,
 }
 
 impl Model {
@@ -334,6 +417,7 @@ impl Model {
             directory_count: 1,
             directory_labels: Vec::new(),
             directory_values: Vec::new(),
+            directory_scopes: Vec::new(),
         }
     }
 
@@ -360,26 +444,48 @@ impl Model {
     fn visible_indices(&self) -> Vec<usize> {
         let needle = self.filter.to_ascii_lowercase();
         let filtering = !needle.is_empty();
+        let pending_only = matches!(needle.as_str(), "pending" | "pending actions");
         let matching_groups: BTreeSet<_> = self
             .rows
             .iter()
             .filter(|row| {
-                row.kind == RowKind::Skill
-                    && (row.name.to_ascii_lowercase().contains(&needle)
-                        || row.description.to_ascii_lowercase().contains(&needle))
+                row.kind == RowKind::Skill && row_matches_filter(row, &needle, pending_only)
             })
             .filter_map(|row| row_identity(row).map(str::to_owned))
+            .collect();
+        let matching_locations: BTreeSet<_> = self
+            .rows
+            .iter()
+            .filter(|row| match row.kind {
+                RowKind::Source => {
+                    row_matches_filter(row, &needle, pending_only)
+                        || row_identity(row)
+                            .is_some_and(|identity| matching_groups.contains(identity))
+                }
+                RowKind::Skill => row_matches_filter(row, &needle, pending_only),
+                _ => false,
+            })
+            .filter_map(|row| row.location_index)
             .collect();
         self.rows
             .iter()
             .enumerate()
             .filter_map(|(index, row)| match row.kind {
+                RowKind::Location if filtering => (row_matches_filter(row, &needle, pending_only)
+                    || row
+                        .location_index
+                        .is_some_and(|location| matching_locations.contains(&location)))
+                .then_some(index),
                 RowKind::Source if filtering => row_identity(row)
                     .is_some_and(|identity| matching_groups.contains(identity))
-                    .then_some(index),
-                RowKind::Skill if filtering => (row.name.to_ascii_lowercase().contains(&needle)
-                    || row.description.to_ascii_lowercase().contains(&needle))
-                .then_some(index),
+                    .then_some(index)
+                    .or_else(|| row_matches_filter(row, &needle, pending_only).then_some(index)),
+                RowKind::Skill if filtering => {
+                    row_matches_filter(row, &needle, pending_only).then_some(index)
+                }
+                RowKind::Diagnostic if filtering => {
+                    row_matches_filter(row, &needle, pending_only).then_some(index)
+                }
                 RowKind::Skill => (!row_identity(row)
                     .is_some_and(|identity| self.collapsed.contains(identity)))
                 .then_some(index),
@@ -438,6 +544,8 @@ impl Model {
             CheckState::Unchecked
         } else if checks.iter().all(|state| *state == CheckState::Checked) {
             CheckState::Checked
+        } else if checks.iter().all(|state| *state == CheckState::User) {
+            CheckState::User
         } else if checks.iter().all(|state| *state == CheckState::Unchecked) {
             CheckState::Unchecked
         } else {
@@ -450,6 +558,16 @@ impl Model {
         {
             source.check = Some(state);
         }
+    }
+}
+
+fn row_matches_filter(row: &Row, needle: &str, pending_only: bool) -> bool {
+    if pending_only {
+        !row.action.is_empty()
+    } else {
+        row.name.to_ascii_lowercase().contains(needle)
+            || row.description.to_ascii_lowercase().contains(needle)
+            || row.action.to_ascii_lowercase().contains(needle)
     }
 }
 
@@ -495,6 +613,8 @@ pub enum Effect {
     DeleteDirectory,
     RetrySave,
     DirectoryChanged { from: usize, to: usize },
+    SaveScopeAndSwitch { from: usize, to: usize },
+    DiscardScopeAndSwitch { from: usize, to: usize },
     CommitSave,
     CancelSave,
 }
@@ -561,6 +681,20 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
                 model.dirty = false;
                 model.overlay = Overlay::TargetPicker(String::new());
             }
+            Action::Confirm if matches!(model.overlay, Overlay::SwitchScope { .. }) => {
+                let Overlay::SwitchScope { from, to } = model.overlay else {
+                    unreachable!()
+                };
+                model.overlay = Overlay::None;
+                return vec![Effect::SaveScopeAndSwitch { from, to }];
+            }
+            Action::DeleteDirectory if matches!(model.overlay, Overlay::SwitchScope { .. }) => {
+                let Overlay::SwitchScope { from, to } = model.overlay else {
+                    unreachable!()
+                };
+                model.overlay = Overlay::None;
+                return vec![Effect::DiscardScopeAndSwitch { from, to }];
+            }
             Action::Confirm
                 if matches!(
                     model.overlay,
@@ -623,17 +757,53 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
                 && row.check == Some(CheckState::Checked)
                 && row.available
             {
-                row.mode = Some(match row.mode {
-                    Some(MaterializationKind::Linked) => MaterializationKind::Copied,
-                    _ => MaterializationKind::Linked,
-                });
-                refresh_staged_state(row);
+                if model.workspace == Workspace::Target {
+                    row.mode = Some(match row.mode {
+                        Some(MaterializationKind::Linked) => MaterializationKind::Copied,
+                        _ => MaterializationKind::Linked,
+                    });
+                    refresh_staged_state(row);
+                } else if row.acquisition_source.is_some() {
+                    row.acquisition_mode = match (model.workspace, row.acquisition_mode) {
+                        (Workspace::Onboarding, Some(LibraryAcquisitionMode::Move)) => {
+                            Some(LibraryAcquisitionMode::Copy)
+                        }
+                        (Workspace::Onboarding, Some(LibraryAcquisitionMode::Copy)) => {
+                            Some(LibraryAcquisitionMode::Link)
+                        }
+                        (Workspace::Onboarding, _) => Some(LibraryAcquisitionMode::Move),
+                        (_, Some(LibraryAcquisitionMode::Move)) => {
+                            Some(LibraryAcquisitionMode::Copy)
+                        }
+                        (_, Some(LibraryAcquisitionMode::Copy)) => {
+                            Some(LibraryAcquisitionMode::Link)
+                        }
+                        (_, Some(LibraryAcquisitionMode::Link)) => None,
+                        (_, None) => Some(LibraryAcquisitionMode::Move),
+                    };
+                    row.acquisition_pending = row.acquisition_mode != row.initial_acquisition_mode;
+                    match model.workspace {
+                        Workspace::Library => refresh_library_action(row),
+                        Workspace::Onboarding => refresh_onboarding_action(row),
+                        Workspace::Target => unreachable!(),
+                    }
+                }
                 model.dirty = true;
             }
         }
         Action::NextDirectory => {
             let previous = model.directory_index;
-            model.directory_index = (model.directory_index + 1) % model.directory_count.max(1);
+            let next = (model.directory_index + 1) % model.directory_count.max(1);
+            if model.dirty
+                && model.directory_scopes.get(previous) != model.directory_scopes.get(next)
+            {
+                model.overlay = Overlay::SwitchScope {
+                    from: previous,
+                    to: next,
+                };
+                return Vec::new();
+            }
+            model.directory_index = next;
             return vec![Effect::DirectoryChanged {
                 from: previous,
                 to: model.directory_index,
@@ -641,10 +811,20 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
         }
         Action::PreviousDirectory => {
             let previous = model.directory_index;
-            model.directory_index = model
+            let next = model
                 .directory_index
                 .checked_sub(1)
                 .unwrap_or(model.directory_count.saturating_sub(1));
+            if model.dirty
+                && model.directory_scopes.get(previous) != model.directory_scopes.get(next)
+            {
+                model.overlay = Overlay::SwitchScope {
+                    from: previous,
+                    to: next,
+                };
+                return Vec::new();
+            }
+            model.directory_index = next;
             return vec![Effect::DirectoryChanged {
                 from: previous,
                 to: model.directory_index,
@@ -661,7 +841,8 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
             };
         }
         Action::AddDirectory => {
-            model.overlay = if model.workspace == Workspace::Library {
+            model.overlay = if matches!(model.workspace, Workspace::Library | Workspace::Onboarding)
+            {
                 Overlay::LocationEditor {
                     edit: false,
                     input: String::new(),
@@ -674,7 +855,7 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
             };
         }
         Action::EditDirectory => {
-            if model.workspace == Workspace::Library {
+            if matches!(model.workspace, Workspace::Library | Workspace::Onboarding) {
                 let input = model
                     .selected_row()
                     .filter(|row| row.kind == RowKind::Location)
@@ -694,7 +875,7 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
             }
         }
         Action::DeleteDirectory => {
-            if model.workspace == Workspace::Library
+            if matches!(model.workspace, Workspace::Library | Workspace::Onboarding)
                 && !model
                     .selected_row()
                     .is_some_and(|row| row.kind == RowKind::Location)
@@ -714,20 +895,34 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
         }
         Action::Help => model.overlay = Overlay::Help,
         Action::RegisterSource => {
-            if let Some(row) = model.rows.get_mut(model.selected)
+            if let Some(row) = model.rows.get(model.selected).cloned()
                 && row.kind == RowKind::Source
+                && model.workspace == Workspace::Library
             {
                 if row.key_collision {
                     model.overlay = Overlay::SourceKeyEditor(row.name.clone());
                     return Vec::new();
                 }
-                row.registered = Some(!row.registered.unwrap_or(false));
+                let identity = row_identity(&row).map(str::to_owned);
+                let registered = !row.registered.unwrap_or(false);
+                let row = &mut model.rows[model.selected];
+                row.registered = Some(registered);
                 row.state = if row.registered == Some(true) {
                     "Registered"
                 } else {
                     "Unregistered"
                 }
                 .to_owned();
+                refresh_source_action(row);
+                if let Some(identity) = identity {
+                    for child in model.rows.iter_mut().filter(|candidate| {
+                        candidate.kind == RowKind::Skill
+                            && row_identity(candidate) == Some(identity.as_str())
+                    }) {
+                        child.registered = Some(registered);
+                        refresh_library_action(child);
+                    }
+                }
                 model.dirty = true;
             }
         }
@@ -758,6 +953,7 @@ fn toggle_selected(model: &mut Model) {
                     candidate.kind == RowKind::Skill
                         && row_identity(candidate) == Some(identity.as_str())
                         && candidate.valid
+                        && candidate.check != Some(CheckState::User)
                 })
                 .collect::<Vec<_>>();
             if eligible.is_empty() {
@@ -780,13 +976,20 @@ fn toggle_selected(model: &mut Model) {
                     if !all_enabled && candidate.mode.is_none() {
                         candidate.mode = Some(MaterializationKind::Linked);
                     }
-                    if model.workspace == Workspace::Target {
-                        refresh_staged_state(candidate);
+                    match model.workspace {
+                        Workspace::Target => refresh_staged_state(candidate),
+                        Workspace::Library => refresh_library_action(candidate),
+                        Workspace::Onboarding => refresh_onboarding_action(candidate),
                     }
                 }
             }
             model.recompute_group(&identity);
             model.dirty = true;
+        }
+        RowKind::Skill if row.check == Some(CheckState::User) => {
+            model.overlay = Overlay::Notice(
+                "This Skill is enabled in User Scope. Manage it from the User tab.".to_owned(),
+            );
         }
         RowKind::Skill if row.available || row.check == Some(CheckState::Checked) => {
             let group = row_identity(&row).map(str::to_owned);
@@ -799,8 +1002,10 @@ fn toggle_selected(model: &mut Model) {
                 if candidate.mode.is_none() {
                     candidate.mode = Some(MaterializationKind::Linked);
                 }
-                if model.workspace == Workspace::Target {
-                    refresh_staged_state(candidate);
+                match model.workspace {
+                    Workspace::Target => refresh_staged_state(candidate),
+                    Workspace::Library => refresh_library_action(candidate),
+                    Workspace::Onboarding => refresh_onboarding_action(candidate),
                 }
             }
             if let Some(group) = group {
@@ -813,20 +1018,92 @@ fn toggle_selected(model: &mut Model) {
 }
 
 fn refresh_staged_state(row: &mut Row) {
-    row.state = if row.check != row.initial_check {
+    row.action = if row.check != row.initial_check {
         if row.check == Some(CheckState::Checked) {
-            "Staged Enable".to_owned()
+            match row.mode {
+                Some(MaterializationKind::Copied) => "Enable copy".to_owned(),
+                _ => "Enable link".to_owned(),
+            }
         } else {
-            "Staged Disable".to_owned()
+            "Disable".to_owned()
         }
     } else if row.check == Some(CheckState::Checked) && row.mode != row.initial_mode {
-        "Staged Convert".to_owned()
+        match row.mode {
+            Some(MaterializationKind::Copied) => "Convert to copy".to_owned(),
+            _ => "Convert to link".to_owned(),
+        }
     } else {
-        row.initial_state.clone()
+        row.initial_action.clone()
+    };
+}
+
+fn refresh_library_action(row: &mut Row) {
+    row.action = if row.check == Some(CheckState::Checked)
+        && let Some(mode) = row.acquisition_mode
+        && (row.initial_check != Some(CheckState::Checked) || row.acquisition_pending)
+    {
+        match mode {
+            LibraryAcquisitionMode::Move => "Move to Library".to_owned(),
+            LibraryAcquisitionMode::Copy => "Copy to Library".to_owned(),
+            LibraryAcquisitionMode::Link => "Link to Library".to_owned(),
+        }
+    } else if row.check != row.initial_check {
+        if row.check == Some(CheckState::Checked) {
+            if row.registered == Some(true) {
+                "Register".to_owned()
+            } else {
+                String::new()
+            }
+        } else {
+            "Unregister".to_owned()
+        }
+    } else {
+        row.initial_action.clone()
+    };
+}
+
+fn refresh_source_action(row: &mut Row) {
+    row.action = match (row.initial_state.as_str(), row.registered) {
+        ("Registered", Some(false)) => "Unregister Source".to_owned(),
+        ("Unregistered" | "Key Collision", Some(true)) => "Register Source".to_owned(),
+        _ => String::new(),
+    };
+}
+
+fn refresh_onboarding_action(row: &mut Row) {
+    row.action = if row.check != Some(CheckState::Checked) {
+        String::new()
+    } else if let Some(mode) = row.acquisition_mode {
+        match mode {
+            LibraryAcquisitionMode::Move => "Move to Library".to_owned(),
+            LibraryAcquisitionMode::Copy => "Copy to Library".to_owned(),
+            LibraryAcquisitionMode::Link => "Link to Library".to_owned(),
+        }
+    } else if row.state == "Register; preserve link" {
+        "Register Source".to_owned()
+    } else {
+        String::new()
     };
 }
 
 pub fn action_for_key(key: KeyEvent) -> Option<Action> {
+    if key.modifiers == KeyModifiers::NONE {
+        match key.code {
+            KeyCode::Left => return Some(Action::Collapse),
+            KeyCode::Down => return Some(Action::MoveDown),
+            KeyCode::Up => return Some(Action::MoveUp),
+            KeyCode::Right => return Some(Action::Expand),
+            _ => {}
+        }
+    } else if key.modifiers == KeyModifiers::SHIFT {
+        match key.code {
+            KeyCode::Left => return Some(Action::Collapse),
+            KeyCode::Down => return Some(Action::NextGroup),
+            KeyCode::Up => return Some(Action::PreviousGroup),
+            KeyCode::Right => return Some(Action::Expand),
+            _ => {}
+        }
+    }
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     match (key.code, control) {
         (KeyCode::Char('s'), true) => Some(Action::Save { fast: true }),
@@ -859,6 +1136,149 @@ pub fn action_for_key(key: KeyEvent) -> Option<Action> {
     }
 }
 
+fn dim_style() -> Style {
+    Style::default().fg(DIM_FOREGROUND)
+}
+
+fn dim_span(text: impl Into<String>) -> Span<'static> {
+    Span::styled(text.into(), dim_style())
+}
+
+fn row_cells(
+    row: &Row,
+    check: &str,
+    mode: &str,
+    collapsed: &BTreeSet<String>,
+    filter: &str,
+) -> Vec<Cell<'static>> {
+    if row.kind == RowKind::Location {
+        return vec![
+            Cell::from(Span::styled("─────────", dim_style())),
+            Cell::from(Span::styled("──────", dim_style())),
+            Cell::from(Line::from(vec![
+                dim_span("── "),
+                Span::raw(row.name.clone()),
+                dim_span(" "),
+            ])),
+            Cell::from(Span::styled(
+                "────────────────────────────────────────────────────────────────",
+                dim_style(),
+            )),
+            Cell::from(Span::styled(
+                "────────────────────────────────",
+                dim_style(),
+            )),
+        ];
+    }
+
+    let check = if row.check == Some(CheckState::Unchecked) {
+        Cell::from(Span::styled(check.to_owned(), dim_style()))
+    } else {
+        Cell::from(check.to_owned())
+    };
+    let name = match row.kind {
+        RowKind::Source => {
+            let glyph = if row_identity(row).is_some_and(|identity| collapsed.contains(identity))
+                && filter.is_empty()
+            {
+                "▸"
+            } else {
+                "▾"
+            };
+            Cell::from(Line::from(vec![
+                dim_span(format!("{glyph} ")),
+                Span::raw(row.name.clone()),
+            ]))
+        }
+        RowKind::Skill => Cell::from(Line::from(vec![
+            dim_span("  └─ "),
+            Span::raw(row.name.clone()),
+        ])),
+        RowKind::Diagnostic => Cell::from(format!("! {}", row.name)),
+        RowKind::Location => unreachable!(),
+    };
+    vec![
+        check,
+        Cell::from(mode.to_owned()),
+        name,
+        Cell::from(row.description.clone()),
+        Cell::from(row.action.clone()),
+    ]
+}
+
+fn row_style(row: &Row, selected: bool) -> Style {
+    let mut style = if row_is_error(row) {
+        Style::default().fg(ERROR)
+    } else if row_is_warning(row) {
+        Style::default().fg(WARNING)
+    } else if !row.available {
+        dim_style()
+    } else {
+        Style::default()
+    };
+    if selected {
+        style = style.bg(SELECTED_BACKGROUND);
+    }
+    style
+}
+
+fn row_is_error(row: &Row) -> bool {
+    if !row.valid || row.check == Some(CheckState::Invalid) || row.key_collision {
+        return true;
+    }
+    matches!(
+        row.state.as_str(),
+        "Error" | "Invalid" | "Blocked" | "Failed" | "Recovery Required"
+    )
+}
+
+fn row_is_warning(row: &Row) -> bool {
+    row.kind == RowKind::Diagnostic || !row.action.is_empty()
+}
+
+fn contains_any(value: &str, needles: &[&str]) -> bool {
+    let value = value.to_ascii_lowercase();
+    needles.iter().any(|needle| value.contains(needle))
+}
+
+fn footer_help(workspace: Workspace) -> Line<'static> {
+    let entries: &[(&str, &str)] = match workspace {
+        Workspace::Target => &[
+            ("s", "save & exit"),
+            ("Ctrl+S", "quick save"),
+            ("Space", "toggle"),
+            ("m", "link/copy"),
+            ("?", "help"),
+        ],
+        Workspace::Library => &[
+            ("s", "save & exit"),
+            ("Ctrl+S", "quick save"),
+            ("Space", "toggle"),
+            ("m", "move/copy/link"),
+            ("?", "help"),
+        ],
+        Workspace::Onboarding => &[
+            ("s", "initialize"),
+            ("e", "edit location"),
+            ("Space", "toggle"),
+            ("m", "move/copy/link"),
+            ("?", "help"),
+        ],
+    };
+    let mut spans = Vec::new();
+    for (index, (key, description)) in entries.iter().enumerate() {
+        if index > 0 {
+            spans.push(dim_span(" · "));
+        }
+        spans.push(Span::styled(
+            (*key).to_owned(),
+            Style::default().fg(BONE).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(format!(" {description}")));
+    }
+    Line::from(spans)
+}
+
 pub fn render(frame: &mut Frame<'_>, model: &Model) {
     let areas = Layout::vertical([
         Constraint::Length(2),
@@ -869,6 +1289,7 @@ pub fn render(frame: &mut Frame<'_>, model: &Model) {
     let title = match model.workspace {
         Workspace::Target => "skillator — Target",
         Workspace::Library => "skillator — Library",
+        Workspace::Onboarding => "skillator — First-time setup",
     };
     let directory_strip = if model.workspace == Workspace::Target {
         model
@@ -888,73 +1309,46 @@ pub fn render(frame: &mut Frame<'_>, model: &Model) {
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                title,
+                Style::default().fg(BONE).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(if model.dirty { "  [staged]" } else { "" }),
-            Span::raw(directory_strip),
+            Span::styled(directory_strip, Style::default().fg(BONE)),
         ])),
         areas[0],
     );
     let header = match model.workspace {
-        Workspace::Target => TableRow::new(["Enabled", "Mode", "Skill", "Description", "State"]),
-        Workspace::Library => TableRow::new(["Status", "", "Name", "Description", ""]),
+        Workspace::Target => TableRow::new(["", "Mode", "Skill", "Description", "Action"]),
+        Workspace::Library => TableRow::new(["", "Mode", "Location", "Description", "Action"]),
+        Workspace::Onboarding => TableRow::new(["", "Mode", "Name", "Description", "Action"]),
     }
-    .style(Style::default().add_modifier(Modifier::BOLD));
+    .style(Style::default().fg(BONE).add_modifier(Modifier::BOLD));
     let visible = model.visible_indices();
     let rows = visible.iter().map(|index| {
         let row = &model.rows[*index];
         let selected = *index == model.selected;
         let check = match row.check {
             Some(CheckState::Checked) => "[x]",
+            Some(CheckState::User) => "[u]",
             Some(CheckState::Unchecked) => "[ ]",
             Some(CheckState::Mixed) => "[-]",
             Some(CheckState::Invalid) => "[!]",
             None => "",
         };
-        let mode = match row.mode {
-            Some(MaterializationKind::Linked) => "link",
-            Some(MaterializationKind::Copied) => "copy",
-            None => "",
-        };
-        let name = match row.kind {
-            RowKind::Location => format!("── {} ", row.name),
-            RowKind::Source => {
-                let glyph = if row_identity(row)
-                    .is_some_and(|identity| model.collapsed.contains(identity))
-                    && model.filter.is_empty()
-                {
-                    "▸"
-                } else {
-                    "▾"
-                };
-                format!("{glyph} {}", row.name)
+        let mode = if row.check == Some(CheckState::User) {
+            "user"
+        } else if let Some(mode) = row.acquisition_mode {
+            mode.label()
+        } else {
+            match row.mode {
+                Some(MaterializationKind::Linked) => "link",
+                Some(MaterializationKind::Copied) => "copy",
+                None => "",
             }
-            RowKind::Skill => format!("  └─ {}", row.name),
-            RowKind::Diagnostic => format!("! {}", row.name),
         };
-        let cells = if row.kind == RowKind::Location {
-            [
-                "─────────".to_owned(),
-                "──────".to_owned(),
-                name,
-                "────────────────────────────────────────────────────────────────".to_owned(),
-                "────────────────────────────────".to_owned(),
-            ]
-        } else {
-            [
-                check.to_owned(),
-                mode.to_owned(),
-                name,
-                row.description.clone(),
-                row.state.clone(),
-            ]
-        };
-        TableRow::new(cells).style(if selected {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
-        } else if !row.available {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default()
-        })
+        TableRow::new(row_cells(row, check, mode, &model.collapsed, &model.filter))
+            .style(row_style(row, selected))
     });
     let widths = [
         Constraint::Length(9),
@@ -963,10 +1357,14 @@ pub fn render(frame: &mut Frame<'_>, model: &Model) {
         Constraint::Percentage(43),
         Constraint::Percentage(20),
     ];
+    let key_help = footer_help(model.workspace).right_aligned();
     frame.render_widget(
-        Table::new(rows, widths)
-            .header(header)
-            .block(Block::default().borders(Borders::ALL)),
+        Table::new(rows, widths).header(header).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(PURPLE))
+                .title_bottom(key_help),
+        ),
         areas[1],
     );
     let inspector = model
@@ -977,36 +1375,71 @@ pub fn render(frame: &mut Frame<'_>, model: &Model) {
             } else {
                 &row.details
             };
-            format!("{} — {}", row.name, details)
+            Line::from(vec![
+                Span::raw(row.name.clone()),
+                dim_span(" — "),
+                Span::raw(details.clone()),
+            ])
         })
         .unwrap_or_default();
-    frame.render_widget(
-        Paragraph::new(inspector).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .title("j/k rows · J/K sources · Space toggle · m mode · ? help"),
-        ),
-        areas[2],
-    );
+    frame.render_widget(Paragraph::new(inspector), areas[2]);
     render_overlay(frame, model);
 }
 
 fn render_overlay(frame: &mut Frame<'_>, model: &Model) {
-    let text = match &model.overlay {
+    let (title, body, footer, confirmation) = match &model.overlay {
         Overlay::None => return,
-        Overlay::Help => {
-            "j/k rows   J/K sources   h/l collapse/expand\nSpace toggle   m link/copy   Tab directories\n/ filter   s confirm save   Ctrl+S fast save\nq quit   t target   a/e/d directory   Ctrl+L library"
-        }
+        Overlay::Help => (
+            "Help".to_owned(),
+            match model.workspace {
+                Workspace::Target => {
+                    "j/k or Up/Down rows   J/K or Shift+Up/Down sources\nh/l or Left/Right collapse/expand   Space toggle   m link/copy\n/ filter (including /pending)   s save & exit   Ctrl+S quick save\nq quit   t target   a/e/d directory   Ctrl+L library"
+                }
+                Workspace::Library | Workspace::Onboarding => {
+                    "j/k or Up/Down rows   J/K or Shift+Up/Down sources\nh/l or Left/Right collapse/expand   Space toggle   m move/copy/link\nr register Source   / filter (including /pending)\ns save & exit   Ctrl+S quick save   q quit   Ctrl+L target"
+                }
+            }
+            .to_owned(),
+            None,
+            false,
+        ),
         Overlay::Filter => return render_filter(frame, &model.filter),
-        Overlay::ConfirmSave => "Save desired state and exit?  y/Enter proceed · n/Esc return",
-        Overlay::ConfirmSaveWarning(message) => message,
-        Overlay::GuardedConfirmation(message) => message,
-        Overlay::DiscardWorkspace => {
-            "Discard staged edits and switch workspace?\ny/Enter discard · n/Esc return"
+        Overlay::ConfirmSave => (
+            "Save and Exit".to_owned(),
+            "Save the desired state?".to_owned(),
+            Some("y/Enter save · n/Esc return".to_owned()),
+            true,
+        ),
+        Overlay::ConfirmSaveWarning(message) => save_warning_modal(message),
+        Overlay::GuardedConfirmation(message) => {
+            let (body, footer) = split_confirmation_message(message);
+            (
+                "Review Guarded Changes".to_owned(),
+                remove_first_line(&body),
+                Some(footer),
+                true,
+            )
         }
-        Overlay::DiscardTarget => {
-            "Discard staged edits and change Target?\ny/Enter discard · n/Esc return"
-        }
+        Overlay::DiscardWorkspace => (
+            "Discard Workspace Changes".to_owned(),
+            "Discard staged edits before switching workspaces?".to_owned(),
+            Some("y/Enter discard · n/Esc return".to_owned()),
+            true,
+        ),
+        Overlay::DiscardTarget => (
+            "Discard Target Changes".to_owned(),
+            "Discard staged edits before changing Target?".to_owned(),
+            Some("y/Enter discard · n/Esc return".to_owned()),
+            true,
+        ),
+        Overlay::SwitchScope { .. } => (
+            "Switch Scope".to_owned(),
+            "This scope has staged edits.".to_owned(),
+            Some(
+                "y/Enter save and switch · d discard and switch · n/Esc return".to_owned(),
+            ),
+            true,
+        ),
         Overlay::DirectoryEditor { edit, input } => {
             let mode = if *edit { "Edit" } else { "Add" };
             return render_input(
@@ -1018,7 +1451,12 @@ fn render_overlay(frame: &mut Frame<'_>, model: &Model) {
         }
         Overlay::LocationEditor { edit, input } => {
             let mode = if *edit { "Edit" } else { "Add" };
-            return render_input(frame, &format!("{mode} Library Location"), "path", input);
+            return render_input(
+                frame,
+                &format!("{mode} Library Location"),
+                "path",
+                input,
+            );
         }
         Overlay::SourceKeyEditor(input) => {
             return render_input(
@@ -1031,19 +1469,190 @@ fn render_overlay(frame: &mut Frame<'_>, model: &Model) {
         Overlay::TargetPicker(input) => {
             return render_input(frame, "Change Target", "directory", input);
         }
-        Overlay::ConfirmDelete => "Delete the selected directory or location? y/Enter · n/Esc",
-        Overlay::Busy => "Target Busy. Enter retry · Esc return to editing",
-        Overlay::Notice(message) => message,
-        Overlay::Result(message) => message,
+        Overlay::ConfirmDelete => (
+            "Delete Selection".to_owned(),
+            "Delete the selected directory or location?".to_owned(),
+            Some("y/Enter delete · n/Esc return".to_owned()),
+            true,
+        ),
+        Overlay::Busy => (
+            "Target Busy".to_owned(),
+            "Another process is changing this Target.".to_owned(),
+            Some("Enter retry · Esc return to editing".to_owned()),
+            true,
+        ),
+        Overlay::Notice(message) => (
+            "Notice".to_owned(),
+            message.to_owned(),
+            Some("Enter close · Esc close".to_owned()),
+            false,
+        ),
+        Overlay::Result(message) => (
+            "Save Result".to_owned(),
+            message.to_owned(),
+            Some("Enter exit".to_owned()),
+            false,
+        ),
+    };
+    let text = if confirmation {
+        confirmation_text(&body)
+    } else {
+        Text::styled(body, overlay_text_style(&model.overlay))
     };
     let area = centered(frame.area(), 70, 30);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(text)
             .wrap(ratatui::widgets::Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title("skillator")),
+            .block(modal_block(&title, footer.as_deref())),
         area,
     );
+}
+
+fn save_warning_modal(message: &str) -> (String, String, Option<String>, bool) {
+    let (body, footer) = split_confirmation_message(message);
+    if message.starts_with("Initialize Skillator") {
+        (
+            "Initialize Skillator".to_owned(),
+            remove_first_line(&body),
+            Some(footer),
+            true,
+        )
+    } else if message.starts_with("Save Library changes?") {
+        (
+            "Save Library Changes".to_owned(),
+            remove_question_from_first_line(&body),
+            Some(footer),
+            true,
+        )
+    } else {
+        ("Confirm Save".to_owned(), body, Some(footer), true)
+    }
+}
+
+fn split_confirmation_message(message: &str) -> (String, String) {
+    let mut lines = message.lines().collect::<Vec<_>>();
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    let footer = if lines
+        .last()
+        .is_some_and(|line| line.contains("Enter") || line.contains("Esc"))
+    {
+        lines.pop().unwrap_or_default().to_owned()
+    } else {
+        String::new()
+    };
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    (lines.join("\n"), footer)
+}
+
+fn remove_first_line(text: &str) -> String {
+    text.split_once('\n')
+        .map_or_else(String::new, |(_, remainder)| remainder.to_owned())
+}
+
+fn remove_question_from_first_line(text: &str) -> String {
+    let (first, remainder) = text.split_once('\n').unwrap_or((text, ""));
+    let detail = first
+        .split_once('?')
+        .map_or("", |(_, detail)| detail.trim());
+    [detail, remainder]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn confirmation_text(text: &str) -> Text<'static> {
+    let lines = text
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                return Line::default();
+            }
+            if line.starts_with("• Blocked")
+                || contains_any(
+                    line,
+                    &[
+                        "error",
+                        "invalid",
+                        "failed",
+                        "recovery required",
+                        "collision",
+                    ],
+                )
+            {
+                return Line::styled(line.to_owned(), Style::default().fg(ERROR));
+            }
+            if line.starts_with("• Guarded") || contains_any(line, &["warning", "conflict"]) {
+                return Line::styled(line.to_owned(), Style::default().fg(WARNING));
+            }
+            Line::raw(line.to_owned())
+        })
+        .collect::<Vec<_>>();
+    Text::from(lines)
+}
+
+fn confirmation_prompt_line(line: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, segment) in line.split(" · ").enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(DIM_FOREGROUND)));
+        }
+        let (key, description) = segment.split_once(' ').unwrap_or((segment, ""));
+        spans.push(Span::styled(
+            key.to_owned(),
+            Style::default().fg(BONE).add_modifier(Modifier::BOLD),
+        ));
+        if !description.is_empty() {
+            spans.push(Span::styled(
+                format!(" {description}"),
+                Style::default().fg(DIM_FOREGROUND),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+fn overlay_text_style(overlay: &Overlay) -> Style {
+    match overlay {
+        Overlay::Help => Style::default().fg(BONE),
+        Overlay::Notice(message) | Overlay::Result(message)
+            if contains_any(
+                message,
+                &[
+                    "error",
+                    "invalid",
+                    "blocked",
+                    "failed",
+                    "recovery required",
+                    "collision",
+                ],
+            ) =>
+        {
+            Style::default().fg(ERROR)
+        }
+        Overlay::Notice(_) => Style::default().fg(WARNING),
+        _ => Style::default(),
+    }
+}
+
+fn modal_block(title: &str, footer: Option<&str>) -> Block<'static> {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BLUE))
+        .title_style(Style::default().fg(BONE))
+        .title(Line::styled(
+            format!(" {title} "),
+            Style::default().fg(BONE).add_modifier(Modifier::BOLD),
+        ));
+    match footer {
+        Some(footer) => block.title_bottom(confirmation_prompt_line(footer).right_aligned()),
+        None => block,
+    }
 }
 
 fn render_input(frame: &mut Frame<'_>, title: &str, hint: &str, input: &str) {
@@ -1051,7 +1660,8 @@ fn render_input(frame: &mut Frame<'_>, title: &str, hint: &str, input: &str) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(format!("{hint}\n> {input}"))
-            .block(Block::default().borders(Borders::ALL).title(title)),
+            .style(Style::default().fg(BONE))
+            .block(modal_block(title, Some("Enter apply · Esc cancel"))),
         area,
     );
 }
@@ -1066,7 +1676,8 @@ fn render_filter(frame: &mut Frame<'_>, filter: &str) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(format!("/{filter}"))
-            .block(Block::default().borders(Borders::ALL).title("Filter")),
+            .style(Style::default().fg(BONE))
+            .block(modal_block("Filter", Some("Enter apply · Esc clear"))),
         area,
     );
 }
@@ -1105,6 +1716,47 @@ enum Navigation {
     Library {
         return_target: Option<std::path::PathBuf>,
     },
+    Onboarding {
+        return_target: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Clone)]
+struct TargetTab {
+    scope: TargetTabScope,
+    directory: SkillDirectoryConfig,
+    rows: Vec<Row>,
+}
+
+struct LoadedTargetState {
+    user: UserScopeSession,
+    repository: TargetSession,
+    tabs: Vec<TargetTab>,
+}
+
+enum PreparedScopeSave {
+    User(PreparedUserScopeSave),
+    Repository(PreparedTargetSave),
+}
+
+impl PreparedScopeSave {
+    fn plan(&self) -> &crate::reconcile::Plan {
+        match self {
+            Self::User(prepared) => prepared.plan(),
+            Self::Repository(prepared) => prepared.plan(),
+        }
+    }
+
+    fn commit(
+        self,
+        paths: &AppPaths,
+        authorization: Authorization,
+    ) -> Result<crate::app::CommandReport, WorkflowError> {
+        match self {
+            Self::User(prepared) => UserScopeWorkflow::commit_save(paths, prepared, authorization),
+            Self::Repository(prepared) => TargetWorkflow::commit_save(prepared, authorization),
+        }
+    }
 }
 
 fn navigate(paths: &AppPaths, mut navigation: Navigation) -> Result<u8, WorkflowError> {
@@ -1115,8 +1767,194 @@ fn navigate(paths: &AppPaths, mut navigation: Navigation) -> Result<u8, Workflow
             Navigation::Library { return_target } => {
                 run_library_once(paths, return_target.as_deref())?
             }
+            Navigation::Onboarding { return_target } => {
+                run_onboarding_once(paths, return_target.as_deref())?
+            }
         };
     }
+}
+
+fn run_onboarding_once(
+    paths: &AppPaths,
+    return_target: Option<&Path>,
+) -> Result<Navigation, WorkflowError> {
+    let session = OnboardingWorkflow::load(paths).map_err(WorkflowError::from)?;
+    let mut location_expression = session.default_location_expression().to_owned();
+    let model = initial_onboarding_model(paths, &session);
+    let mut pending: Option<PreparedOnboarding> = None;
+    let status = run_interactive(model, |model, effect| match effect {
+        Effect::Quit { status } => Ok(Some(status)),
+        Effect::ApplyLocationEdit { value, .. } => {
+            let value = value.trim();
+            if value.is_empty() {
+                model.overlay = Overlay::Notice("Library Location cannot be empty.".to_owned());
+                return Ok(None);
+            }
+            location_expression = value.to_owned();
+            if let Some(location) = model
+                .rows
+                .iter_mut()
+                .find(|row| row.kind == RowKind::Location)
+            {
+                location.name = location_expression.clone();
+                location.description = format!(
+                    "First Library Location (default resolves to {})",
+                    paths.home().join(".skillator/library").display()
+                );
+            }
+            Ok(None)
+        }
+        Effect::PrepareSave { .. } => {
+            let selected = model
+                .rows
+                .iter()
+                .filter(|row| row.kind == RowKind::Skill && row.check == Some(CheckState::Checked))
+                .filter_map(|row| {
+                    Some((
+                        row.skill_path.clone()?,
+                        row.acquisition_mode.unwrap_or(LibraryAcquisitionMode::Link),
+                    ))
+                })
+                .collect::<BTreeMap<_, _>>();
+            match OnboardingWorkflow::prepare_with_modes(
+                paths,
+                &session,
+                &location_expression,
+                &selected,
+            ) {
+                Ok(prepared) => {
+                    let mut message = String::from("Initialize Skillator with these changes?\n");
+                    for item in prepared.review() {
+                        if let Some(source) = &item.source {
+                            message.push_str(&format!(
+                                "• {}: {} → {}\n",
+                                item.action,
+                                source.display(),
+                                item.destination.display()
+                            ));
+                        } else {
+                            message.push_str(&format!(
+                                "• {}: {}\n",
+                                item.action,
+                                item.destination.display()
+                            ));
+                        }
+                    }
+                    message.push_str("\ny/Enter initialize · n/Esc return");
+                    pending = Some(prepared);
+                    model.overlay = Overlay::ConfirmSaveWarning(message);
+                }
+                Err(error) => model.overlay = Overlay::Notice(error.to_string()),
+            }
+            Ok(None)
+        }
+        Effect::CommitSave => {
+            let Some(prepared) = pending.take() else {
+                return Ok(None);
+            };
+            OnboardingWorkflow::commit(prepared).map_err(WorkflowError::from)?;
+            Ok(Some(252))
+        }
+        Effect::CancelSave => {
+            pending.take();
+            Ok(None)
+        }
+        Effect::ToggleWorkspace => {
+            model.overlay = Overlay::Notice(
+                "Complete or cancel first-time setup before changing workspaces.".to_owned(),
+            );
+            Ok(None)
+        }
+        Effect::DeleteDirectory => {
+            model.overlay = Overlay::Notice(
+                "Edit the first Library Location with `e`; it is required for setup.".to_owned(),
+            );
+            Ok(None)
+        }
+        _ => Ok(None),
+    })?;
+    if status == 252 {
+        Ok(return_target.map_or(Navigation::Exit(0), |target| {
+            Navigation::Target(target.to_owned())
+        }))
+    } else {
+        Ok(Navigation::Exit(status))
+    }
+}
+
+fn initial_onboarding_model(
+    paths: &AppPaths,
+    session: &crate::onboarding::OnboardingSession,
+) -> Model {
+    let mut model = Model::new(Workspace::Onboarding, onboarding_rows(paths, session));
+    model.dirty = true;
+    model
+}
+
+fn onboarding_rows(paths: &AppPaths, session: &crate::onboarding::OnboardingSession) -> Vec<Row> {
+    let mut location = Row::location(session.default_location_expression());
+    location.location_index = Some(0);
+    location.description = format!(
+        "First Library Location (default resolves to {})",
+        paths.home().join(".skillator/library").display()
+    );
+    let mut rows = vec![location];
+    let checks = session
+        .entries()
+        .iter()
+        .filter(|entry| entry.selectable())
+        .map(|entry| entry.selected_by_default())
+        .collect::<Vec<_>>();
+    let rollup = if checks.is_empty() || checks.iter().all(|checked| !checked) {
+        CheckState::Unchecked
+    } else if checks.iter().all(|checked| *checked) {
+        CheckState::Checked
+    } else {
+        CheckState::Mixed
+    };
+    let mut source = Row::source("Existing user-scoped Skills", rollup);
+    source.location_index = Some(0);
+    source.description = "Skills currently exposed from ~/.agents/skills".to_owned();
+    rows.push(source);
+    for entry in session.entries() {
+        let state = match entry.kind() {
+            OnboardingEntryKind::Physical => "Import and link",
+            OnboardingEntryKind::Symlink => "Register; preserve link",
+            OnboardingEntryKind::Invalid => "Leave untouched",
+        };
+        let mut row = Row::skill(
+            "Existing user-scoped Skills",
+            entry.name(),
+            entry.detail(),
+            entry.selected_by_default(),
+            entry.selectable(),
+            MaterializationKind::Linked,
+            state,
+        );
+        match entry.kind() {
+            OnboardingEntryKind::Physical => {
+                row.mode = None;
+                row.acquisition_mode = Some(LibraryAcquisitionMode::Move);
+                row.initial_acquisition_mode = row.acquisition_mode;
+                row.acquisition_source = Some(entry.path().to_owned());
+            }
+            OnboardingEntryKind::Symlink => {
+                row.mode = Some(MaterializationKind::Linked);
+            }
+            OnboardingEntryKind::Invalid => row.mode = None,
+        }
+        row.skill_path = Some(entry.name().to_owned());
+        row.location_index = Some(0);
+        if !entry.selectable() {
+            row.check = Some(CheckState::Invalid);
+            row.initial_check = Some(CheckState::Invalid);
+            row.valid = false;
+        }
+        refresh_onboarding_action(&mut row);
+        row.initial_action = row.action.clone();
+        rows.push(row);
+    }
+    rows
 }
 
 fn run_library_once(
@@ -1134,18 +1972,33 @@ fn run_library_once(
         }
         Err(error) => return Err(error),
     };
+    if session.first_run {
+        return Ok(Navigation::Onboarding {
+            return_target: return_target.map(Path::to_owned),
+        });
+    }
     let snapshot = LibraryWorkflow::snapshot(paths, &session.config);
     let mut working_config = session.config.clone();
     let mut model = Model::new(Workspace::Library, library_rows(&working_config, &snapshot));
     model.dirty = session.first_run;
-    let mut staged: Option<LibraryConfig> = None;
+    let mut staged: Option<(LibraryConfig, Vec<LibraryAcquisition>)> = None;
     let mut target_to_open = None;
     let status = run_interactive(model, |model, effect| match effect {
         Effect::Quit { status } => Ok(Some(status)),
         Effect::PrepareSave { fast } => {
             let config = library_config_from_rows(&working_config, &model.rows)?;
-            if fast && library_fast_save_is_safe(&session.config, &config) {
-                LibraryWorkflow::save(paths, &session, &config, true)?;
+            let acquisitions = library_acquisitions_from_rows(&model.rows);
+            if fast
+                && acquisitions.is_empty()
+                && library_fast_save_is_safe(&session.config, &config)
+            {
+                LibraryWorkflow::save_with_acquisitions(
+                    paths,
+                    &session,
+                    &config,
+                    &acquisitions,
+                    true,
+                )?;
                 Ok(Some(0))
             } else {
                 let affected = std::env::current_dir()
@@ -1160,12 +2013,19 @@ fn run_library_once(
                         )
                     })
                     .unwrap_or_default();
-                staged = Some(config);
-                model.overlay = if affected.is_empty() {
+                staged = Some((config, acquisitions));
+                model.overlay = if affected.is_empty()
+                    && staged
+                        .as_ref()
+                        .is_none_or(|(_, acquisitions)| acquisitions.is_empty())
+                {
                     Overlay::ConfirmSave
                 } else {
+                    let acquisition_count = staged
+                        .as_ref()
+                        .map_or(0, |(_, acquisitions)| acquisitions.len());
                     Overlay::ConfirmSaveWarning(format!(
-                        "Save Library changes? {} Enablement reference(s) in the current Target will become Unresolved.\ny/Enter proceed · n/Esc return",
+                        "Save Library changes? {acquisition_count} acquisition(s); {} Enablement reference(s) in the current Target will become Unresolved.\ny/Enter proceed · n/Esc return",
                         affected.len()
                     ))
                 };
@@ -1173,8 +2033,10 @@ fn run_library_once(
             }
         }
         Effect::CommitSave => {
-            let config = staged.take().unwrap_or_else(|| session.config.clone());
-            LibraryWorkflow::save(paths, &session, &config, true)?;
+            let (config, acquisitions) = staged
+                .take()
+                .unwrap_or_else(|| (session.config.clone(), Vec::new()));
+            LibraryWorkflow::save_with_acquisitions(paths, &session, &config, &acquisitions, true)?;
             Ok(Some(0))
         }
         Effect::CancelSave => Ok(None),
@@ -1244,13 +2106,29 @@ fn run_library_once(
                 ));
                 return Ok(None);
             }
-            let Some(source) = model.rows.get_mut(model.selected) else {
+            let Some(identity) = model
+                .rows
+                .get(model.selected)
+                .and_then(row_identity)
+                .map(str::to_owned)
+            else {
                 return Ok(None);
             };
-            source.name = key.as_str().to_owned();
-            source.registered = Some(true);
-            source.key_collision = false;
-            source.state = "Registered".to_owned();
+            {
+                let source = &mut model.rows[model.selected];
+                source.name = key.as_str().to_owned();
+                source.registered = Some(true);
+                source.key_collision = false;
+                source.state = "Registered".to_owned();
+                refresh_source_action(source);
+            }
+            for child in model.rows.iter_mut().filter(|candidate| {
+                candidate.kind == RowKind::Skill
+                    && row_identity(candidate) == Some(identity.as_str())
+            }) {
+                child.registered = Some(true);
+                refresh_library_action(child);
+            }
             model.dirty = true;
             Ok(None)
         }
@@ -1287,17 +2165,6 @@ fn run_library_once(
 }
 
 fn run_target_once(paths: &AppPaths, directory: &Path) -> Result<Navigation, WorkflowError> {
-    let session = match TargetWorkflow::load(directory) {
-        Ok(session) => session,
-        Err(error @ WorkflowError::InvalidInput { .. }) => {
-            return run_static(
-                Model::new(Workspace::Target, vec![Row::diagnostic(error.to_string())]),
-                3,
-            )
-            .map(Navigation::Exit);
-        }
-        Err(error) => return Err(error),
-    };
     let library_session = match LibraryWorkflow::load(paths) {
         Ok(session) => session,
         Err(error @ WorkflowError::InvalidInput { .. }) => {
@@ -1309,76 +2176,192 @@ fn run_target_once(paths: &AppPaths, directory: &Path) -> Result<Navigation, Wor
         }
         Err(error) => return Err(error),
     };
-    let library = LibraryWorkflow::snapshot(paths, &library_session.config);
-    let observed = observe(&session.target, &session.config, &library);
-    let mut directories = session.config.skill_directories().to_vec();
-    let mut rows_by_directory = target_rows(&session.config, &library, &observed);
-    if rows_by_directory.is_empty() {
-        rows_by_directory.push(Vec::new());
+    if library_session.first_run {
+        return Ok(Navigation::Onboarding {
+            return_target: Some(directory.to_owned()),
+        });
     }
-    if session.first_run {
-        for recommendation in session.recommendations.iter().rev() {
-            let mut row = Row::diagnostic(format!(
-                "[ ] {} exists; press `a` to add this Skill Directory",
-                recommendation.path()
-            ));
-            row.name = "Recommendation".to_owned();
-            row.state = "Unchecked".to_owned();
-            rows_by_directory[0].insert(0, row);
+    let repository_session = match TargetWorkflow::load(directory) {
+        Ok(session) => session,
+        Err(error @ WorkflowError::InvalidInput { .. }) => {
+            return run_static(
+                Model::new(Workspace::Target, vec![Row::diagnostic(error.to_string())]),
+                3,
+            )
+            .map(Navigation::Exit);
         }
-    }
-    let mut model = Model::new(Workspace::Target, rows_by_directory[0].clone());
-    model.directory_count = rows_by_directory.len();
-    model.directory_labels = directories
-        .iter()
-        .map(|directory| {
-            directory
-                .label()
-                .unwrap_or(directory.key().as_str())
-                .to_owned()
-        })
-        .collect();
-    model.directory_values = directories.iter().map(directory_editor_value).collect();
-    model.dirty = session.first_run;
-    let mut pending: Option<PreparedTargetSave> = None;
-    let mut retry_fast = false;
+        Err(error) => return Err(error),
+    };
+    let library = LibraryWorkflow::snapshot(paths, &library_session.config);
+    let user_session = match UserScopeWorkflow::load(paths) {
+        Ok(session) => session,
+        Err(error @ WorkflowError::InvalidInput { .. }) => {
+            return run_static(
+                Model::new(Workspace::Target, vec![Row::diagnostic(error.to_string())]),
+                3,
+            )
+            .map(Navigation::Exit);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut state = build_target_state(user_session, repository_session, &library);
+    let mut dirty_scopes = BTreeSet::new();
+    let model = initial_target_model(&state.tabs);
+    let mut pending: Option<PreparedScopeSave> = None;
+    let mut switch_after_save: Option<(TargetTabScope, String)> = None;
     let mut target_to_open = None;
     let status = run_interactive(model, |model, effect| match effect {
         Effect::Quit { status } => Ok(Some(status)),
         Effect::DirectoryChanged { from, to } => {
-            if from < rows_by_directory.len() {
-                rows_by_directory[from] = model.rows.clone();
+            if let Some(tab) = state.tabs.get_mut(from) {
+                tab.rows = model.rows.clone();
+                if model.dirty {
+                    dirty_scopes.insert(tab.scope);
+                }
             }
-            if to < rows_by_directory.len() {
-                model.rows = rows_by_directory[to].clone();
-                model.selected = model.selected.min(model.rows.len().saturating_sub(1));
-            }
+            activate_target_tab(model, &state.tabs, &dirty_scopes, to);
             Ok(None)
         }
         Effect::PrepareSave { fast } => {
-            retry_fast = fast;
-            prepare_target_save(
-                paths,
-                &session,
-                model,
-                &mut rows_by_directory,
-                &directories,
-                &mut pending,
-                fast,
-            )
+            store_active_target_tab(model, &mut state.tabs);
+            let scope = active_target_scope(model, &state.tabs);
+            let prepared = match prepare_scope_save(paths, &state, &state.tabs, scope) {
+                Ok(prepared) => prepared,
+                Err(WorkflowError::Busy) => {
+                    model.overlay = Overlay::Busy;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+            if fast && plan_is_safe(prepared.plan()) {
+                let report = commit_scope_save(paths, prepared)?;
+                if report.status == ReportStatus::InSync {
+                    Ok(Some(0))
+                } else {
+                    show_save_result(model, &report);
+                    Ok(None)
+                }
+            } else {
+                model.overlay = save_review_overlay(prepared.plan());
+                pending = Some(prepared);
+                Ok(None)
+            }
         }
-        Effect::RetrySave => prepare_target_save(
-            paths,
-            &session,
-            model,
-            &mut rows_by_directory,
-            &directories,
-            &mut pending,
-            retry_fast,
-        ),
-        Effect::CommitSave => commit_target_save(model, &mut pending),
+        Effect::RetrySave => {
+            store_active_target_tab(model, &mut state.tabs);
+            let scope = active_target_scope(model, &state.tabs);
+            let prepared = match prepare_scope_save(paths, &state, &state.tabs, scope) {
+                Ok(prepared) => prepared,
+                Err(WorkflowError::Busy) => {
+                    model.overlay = Overlay::Busy;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+            model.overlay = save_review_overlay(prepared.plan());
+            pending = Some(prepared);
+            Ok(None)
+        }
+        Effect::CommitSave => {
+            let Some(prepared) = pending.take() else {
+                return Ok(None);
+            };
+            let report = commit_scope_save(paths, prepared)?;
+            if report.status != ReportStatus::InSync {
+                show_save_result(model, &report);
+                return Ok(None);
+            }
+            if let Some((scope, key)) = switch_after_save.take() {
+                let user = UserScopeWorkflow::load(paths)?;
+                let repository = TargetWorkflow::load(directory)?;
+                state = build_target_state(user, repository, &library);
+                dirty_scopes.clear();
+                let target = state
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.scope == scope && tab.directory.key().as_str() == key)
+                    .or_else(|| state.tabs.iter().position(|tab| tab.scope == scope))
+                    .unwrap_or(0);
+                sync_target_tab_model(model, &state.tabs, &dirty_scopes);
+                activate_target_tab(model, &state.tabs, &dirty_scopes, target);
+                Ok(None)
+            } else {
+                Ok(Some(0))
+            }
+        }
         Effect::CancelSave => {
             pending.take();
+            switch_after_save.take();
+            Ok(None)
+        }
+        Effect::SaveScopeAndSwitch { from, to } => {
+            if let Some(tab) = state.tabs.get_mut(from) {
+                tab.rows = model.rows.clone();
+            }
+            let source_scope = state.tabs[from].scope;
+            let destination = &state.tabs[to];
+            switch_after_save = Some((
+                destination.scope,
+                destination.directory.key().as_str().to_owned(),
+            ));
+            let prepared = match prepare_scope_save(paths, &state, &state.tabs, source_scope) {
+                Ok(prepared) => prepared,
+                Err(WorkflowError::Busy) => {
+                    model.overlay = Overlay::Busy;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+            if plan_is_safe(prepared.plan()) {
+                let report = commit_scope_save(paths, prepared)?;
+                if report.status != ReportStatus::InSync {
+                    show_save_result(model, &report);
+                    switch_after_save.take();
+                    return Ok(None);
+                }
+                let user = UserScopeWorkflow::load(paths)?;
+                let repository = TargetWorkflow::load(directory)?;
+                state = build_target_state(user, repository, &library);
+                dirty_scopes.clear();
+                let (scope, key) = switch_after_save.take().expect("switch destination exists");
+                let target = state
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.scope == scope && tab.directory.key().as_str() == key)
+                    .or_else(|| state.tabs.iter().position(|tab| tab.scope == scope))
+                    .unwrap_or(0);
+                sync_target_tab_model(model, &state.tabs, &dirty_scopes);
+                activate_target_tab(model, &state.tabs, &dirty_scopes, target);
+            } else {
+                model.overlay = save_review_overlay(prepared.plan());
+                pending = Some(prepared);
+            }
+            Ok(None)
+        }
+        Effect::DiscardScopeAndSwitch { from, to } => {
+            let discarded_scope = state.tabs[from].scope;
+            let user = UserScopeWorkflow::load(paths)?;
+            let repository = TargetWorkflow::load(directory)?;
+            let destination_scope = state.tabs[to].scope;
+            let destination_key = state.tabs[to].directory.key().as_str().to_owned();
+            state = build_target_state(user, repository, &library);
+            dirty_scopes.remove(&discarded_scope);
+            let target = state
+                .tabs
+                .iter()
+                .position(|tab| {
+                    tab.scope == destination_scope
+                        && tab.directory.key().as_str() == destination_key
+                })
+                .or_else(|| {
+                    state
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.scope == destination_scope)
+                })
+                .unwrap_or(0);
+            sync_target_tab_model(model, &state.tabs, &dirty_scopes);
+            activate_target_tab(model, &state.tabs, &dirty_scopes, target);
             Ok(None)
         }
         Effect::ApplyDirectoryEdit { edit, value } => {
@@ -1389,15 +2372,15 @@ fn run_target_once(paths: &AppPaths, directory: &Path) -> Result<Navigation, Wor
                     return Ok(None);
                 }
             };
-            if edit && directories.is_empty() {
+            if state.tabs.is_empty() {
                 model.overlay = Overlay::Notice(
                     "There is no Skill Directory to edit; add one instead.".to_owned(),
                 );
                 return Ok(None);
             }
             if edit {
-                let index = model.directory_index.min(directories.len() - 1);
-                if candidate.path() != directories[index].path()
+                let index = model.directory_index.min(state.tabs.len() - 1);
+                if candidate.path() != state.tabs[index].directory.path()
                     && model.rows.iter().any(|row| {
                         row.kind == RowKind::Skill
                             && (row.check == Some(CheckState::Checked)
@@ -1411,9 +2394,20 @@ fn run_target_once(paths: &AppPaths, directory: &Path) -> Result<Navigation, Wor
                     return Ok(None);
                 }
             }
-            let mut proposed = directories.clone();
+            store_active_target_tab(model, &mut state.tabs);
+            let scope = active_target_scope(model, &state.tabs);
+            let mut proposed = state
+                .tabs
+                .iter()
+                .filter(|tab| tab.scope == scope)
+                .map(|tab| tab.directory.clone())
+                .collect::<Vec<_>>();
             if edit {
-                let index = model.directory_index.min(directories.len() - 1);
+                let current_key = state.tabs[model.directory_index].directory.key();
+                let index = proposed
+                    .iter()
+                    .position(|directory| directory.key() == current_key)
+                    .expect("active directory belongs to its scope");
                 proposed[index] = candidate.clone();
             } else {
                 proposed.push(candidate.clone());
@@ -1429,42 +2423,38 @@ fn run_target_once(paths: &AppPaths, directory: &Path) -> Result<Navigation, Wor
                 return Ok(None);
             }
             if edit {
-                let index = model.directory_index.min(directories.len() - 1);
-                directories[index] = candidate;
+                state.tabs[model.directory_index].directory = candidate;
             } else {
-                rows_by_directory[model.directory_index] = model.rows.clone();
-                rows_by_directory.push(rows_for_directory(
-                    &candidate,
-                    &session.config,
-                    &library,
-                    &observed,
-                ));
-                directories.push(candidate);
-                model.directory_index = directories.len() - 1;
-                model.rows = rows_by_directory[model.directory_index].clone();
+                let (config, observed, inherited) = match scope {
+                    TargetTabScope::User => {
+                        let observed = observe(&state.user.target, &state.user.config, &library);
+                        (&state.user.config, observed, BTreeSet::new())
+                    }
+                    TargetTabScope::Repository => {
+                        let observed =
+                            observe(&state.repository.target, &state.repository.config, &library);
+                        let inherited = user_enabled_skills(&state.user.config);
+                        (&state.repository.config, observed, inherited)
+                    }
+                };
+                state.tabs.push(TargetTab {
+                    scope,
+                    rows: rows_for_directory(&candidate, config, &library, &observed, &inherited),
+                    directory: candidate,
+                });
+                model.directory_index = state.tabs.len() - 1;
             }
-            model.directory_count = directories.len();
-            model.directory_labels = directories
-                .iter()
-                .map(|directory| {
-                    directory
-                        .label()
-                        .unwrap_or(directory.key().as_str())
-                        .to_owned()
-                })
-                .collect();
-            model.directory_values = directories.iter().map(directory_editor_value).collect();
-            model.dirty = true;
+            dirty_scopes.insert(scope);
+            sync_target_tab_model(model, &state.tabs, &dirty_scopes);
+            activate_target_tab(model, &state.tabs, &dirty_scopes, model.directory_index);
             Ok(None)
         }
         Effect::DeleteDirectory => {
-            if directories.len() > 1 {
-                let index = model.directory_index.min(directories.len() - 1);
-                let rows = if index == model.directory_index {
-                    &model.rows
-                } else {
-                    &rows_by_directory[index]
-                };
+            store_active_target_tab(model, &mut state.tabs);
+            let scope = active_target_scope(model, &state.tabs);
+            if state.tabs.iter().filter(|tab| tab.scope == scope).count() > 1 {
+                let index = model.directory_index.min(state.tabs.len() - 1);
+                let rows = &state.tabs[index].rows;
                 if rows.iter().any(|row| {
                     row.kind == RowKind::Skill
                         && (row.check == Some(CheckState::Checked)
@@ -1476,25 +2466,15 @@ fn run_target_once(paths: &AppPaths, directory: &Path) -> Result<Navigation, Wor
                     );
                     return Ok(None);
                 }
-                directories.remove(index);
-                rows_by_directory.remove(index);
-                model.directory_index = index.min(directories.len() - 1);
-                model.directory_count = directories.len();
-                model.directory_labels = directories
-                    .iter()
-                    .map(|directory| {
-                        directory
-                            .label()
-                            .unwrap_or(directory.key().as_str())
-                            .to_owned()
-                    })
-                    .collect();
-                model.directory_values = directories.iter().map(directory_editor_value).collect();
-                model.rows = rows_by_directory[model.directory_index].clone();
-                model.dirty = true;
+                state.tabs.remove(index);
+                dirty_scopes.insert(scope);
+                let target = index.min(state.tabs.len() - 1);
+                sync_target_tab_model(model, &state.tabs, &dirty_scopes);
+                activate_target_tab(model, &state.tabs, &dirty_scopes, target);
             } else {
-                model.overlay =
-                    Overlay::Notice("A Target must keep at least one Skill Directory.".to_owned());
+                model.overlay = Overlay::Notice(
+                    "Each scope must keep at least one Skill Directory.".to_owned(),
+                );
             }
             Ok(None)
         }
@@ -1511,10 +2491,262 @@ fn run_target_once(paths: &AppPaths, directory: &Path) -> Result<Navigation, Wor
             target_to_open.unwrap_or_else(|| Path::new(".").to_owned()),
         )),
         251 => Ok(Navigation::Library {
-            return_target: Some(session.target.root().to_owned()),
+            return_target: Some(state.repository.target.root().to_owned()),
         }),
         status => Ok(Navigation::Exit(status)),
     }
+}
+
+fn build_target_state(
+    user: UserScopeSession,
+    repository: TargetSession,
+    library: &LibrarySnapshot,
+) -> LoadedTargetState {
+    let user_observed = observe(&user.target, &user.config, library);
+    let repository_observed = observe(&repository.target, &repository.config, library);
+    let inherited = user_enabled_skills(&user.config);
+    let mut tabs = user
+        .config
+        .skill_directories()
+        .iter()
+        .cloned()
+        .zip(target_rows(
+            &user.config,
+            library,
+            &user_observed,
+            &BTreeSet::new(),
+        ))
+        .map(|(directory, rows)| TargetTab {
+            scope: TargetTabScope::User,
+            directory,
+            rows,
+        })
+        .collect::<Vec<_>>();
+    let mut repository_tabs = repository
+        .config
+        .skill_directories()
+        .iter()
+        .cloned()
+        .zip(target_rows(
+            &repository.config,
+            library,
+            &repository_observed,
+            &inherited,
+        ))
+        .map(|(directory, rows)| TargetTab {
+            scope: TargetTabScope::Repository,
+            directory,
+            rows,
+        })
+        .collect::<Vec<_>>();
+    if repository.first_run
+        && let Some(first) = repository_tabs.first_mut()
+    {
+        for recommendation in repository.recommendations.iter().rev() {
+            let mut row = Row::diagnostic(format!(
+                "[ ] {} exists; press `a` to add this Skill Directory",
+                recommendation.path()
+            ));
+            row.name = "Recommendation".to_owned();
+            row.state = "Unchecked".to_owned();
+            first.rows.insert(0, row);
+        }
+    }
+    tabs.extend(repository_tabs);
+    LoadedTargetState {
+        user,
+        repository,
+        tabs,
+    }
+}
+
+fn user_enabled_skills(config: &RepositoryConfig) -> BTreeSet<SkillKey> {
+    config
+        .enablements()
+        .iter()
+        .map(|enablement| enablement.skill().clone())
+        .collect()
+}
+
+fn target_tab_label(tab: &TargetTab, user_index: usize) -> String {
+    let label = tab
+        .directory
+        .label()
+        .unwrap_or(tab.directory.key().as_str());
+    match tab.scope {
+        TargetTabScope::User if user_index == 0 => "User".to_owned(),
+        TargetTabScope::User => format!("User · {label}"),
+        TargetTabScope::Repository => label.to_owned(),
+    }
+}
+
+fn initial_target_tab_index(tabs: &[TargetTab]) -> usize {
+    tabs.iter()
+        .position(|tab| tab.scope == TargetTabScope::Repository)
+        .unwrap_or(0)
+}
+
+fn initial_target_model(tabs: &[TargetTab]) -> Model {
+    let index = initial_target_tab_index(tabs);
+    let mut model = Model::new(
+        Workspace::Target,
+        tabs.get(index)
+            .map(|tab| tab.rows.clone())
+            .unwrap_or_default(),
+    );
+    model.directory_index = index;
+    sync_target_tab_model(&mut model, tabs, &BTreeSet::new());
+    model
+}
+
+fn sync_target_tab_model(
+    model: &mut Model,
+    tabs: &[TargetTab],
+    dirty_scopes: &BTreeSet<TargetTabScope>,
+) {
+    model.directory_count = tabs.len().max(1);
+    let mut user_index = 0;
+    model.directory_labels = tabs
+        .iter()
+        .map(|tab| {
+            let label = target_tab_label(tab, user_index);
+            if tab.scope == TargetTabScope::User {
+                user_index += 1;
+            }
+            label
+        })
+        .collect();
+    model.directory_values = tabs
+        .iter()
+        .map(|tab| directory_editor_value(&tab.directory))
+        .collect();
+    model.directory_scopes = tabs.iter().map(|tab| tab.scope).collect();
+    model.dirty = tabs
+        .get(model.directory_index)
+        .is_some_and(|tab| dirty_scopes.contains(&tab.scope));
+}
+
+fn activate_target_tab(
+    model: &mut Model,
+    tabs: &[TargetTab],
+    dirty_scopes: &BTreeSet<TargetTabScope>,
+    index: usize,
+) {
+    if tabs.is_empty() {
+        model.directory_index = 0;
+        model.rows.clear();
+        model.dirty = false;
+        return;
+    }
+    model.directory_index = index.min(tabs.len() - 1);
+    model.rows = tabs[model.directory_index].rows.clone();
+    model.selected = model.selected.min(model.rows.len().saturating_sub(1));
+    model.dirty = dirty_scopes.contains(&tabs[model.directory_index].scope);
+}
+
+fn store_active_target_tab(model: &Model, tabs: &mut [TargetTab]) {
+    if let Some(tab) = tabs.get_mut(model.directory_index) {
+        tab.rows = model.rows.clone();
+    }
+}
+
+fn active_target_scope(model: &Model, tabs: &[TargetTab]) -> TargetTabScope {
+    tabs.get(model.directory_index)
+        .map_or(TargetTabScope::User, |tab| tab.scope)
+}
+
+fn scope_config(
+    tabs: &[TargetTab],
+    scope: TargetTabScope,
+) -> Result<RepositoryConfig, WorkflowError> {
+    let scoped = tabs
+        .iter()
+        .filter(|tab| tab.scope == scope)
+        .collect::<Vec<_>>();
+    let directories = scoped
+        .iter()
+        .map(|tab| tab.directory.clone())
+        .collect::<Vec<_>>();
+    let rows = scoped
+        .iter()
+        .map(|tab| tab.rows.clone())
+        .collect::<Vec<_>>();
+    repository_config_from_rows(&directories, &rows)
+}
+
+fn prepare_scope_save(
+    paths: &AppPaths,
+    state: &LoadedTargetState,
+    tabs: &[TargetTab],
+    scope: TargetTabScope,
+) -> Result<PreparedScopeSave, WorkflowError> {
+    let staged = scope_config(tabs, scope)?;
+    match scope {
+        TargetTabScope::User => {
+            UserScopeWorkflow::prepare_save(paths, &state.user, staged).map(PreparedScopeSave::User)
+        }
+        TargetTabScope::Repository => {
+            TargetWorkflow::prepare_save(paths, &state.repository, staged)
+                .map(PreparedScopeSave::Repository)
+        }
+    }
+}
+
+fn plan_is_safe(plan: &crate::reconcile::Plan) -> bool {
+    plan.items()
+        .iter()
+        .all(|item| item.safety() == crate::reconcile::Safety::Safe)
+}
+
+fn save_review_overlay(plan: &crate::reconcile::Plan) -> Overlay {
+    if plan_is_safe(plan) {
+        Overlay::ConfirmSave
+    } else {
+        let mut message = String::from("Review Guarded and Blocked Changes:\n");
+        for item in plan
+            .items()
+            .iter()
+            .filter(|item| item.safety() != crate::reconcile::Safety::Safe)
+        {
+            message.push_str(&format!(
+                "• {:?} {} — {}\n",
+                item.safety(),
+                item.path().display(),
+                item.reason()
+            ));
+        }
+        message.push_str("\ny/Enter save and authorize every listed Guarded Change · n/Esc return");
+        Overlay::GuardedConfirmation(message)
+    }
+}
+
+fn commit_scope_save(
+    paths: &AppPaths,
+    prepared: PreparedScopeSave,
+) -> Result<crate::app::CommandReport, WorkflowError> {
+    let authorization = if prepared.plan().has_guarded() {
+        Authorization::AllGuarded
+    } else {
+        Authorization::SafeOnly
+    };
+    prepared.commit(paths, authorization)
+}
+
+fn show_save_result(model: &mut Model, report: &crate::app::CommandReport) {
+    let mut summary = String::from("Save completed with unresolved work:\n");
+    for change in &report.changes {
+        summary.push_str(&format!(
+            "• {:?}: {} ({})\n",
+            change.outcome, change.path, change.action
+        ));
+    }
+    for diagnostic in &report.diagnostics {
+        summary.push_str("• ");
+        summary.push_str(&diagnostic.message);
+        summary.push('\n');
+    }
+    summary.push_str("\nPress Enter to exit.");
+    model.overlay = Overlay::Result(summary);
 }
 
 fn parse_directory_editor(value: &str) -> Result<SkillDirectoryConfig, String> {
@@ -1549,111 +2781,16 @@ fn directory_editor_value(directory: &SkillDirectoryConfig) -> String {
     )
 }
 
-fn prepare_target_save(
-    paths: &AppPaths,
-    session: &TargetSession,
-    model: &mut Model,
-    rows_by_directory: &mut [Vec<Row>],
-    directories: &[SkillDirectoryConfig],
-    pending: &mut Option<PreparedTargetSave>,
-    fast: bool,
-) -> Result<Option<u8>, WorkflowError> {
-    rows_by_directory[model.directory_index] = model.rows.clone();
-    let staged = repository_config_from_rows(directories, rows_by_directory)?;
-    match TargetWorkflow::prepare_save(paths, session, staged) {
-        Ok(prepared)
-            if fast
-                && prepared
-                    .plan()
-                    .items()
-                    .iter()
-                    .all(|item| item.safety() == crate::reconcile::Safety::Safe) =>
-        {
-            *pending = Some(prepared);
-            commit_target_save(model, pending)
-        }
-        Ok(prepared) => {
-            model.overlay = if prepared
-                .plan()
-                .items()
-                .iter()
-                .any(|item| item.safety() != crate::reconcile::Safety::Safe)
-            {
-                let mut message = String::from("Review Guarded and Blocked Changes:\n");
-                for item in prepared
-                    .plan()
-                    .items()
-                    .iter()
-                    .filter(|item| item.safety() != crate::reconcile::Safety::Safe)
-                {
-                    message.push_str(&format!(
-                        "• {:?} {} — {}\n",
-                        item.safety(),
-                        item.path().display(),
-                        item.reason()
-                    ));
-                }
-                message.push_str(
-                    "\ny/Enter save and authorize every listed Guarded Change · n/Esc return",
-                );
-                Overlay::GuardedConfirmation(message)
-            } else {
-                Overlay::ConfirmSave
-            };
-            *pending = Some(prepared);
-            Ok(None)
-        }
-        Err(WorkflowError::Busy) => {
-            model.overlay = Overlay::Busy;
-            Ok(None)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn commit_target_save(
-    model: &mut Model,
-    pending: &mut Option<PreparedTargetSave>,
-) -> Result<Option<u8>, WorkflowError> {
-    let Some(prepared) = pending.take() else {
-        return Ok(None);
-    };
-    let authorization = if prepared.plan().has_guarded() {
-        Authorization::AllGuarded
-    } else {
-        Authorization::SafeOnly
-    };
-    let report = TargetWorkflow::commit_save(prepared, authorization)?;
-    if report.status == ReportStatus::InSync {
-        Ok(Some(0))
-    } else {
-        let mut summary = String::from("Save completed with unresolved work:\n");
-        for change in &report.changes {
-            summary.push_str(&format!(
-                "• {:?}: {} ({})\n",
-                change.outcome, change.path, change.action
-            ));
-        }
-        for diagnostic in &report.diagnostics {
-            summary.push_str("• ");
-            summary.push_str(&diagnostic.message);
-            summary.push('\n');
-        }
-        summary.push_str("\nPress Enter to exit.");
-        model.overlay = Overlay::Result(summary);
-        Ok(None)
-    }
-}
-
 fn target_rows(
     config: &RepositoryConfig,
     library: &LibrarySnapshot,
     observed: &ObservedState,
+    inherited_user: &BTreeSet<SkillKey>,
 ) -> Vec<Vec<Row>> {
     config
         .skill_directories()
         .iter()
-        .map(|directory| rows_for_directory(directory, config, library, observed))
+        .map(|directory| rows_for_directory(directory, config, library, observed, inherited_user))
         .collect()
 }
 
@@ -1662,6 +2799,7 @@ fn rows_for_directory(
     config: &RepositoryConfig,
     library: &LibrarySnapshot,
     observed: &ObservedState,
+    inherited_user: &BTreeSet<SkillKey>,
 ) -> Vec<Row> {
     let mut skills: BTreeMap<(String, String), (String, String, bool)> = BTreeMap::new();
     for source in library
@@ -1703,6 +2841,26 @@ fn rows_for_directory(
                         .unwrap_or("unresolved")
                         .to_owned(),
                     "Unavailable or unresolved Skill".to_owned(),
+                    false,
+                )
+            });
+    }
+    for skill in inherited_user {
+        skills
+            .entry((
+                skill.source().as_str().to_owned(),
+                skill.path().as_str().to_owned(),
+            ))
+            .or_insert_with(|| {
+                (
+                    skill
+                        .path()
+                        .as_str()
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("unresolved")
+                        .to_owned(),
+                    "Enabled in User Scope".to_owned(),
                     false,
                 )
             });
@@ -1761,6 +2919,11 @@ fn rows_for_directory(
                 && enablement.skill().source().as_str() == source
                 && enablement.skill().path().as_str() == path
         });
+        let skill_key = SkillKey::new(
+            SourceKey::parse(&source).expect("Library Source Keys are valid"),
+            SkillPath::parse(&path).expect("Library Skill paths are valid"),
+        );
+        let inherited = inherited_user.contains(&skill_key);
         let observation = observed.enablements().find(|observation| {
             observation.enablement().directory() == directory.key()
                 && observation.enablement().skill().source().as_str() == source
@@ -1778,26 +2941,52 @@ fn rows_for_directory(
         } else {
             ""
         };
-        rows.push(Row::skill_inventory(SkillInventoryRow {
-            group: source.clone(),
-            inventory_id: None,
-            path: path.clone(),
-            name,
-            description,
-            check: if desired.is_some() {
-                CheckState::Checked
-            } else {
-                CheckState::Unchecked
-            },
-            available,
-            valid: true,
-            mode: desired.map(Enablement::materialization),
-            state: state.to_owned(),
-            details: format!("{source}/{path} · {state}{overlap}"),
-            location_index: None,
-        }));
+        let mut row = if desired.is_none() && inherited {
+            Row::inherited_user(source.clone(), name, description, available, "User Scope")
+        } else {
+            Row::skill_inventory(SkillInventoryRow {
+                group: source.clone(),
+                inventory_id: None,
+                path: path.clone(),
+                name,
+                description,
+                check: if desired.is_some() {
+                    CheckState::Checked
+                } else {
+                    CheckState::Unchecked
+                },
+                available,
+                valid: true,
+                mode: desired.map(Enablement::materialization),
+                state: state.to_owned(),
+                details: format!("{source}/{path} · {state}{overlap}"),
+                location_index: None,
+            })
+        };
+        row.skill_path = Some(path.clone());
+        if let Some(desired) = desired {
+            row.action = initial_target_action(
+                desired.materialization(),
+                observation.map(|observation| observation.state()),
+            );
+            row.initial_action = row.action.clone();
+        }
+        if inherited && desired.is_some() {
+            row.details.push_str(" · also active in User Scope");
+        }
+        rows.push(row);
     }
-    rows
+    let groups = rows
+        .iter()
+        .filter(|row| row.kind == RowKind::Source)
+        .filter_map(row_identity)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut model = Model::new(Workspace::Target, rows);
+    for group in groups {
+        model.recompute_group(&group);
+    }
+    model.rows
 }
 
 fn materialization_state(state: &MaterializationState) -> &'static str {
@@ -1814,6 +3003,31 @@ fn materialization_state(state: &MaterializationState) -> &'static str {
         MaterializationState::CopyIneligible => "Copy-Ineligible",
         MaterializationState::WrongKind => "Wrong Kind",
         MaterializationState::ExpectedEntryCollision => "Collision",
+    }
+}
+
+fn initial_target_action(
+    mode: MaterializationKind,
+    state: Option<&MaterializationState>,
+) -> String {
+    match state.unwrap_or(&MaterializationState::Missing) {
+        MaterializationState::CanonicalLink | MaterializationState::EquivalentCopy => String::new(),
+        MaterializationState::Missing => match mode {
+            MaterializationKind::Linked => "Create link".to_owned(),
+            MaterializationKind::Copied => "Create copy".to_owned(),
+        },
+        MaterializationState::NoncanonicalLink => "Repair link".to_owned(),
+        MaterializationState::BrokenLink
+        | MaterializationState::MisdirectedLink
+        | MaterializationState::WrongKind => match mode {
+            MaterializationKind::Linked => "Replace with link".to_owned(),
+            MaterializationKind::Copied => "Replace with copy".to_owned(),
+        },
+        MaterializationState::DivergedCopy => "Replace copy".to_owned(),
+        MaterializationState::UnknownExpectedEntry
+        | MaterializationState::Uninspectable
+        | MaterializationState::CopyIneligible
+        | MaterializationState::ExpectedEntryCollision => String::new(),
     }
 }
 
@@ -1858,6 +3072,11 @@ fn library_rows(config: &LibraryConfig, snapshot: &LibrarySnapshot) -> Vec<Row> 
     for (index, location) in config.locations().iter().enumerate() {
         let mut location_row = Row::location(location.path());
         location_row.location_index = Some(index);
+        location_row.description = if index == 0 {
+            "Writable local Library Location".to_owned()
+        } else {
+            "Read-only Library Location".to_owned()
+        };
         if let Some(observed) = snapshot.locations().get(index) {
             location_row.details = format!(
                 "expression {} · resolved {} · {}",
@@ -1904,6 +3123,12 @@ fn library_rows(config: &LibraryConfig, snapshot: &LibrarySnapshot) -> Vec<Row> 
                 source.available(),
                 source.key_collision(),
             );
+            source_row.description = format!(
+                "{:?} Source · {} skill{}",
+                source.kind(),
+                checks.len(),
+                if checks.len() == 1 { "" } else { "s" }
+            );
             source_row.details = format!(
                 "{:?} Source · root {} · origin {} · {:?}{}",
                 source.kind(),
@@ -1921,12 +3146,13 @@ fn library_rows(config: &LibraryConfig, snapshot: &LibrarySnapshot) -> Vec<Row> 
             );
             if source.key_collision() {
                 source_row.state = "Key Collision".to_owned();
+                source_row.initial_state = source_row.state.clone();
                 source_row.check = Some(CheckState::Invalid);
             }
             rows.push(source_row);
             for skill in source.skills() {
                 let inventory_id = source_inventory_id(index, source.relative_path());
-                rows.push(Row::skill_inventory(SkillInventoryRow {
+                let mut row = Row::skill_inventory(SkillInventoryRow {
                     group: source.key().as_str().to_owned(),
                     inventory_id: Some(inventory_id),
                     path: skill.path().to_owned(),
@@ -1963,7 +3189,25 @@ fn library_rows(config: &LibraryConfig, snapshot: &LibrarySnapshot) -> Vec<Row> 
                         }
                     ),
                     location_index: Some(index),
-                }));
+                });
+                row.registered = Some(source.registration() == Registration::Registered);
+                let local_destination = index == 0
+                    && source.key().as_str() == "local/library"
+                    && source.relative_path() == ".";
+                if !local_destination
+                    && skill.validity() == SkillValidity::Valid
+                    && let Some(path) = skill.absolute_path()
+                {
+                    row.acquisition_source = Some(path.to_owned());
+                    row.acquisition_source_root_git = source.kind()
+                        == crate::library::SourceKind::Git
+                        && source.root() == Some(path);
+                    if skill.registration() == Registration::Unregistered {
+                        row.acquisition_mode = Some(LibraryAcquisitionMode::Move);
+                        row.initial_acquisition_mode = row.acquisition_mode;
+                    }
+                }
+                rows.push(row);
             }
         }
     }
@@ -1991,6 +3235,9 @@ fn library_config_from_rows(
                     row.kind == RowKind::Skill
                         && row_identity(row) == row_identity(source)
                         && row.check == Some(CheckState::Checked)
+                        && (!row_has_acquisition(row)
+                            || (row.initial_check == Some(CheckState::Checked)
+                                && row.acquisition_mode != Some(LibraryAcquisitionMode::Move)))
                 })
                 .map(|row| {
                     SkillPath::parse(row.skill_path.as_deref().unwrap_or_default())
@@ -2007,6 +3254,56 @@ fn library_config_from_rows(
             sources,
         ));
     }
+    let acquired = rows
+        .iter()
+        .filter(|row| row_has_acquisition(row))
+        .map(|row| SkillPath::parse(&row.name).map_err(invalid))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if !acquired.is_empty() {
+        let Some(first) = locations.first().cloned() else {
+            return Err(WorkflowError::InvalidInput {
+                message: "Library acquisition requires a first Library Location".to_owned(),
+            });
+        };
+        let mut sources = first.sources().to_vec();
+        if let Some(index) = sources
+            .iter()
+            .position(|source| source.key().as_str() == "local/library")
+        {
+            if sources[index].path().as_str() != "." {
+                return Err(WorkflowError::InvalidInput {
+                    message: "`local/library` must use path `.` in the first Library Location"
+                        .to_owned(),
+                });
+            }
+            let mut skills = sources[index].skills().to_vec();
+            for path in acquired {
+                if !skills.iter().any(|skill| skill.path() == &path) {
+                    skills.push(RegisteredSkillConfig::new(path));
+                }
+            }
+            sources[index] = RegisteredSourceConfig::new(
+                sources[index].key().clone(),
+                sources[index].path().clone(),
+                skills,
+            );
+        } else {
+            sources.push(RegisteredSourceConfig::new(
+                SourceKey::parse("local/library").expect("built-in key"),
+                SkillPath::parse(".").expect("root path"),
+                acquired
+                    .into_iter()
+                    .map(RegisteredSkillConfig::new)
+                    .collect(),
+            ));
+        }
+        locations[0] = LibraryLocationConfig::new(
+            first.path().to_owned(),
+            first.exclusions().to_vec(),
+            first.allow_overlap(),
+            sources,
+        );
+    }
     LibraryConfig::new(locations).map_err(|issues| WorkflowError::InvalidInput {
         message: issues
             .into_iter()
@@ -2014,6 +3311,28 @@ fn library_config_from_rows(
             .collect::<Vec<_>>()
             .join("; "),
     })
+}
+
+fn row_has_acquisition(row: &Row) -> bool {
+    row.kind == RowKind::Skill
+        && row.check == Some(CheckState::Checked)
+        && row.acquisition_source.is_some()
+        && row.acquisition_mode.is_some()
+        && (row.initial_check != Some(CheckState::Checked) || row.acquisition_pending)
+}
+
+fn library_acquisitions_from_rows(rows: &[Row]) -> Vec<LibraryAcquisition> {
+    rows.iter()
+        .filter(|row| row_has_acquisition(row))
+        .filter_map(|row| {
+            Some(LibraryAcquisition::new(
+                row.acquisition_source.clone()?,
+                row.name.clone(),
+                row.acquisition_mode?,
+                row.acquisition_source_root_git,
+            ))
+        })
+        .collect()
 }
 
 fn library_fast_save_is_safe(original: &LibraryConfig, staged: &LibraryConfig) -> bool {
@@ -2125,6 +3444,104 @@ fn fatal(error: impl std::fmt::Display) -> WorkflowError {
 #[cfg(test)]
 mod internal_tests {
     use super::*;
+
+    #[test]
+    fn initial_target_tab_prefers_the_first_repository_tab() {
+        let tabs = vec![
+            TargetTab {
+                scope: TargetTabScope::User,
+                directory: SkillDirectoryConfig::agents_preset(),
+                rows: Vec::new(),
+            },
+            TargetTab {
+                scope: TargetTabScope::Repository,
+                directory: SkillDirectoryConfig::claude_preset(),
+                rows: Vec::new(),
+            },
+        ];
+
+        assert_eq!(initial_target_tab_index(&tabs), 1);
+        assert_eq!(initial_target_tab_index(&tabs[..1]), 0);
+    }
+
+    #[test]
+    fn untouched_first_run_defaults_do_not_block_scope_switching() {
+        let tabs = vec![
+            TargetTab {
+                scope: TargetTabScope::User,
+                directory: SkillDirectoryConfig::agents_preset(),
+                rows: Vec::new(),
+            },
+            TargetTab {
+                scope: TargetTabScope::Repository,
+                directory: SkillDirectoryConfig::claude_preset(),
+                rows: Vec::new(),
+            },
+        ];
+        let mut model = initial_target_model(&tabs);
+
+        assert_eq!(model.directory_index, 1);
+        assert!(!model.dirty);
+        assert_eq!(
+            reduce(&mut model, Action::NextDirectory),
+            [Effect::DirectoryChanged { from: 1, to: 0 }]
+        );
+        assert_eq!(model.directory_index, 0);
+        assert_eq!(model.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn row_selection_adds_background_without_replacing_semantic_foreground() {
+        let warning = Row::diagnostic("Needs attention");
+        let warning_style = row_style(&warning, true);
+        assert_eq!(warning_style.fg, Some(WARNING));
+        assert_eq!(warning_style.bg, Some(SELECTED_BACKGROUND));
+
+        let mut error = Row::diagnostic("Cannot continue");
+        error.state = "Invalid".to_owned();
+        let error_style = row_style(&error, true);
+        assert_eq!(error_style.fg, Some(ERROR));
+        assert_eq!(error_style.bg, Some(SELECTED_BACKGROUND));
+
+        let normal_style = row_style(&Row::location("./library"), true);
+        assert_eq!(normal_style.fg, None);
+        assert_eq!(normal_style.bg, Some(SELECTED_BACKGROUND));
+    }
+
+    #[test]
+    fn confirmation_distinguishes_desired_actions_from_warnings() {
+        let text = confirmation_text(
+            "• Move to Library: source → destination\n\
+             • Guarded existing path — conflict\n\
+             • Blocked tracked path — cannot replace",
+        );
+
+        assert_eq!(text.lines[0].style.fg, None);
+        assert_eq!(text.lines[1].style.fg, Some(WARNING));
+        assert_eq!(text.lines[2].style.fg, Some(ERROR));
+
+        let footer = confirmation_prompt_line("y/Enter initialize · n/Esc return");
+        assert!(footer.spans.iter().any(|span| span.style.fg == Some(BONE)));
+        assert!(
+            footer
+                .spans
+                .iter()
+                .any(|span| span.style.fg == Some(DIM_FOREGROUND))
+        );
+    }
+
+    #[test]
+    fn first_run_starts_in_the_onboarding_table() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().to_owned());
+        let session = OnboardingWorkflow::load(&paths).unwrap();
+
+        let model = initial_onboarding_model(&paths, &session);
+
+        assert_eq!(model.overlay, Overlay::None);
+        assert_eq!(model.rows[model.selected].kind, RowKind::Location);
+        assert_eq!(model.rows[model.selected].name, "./library");
+    }
 
     #[test]
     fn colliding_source_rows_round_trip_by_inventory_identity() {
@@ -2261,5 +3678,117 @@ mod internal_tests {
 
         assert_eq!(effects, [Effect::CancelSave]);
         assert_eq!(model.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn dirty_scope_switch_offers_save_discard_or_return() {
+        let mut model = Model::new(Workspace::Target, Vec::new());
+        model.directory_count = 2;
+        model.directory_scopes = vec![TargetTabScope::User, TargetTabScope::Repository];
+        model.dirty = true;
+
+        assert!(reduce(&mut model, Action::NextDirectory).is_empty());
+        assert_eq!(model.overlay, Overlay::SwitchScope { from: 0, to: 1 });
+        assert_eq!(model.directory_index, 0);
+        assert_eq!(
+            reduce(&mut model, Action::Confirm),
+            [Effect::SaveScopeAndSwitch { from: 0, to: 1 }]
+        );
+
+        model.overlay = Overlay::SwitchScope { from: 0, to: 1 };
+        assert_eq!(
+            reduce(&mut model, Action::DeleteDirectory),
+            [Effect::DiscardScopeAndSwitch { from: 0, to: 1 }]
+        );
+    }
+
+    #[test]
+    fn library_acquisition_mode_cycles_move_copy_link_and_registration_only() {
+        let mut row = Row::skill(
+            "external/skills",
+            "demo",
+            "Demo Skill",
+            false,
+            true,
+            MaterializationKind::Linked,
+            "",
+        );
+        row.acquisition_source = Some(std::path::PathBuf::from("/external/demo"));
+        row.registered = Some(true);
+        row.acquisition_mode = Some(LibraryAcquisitionMode::Move);
+        row.initial_acquisition_mode = row.acquisition_mode;
+        let mut model = Model::new(Workspace::Library, vec![row]);
+
+        reduce(&mut model, Action::Toggle);
+        assert_eq!(
+            model.rows[0].acquisition_mode,
+            Some(LibraryAcquisitionMode::Move)
+        );
+        assert_eq!(model.rows[0].action, "Move to Library");
+
+        reduce(&mut model, Action::SwitchMode);
+        assert_eq!(
+            model.rows[0].acquisition_mode,
+            Some(LibraryAcquisitionMode::Copy)
+        );
+        assert_eq!(model.rows[0].action, "Copy to Library");
+
+        reduce(&mut model, Action::SwitchMode);
+        assert_eq!(
+            model.rows[0].acquisition_mode,
+            Some(LibraryAcquisitionMode::Link)
+        );
+        assert_eq!(model.rows[0].action, "Link to Library");
+
+        reduce(&mut model, Action::SwitchMode);
+        assert_eq!(model.rows[0].acquisition_mode, None);
+        assert_eq!(model.rows[0].action, "Register");
+    }
+
+    #[test]
+    fn reverting_source_registration_clears_its_pending_action() {
+        let source = Row::source_inventory(
+            "external/skills".to_owned(),
+            CheckState::Checked,
+            true,
+            1,
+            ".".to_owned(),
+            true,
+            false,
+        );
+        let mut model = Model::new(Workspace::Library, vec![source]);
+
+        reduce(&mut model, Action::RegisterSource);
+        assert_eq!(model.rows[0].action, "Unregister Source");
+        model.filter = "pending".to_owned();
+        assert_eq!(model.visible_indices(), vec![0]);
+        model.filter.clear();
+
+        reduce(&mut model, Action::RegisterSource);
+        assert_eq!(model.rows[0].action, "");
+    }
+
+    #[test]
+    fn onboarding_acquisition_actions_stay_concise() {
+        let mut row = Row::skill(
+            "Existing user-scoped Skills",
+            "demo",
+            "Demo Skill",
+            true,
+            true,
+            MaterializationKind::Linked,
+            "",
+        );
+        row.acquisition_source = Some(std::path::PathBuf::from("/user/demo"));
+        row.acquisition_mode = Some(LibraryAcquisitionMode::Move);
+        row.initial_acquisition_mode = row.acquisition_mode;
+        refresh_onboarding_action(&mut row);
+        let mut model = Model::new(Workspace::Onboarding, vec![row]);
+
+        assert_eq!(model.rows[0].action, "Move to Library");
+        reduce(&mut model, Action::SwitchMode);
+        assert_eq!(model.rows[0].action, "Copy to Library");
+        reduce(&mut model, Action::SwitchMode);
+        assert_eq!(model.rows[0].action, "Link to Library");
     }
 }

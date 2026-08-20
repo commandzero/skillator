@@ -10,7 +10,6 @@ use crate::target::{
     CONTROL_FILE_CONTENT, Comparison, ControlFileState, MaterializationState, ObservedState,
     RootState, Target, observe,
 };
-use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -148,6 +147,7 @@ pub fn plan(
         }
         let control = directory.path().join(".gitignore");
         match directory.control_file() {
+            ControlFileState::NotRequired => {}
             ControlFileState::Missing => {
                 if directory.control_protected() {
                     items.push(blocked(
@@ -393,7 +393,7 @@ impl PreparedPlan {
 
 impl Drop for PreparedPlan {
     fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self._lock);
+        let _ = self._lock.unlock();
     }
 }
 
@@ -402,8 +402,8 @@ pub fn prepare_check(
     config: &RepositoryConfig,
     library: &LibrarySnapshot,
 ) -> Result<PreparedPlan, TargetBusy> {
-    let lock = File::open(target.repository().git_dir()).map_err(|_| TargetBusy)?;
-    lock.try_lock_exclusive().map_err(|_| TargetBusy)?;
+    let lock = File::open(target.lock_path()).map_err(|_| TargetBusy)?;
+    lock.try_lock().map_err(|_| TargetBusy)?;
     let observed = observe(target, config, library);
     let mut plan = plan(config, library, &observed);
     plan_recovery(&mut plan, target, config);
@@ -420,8 +420,8 @@ pub fn prepare_transition(
     staged: &RepositoryConfig,
     library: &LibrarySnapshot,
 ) -> Result<PreparedPlan, TargetBusy> {
-    let lock = File::open(target.repository().git_dir()).map_err(|_| TargetBusy)?;
-    lock.try_lock_exclusive().map_err(|_| TargetBusy)?;
+    let lock = File::open(target.lock_path()).map_err(|_| TargetBusy)?;
+    lock.try_lock().map_err(|_| TargetBusy)?;
     let original_observed = observe(target, original, library);
     let staged_observed = observe(target, staged, library);
     let mut plan = plan(staged, library, &staged_observed);
@@ -458,8 +458,8 @@ pub fn prepare_apply(
     config: &RepositoryConfig,
     library: &LibrarySnapshot,
 ) -> Result<PreparedPlan, TargetBusy> {
-    let lock = File::open(target.repository().git_dir()).map_err(|_| TargetBusy)?;
-    lock.try_lock_exclusive().map_err(|_| TargetBusy)?;
+    let lock = File::open(target.lock_path()).map_err(|_| TargetBusy)?;
+    lock.try_lock().map_err(|_| TargetBusy)?;
     let observed = observe(target, config, library);
     let mut plan = plan(config, library, &observed);
     plan_recovery(&mut plan, target, config);
@@ -478,15 +478,7 @@ fn capture_git_facts(
         .iter()
         .flat_map(|item| mutation_paths(item).into_iter().flatten())
         .map(|path| {
-            let facts = path
-                .strip_prefix(target.root())
-                .map_err(|_| "planned path escapes Target Repository".to_owned())
-                .and_then(|relative| {
-                    target
-                        .repository()
-                        .facts_for(relative)
-                        .map_err(|error| error.to_string())
-                });
+            let facts = target_path_facts(target, path);
             (path.to_owned(), facts)
         })
         .collect()
@@ -582,10 +574,28 @@ fn plan_recovery(plan: &mut Plan, target: &Target, config: &RepositoryConfig) {
 }
 
 fn git_path_unprotected(target: &Target, path: &Path) -> bool {
-    path.strip_prefix(target.root())
+    target_path_facts(target, path)
         .ok()
-        .and_then(|relative| target.repository().facts_for(relative).ok())
         .is_some_and(|facts| !facts.tracked && !facts.staged && !facts.unmerged)
+}
+
+fn target_path_facts(target: &Target, path: &Path) -> Result<PathFacts, String> {
+    let relative = path
+        .strip_prefix(target.root())
+        .map_err(|_| "planned path escapes Target".to_owned())?;
+    if let Some(repository) = target.git_repository() {
+        repository
+            .facts_for(relative)
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(PathFacts {
+            tracked: false,
+            staged: false,
+            unmerged: false,
+            ignored: false,
+            ignore_rule: None,
+        })
+    }
 }
 
 fn artifact_destination(root: &Path, name: &str, kind: &str) -> Option<PathBuf> {
@@ -685,9 +695,8 @@ pub fn execute(
         let git_matches = mutation_paths(&item).into_iter().flatten().all(|path| {
             expected_git.get(path).is_some_and(|expected| {
                 expected.as_ref().is_ok_and(|expected| {
-                    path.strip_prefix(target.root())
+                    target_path_facts(target, path)
                         .ok()
-                        .and_then(|relative| target.repository().facts_for(relative).ok())
                         .is_some_and(|current| git_protection_matches(expected, &current))
                 })
             })
@@ -941,10 +950,7 @@ fn ensure_contained_physical_parent(path: &Path, target_root: &Path) -> Result<(
         .parent()
         .ok_or_else(|| ApplyFailure::Failed("destination has no parent".to_owned()))?;
     let relative = parent.strip_prefix(target_root).map_err(|_| {
-        ApplyFailure::Failed(format!(
-            "destination escapes Target Repository: {}",
-            path.display()
-        ))
+        ApplyFailure::Failed(format!("destination escapes Target: {}", path.display()))
     })?;
     let mut current = target_root.to_owned();
     for component in relative.components() {
@@ -1093,7 +1099,7 @@ mod tests {
             &ConcurrentWrite { bytes: b"external" },
         );
 
-        assert!(matches!(result, Err(ApplyFailure::Changed)));
+        std::assert_matches!(result, Err(ApplyFailure::Changed));
         assert_eq!(fs::read(&destination).unwrap(), b"external");
     }
 
@@ -1112,7 +1118,7 @@ mod tests {
             &ConcurrentWrite { bytes: b"external" },
         );
 
-        assert!(matches!(result, Err(ApplyFailure::Changed)));
+        std::assert_matches!(result, Err(ApplyFailure::Changed));
         assert_eq!(fs::read(&destination).unwrap(), b"external");
     }
 
@@ -1184,7 +1190,7 @@ mod tests {
             },
             root.path(),
         );
-        assert!(matches!(failure, Err(ApplyFailure::Failed(_))));
+        std::assert_matches!(failure, Err(ApplyFailure::Failed(_)));
         assert_eq!(fs::read_to_string(&first.path).unwrap(), "old");
         apply_operation_with(&second, &Faults::default(), root.path()).unwrap();
         assert_eq!(fs::read_to_string(&second.path).unwrap(), "new");
@@ -1202,7 +1208,7 @@ mod tests {
             },
             root.path(),
         );
-        assert!(matches!(result, Err(ApplyFailure::RolledBack(_))));
+        std::assert_matches!(result, Err(ApplyFailure::RolledBack(_)));
         assert_eq!(fs::read_to_string(&rolled_back.path).unwrap(), "old");
 
         let recovery = replacement(root.path(), "recovery");
@@ -1215,7 +1221,7 @@ mod tests {
             },
             root.path(),
         );
-        assert!(matches!(result, Err(ApplyFailure::RecoveryRequired(_))));
+        std::assert_matches!(result, Err(ApplyFailure::RecoveryRequired(_)));
         assert!(!recovery.path.exists());
         assert!(fs::read_dir(root.path()).unwrap().any(|entry| {
             entry
@@ -1238,7 +1244,7 @@ mod tests {
             },
             root.path(),
         );
-        assert!(matches!(result, Err(ApplyFailure::RecoveryRequired(_))));
+        std::assert_matches!(result, Err(ApplyFailure::RecoveryRequired(_)));
         assert_eq!(fs::read_to_string(&item.path).unwrap(), "new");
         assert!(fs::read_dir(root.path()).unwrap().any(|entry| {
             entry

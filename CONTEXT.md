@@ -1,6 +1,6 @@
 # Skillator
 
-Skillator manages which agent skills from a Library are active in one or more Skill Directories in a Target Repository.
+Skillator manages which agent skills from a Library are active in the User Scope or in one or more Skill Directories in a Target Repository.
 
 ## Language
 
@@ -63,12 +63,20 @@ Separately configured Library Locations whose canonical discovery boundaries ove
 A Git repository whose active Skills Skillator manages. It is selected from the current working directory or an explicit directory argument.
 _Avoid_: Source, skill directory, destination
 
+**User Scope**:
+Machine-local desired state shared by agent sessions regardless of repository. It is configured at `~/.agents/skillator.yaml`, appears as the first tab of a Target workspace, and is inherited by every Target Repository view.
+_Avoid_: User Target, global Library, repository target
+
+**Inherited User Enablement**:
+A Skill active through the User Scope while viewing a Repository Skill Directory. It is displayed as `[u] user`, is read-only from the Repository tab, and can be changed only from its User Scope tab.
+_Avoid_: Repository Enablement, copied Skill, implicit repository link
+
 **Skill Directory**:
-A repository-relative managed exposure boundary where active Skills are materialized for discovery by one or more agents, such as `.agents/skills` or `.claude/skills`. A Target Repository may configure several non-overlapping Skill Directories with different Enablements.
+A managed exposure boundary where active Skills are materialized for discovery by one or more agents, such as `.agents/skills` or `.claude/skills`. Its path is relative to the repository root in Repository Configuration and relative to the user's home directory in User Scope Configuration. Either scope may configure several non-overlapping Skill Directories with different Enablements.
 _Avoid_: Target, library
 
 **Skill Directory Control File**:
-The canonical, Skillator-owned `.gitignore` inside a configured Skill Directory. It excludes every other entry beneath that boundary while remaining eligible for repository tracking.
+The canonical, Skillator-owned `.gitignore` inside a Repository Skill Directory. It excludes every other entry beneath that boundary while remaining eligible for repository tracking. User Scope Skill Directories do not use control files.
 _Avoid_: Repository ignore policy, user `.gitignore`
 
 **Skill Directory Key**:
@@ -94,6 +102,14 @@ _Avoid_: Invalid Enablement, disabled Skill
 **Repository Configuration**:
 The declarative `.agents/skillator.yaml` file describing a Target Repository's Skill Directories and desired Enablements. It identifies Sources portably while user-level Library configuration resolves them to machine-specific paths.
 _Avoid_: Library configuration, observed state
+
+**User Scope Configuration**:
+The machine-local `~/.agents/skillator.yaml` file describing User Scope Skill Directories and desired Enablements. It uses the same desired-state shape as Repository Configuration but resolves paths relative to the user's home directory and has no Git tracking contract.
+_Avoid_: Library configuration, Repository Configuration
+
+**First-run Onboarding**:
+The staged workflow entered when Library Configuration is absent. It chooses the first Library Location, offers safe import of existing physical Skills from `~/.agents/skills`, offers registration of Sources behind existing symlinks, and creates User Scope links only after one final confirmation.
+_Avoid_: schema migration, marketplace, automatic acquisition
 
 **Observed State**:
 An immutable snapshot of filesystem facts for the configured Skill Directories and their immediate entries. It supports comparison with desired state without prescribing reconciliation actions.

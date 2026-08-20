@@ -1,3 +1,4 @@
+pub mod acquisition;
 pub mod app;
 pub mod cli;
 pub mod config;
@@ -6,6 +7,7 @@ mod fs_safety;
 pub mod git;
 pub mod library;
 mod materialization;
+pub mod onboarding;
 pub mod reconcile;
 pub mod target;
 pub mod tui;

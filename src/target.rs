@@ -28,7 +28,14 @@ pub enum TargetError {
 #[derive(Debug, Clone)]
 pub struct Target {
     supplied_path: PathBuf,
-    repository: GitRepository,
+    root: PathBuf,
+    repository: Option<GitRepository>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetScope {
+    Repository,
+    User,
 }
 
 pub const CONTROL_FILE_CONTENT: &str = "# Managed by skillator.\n*\n!.gitignore\n";
@@ -125,6 +132,7 @@ pub(crate) struct UnmanagedObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlFileState {
+    NotRequired,
     Missing,
     Canonical,
     Modified,
@@ -252,7 +260,24 @@ impl Target {
         };
         Ok(Self {
             supplied_path,
-            repository,
+            root: repository.root().to_owned(),
+            repository: Some(repository),
+        })
+    }
+
+    pub fn user(home: impl AsRef<Path>) -> Result<Self, TargetError> {
+        let home = home.as_ref();
+        if !home.exists() {
+            return Err(TargetError::Missing(home.to_owned()));
+        }
+        if !home.is_dir() {
+            return Err(TargetError::NotDirectory(home.to_owned()));
+        }
+        let root = home.canonicalize()?;
+        Ok(Self {
+            supplied_path: root.clone(),
+            root,
+            repository: None,
         })
     }
 
@@ -261,11 +286,31 @@ impl Target {
     }
 
     pub fn root(&self) -> &Path {
-        self.repository.root()
+        &self.root
     }
 
     pub fn repository(&self) -> &GitRepository {
-        &self.repository
+        self.repository
+            .as_ref()
+            .expect("Repository Target has Git facts")
+    }
+
+    pub fn git_repository(&self) -> Option<&GitRepository> {
+        self.repository.as_ref()
+    }
+
+    pub fn scope(&self) -> TargetScope {
+        if self.repository.is_some() {
+            TargetScope::Repository
+        } else {
+            TargetScope::User
+        }
+    }
+
+    pub fn lock_path(&self) -> &Path {
+        self.repository
+            .as_ref()
+            .map_or(self.root(), |repository| repository.git_dir())
     }
 }
 
@@ -336,7 +381,7 @@ pub fn observe(
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
-            if name == ".gitignore" {
+            if target.scope() == TargetScope::Repository && name == ".gitignore" {
                 continue;
             }
             if name.starts_with(".skillator-") {
@@ -346,12 +391,11 @@ pub fn observe(
                 let relative = child.strip_prefix(target.root()).unwrap_or(child);
                 unmanaged.push(UnmanagedObservation {
                     path: child.clone(),
-                    tracked: target
-                        .repository()
-                        .facts_for(relative)
-                        .map_or(true, |facts| {
+                    tracked: target.git_repository().is_some_and(|repository| {
+                        repository.facts_for(relative).map_or(true, |facts| {
                             facts.tracked || facts.staged || facts.unmerged
-                        }),
+                        })
+                    }),
                     fingerprint: fingerprint(child),
                 });
                 if expected
@@ -383,13 +427,33 @@ pub fn observe(
         let (control_file, control_tracked, control_protected, control_ignored) =
             inspect_control_file(target, directory, root_state);
         let probe = PathBuf::from(directory.path().as_str()).join(".skillator-probe");
-        let generated_ignored = target
-            .repository()
-            .facts_for(&probe)
-            .is_ok_and(|facts| facts.ignored);
-        if control_file != ControlFileState::Canonical {
-            diagnostics.push("Skill Directory Control File is not canonical".to_owned());
-        } else if !control_tracked {
+        let generated_ignored = target.git_repository().is_none_or(|repository| {
+            repository
+                .facts_for(&probe)
+                .is_ok_and(|facts| facts.ignored)
+        });
+        let relative_control = PathBuf::from(directory.path().as_str()).join(".gitignore");
+        match control_file {
+            ControlFileState::Missing if root_state == RootState::Absent => {}
+            ControlFileState::Missing => diagnostics.push(format!(
+                "Skill Directory Control File is missing at {}; save to create it",
+                relative_control.display()
+            )),
+            ControlFileState::Modified => diagnostics.push(format!(
+                "Skill Directory Control File differs from Skillator's required content at {}; save to review replacement",
+                relative_control.display()
+            )),
+            ControlFileState::WrongKind => diagnostics.push(format!(
+                "Skill Directory Control File path is not a regular file: {}",
+                relative_control.display()
+            )),
+            ControlFileState::Uninspectable => diagnostics.push(format!(
+                "Skill Directory Control File cannot be read: {}",
+                relative_control.display()
+            )),
+            ControlFileState::Canonical | ControlFileState::NotRequired => {}
+        }
+        if control_file == ControlFileState::Canonical && !control_tracked {
             diagnostics.push(format!(
                 "track the control file with `git add -f -- {}/.gitignore`",
                 directory.path()
@@ -425,10 +489,11 @@ pub fn observe(
             root_state != RootState::Directory
                 || !unmanaged_entries.is_empty()
                 || !recovery_artifacts.is_empty()
-                || control_file != ControlFileState::Canonical
-                || !control_tracked
-                || control_ignored
-                || !generated_ignored,
+                || (target.scope() == TargetScope::Repository
+                    && (control_file != ControlFileState::Canonical
+                        || !control_tracked
+                        || control_ignored
+                        || !generated_ignored)),
         );
         directories.push(DirectoryObservation {
             key: directory.key().as_str().to_owned(),
@@ -472,7 +537,8 @@ pub fn observe(
             )
         } else if let Some(expected) = &expected {
             let path = root.join(expected);
-            let (comparison, state) = inspect_materialization(&path, enablement, resolved);
+            let (comparison, state) =
+                inspect_materialization(&path, enablement, resolved, target.scope());
             (comparison, state, Some(path))
         } else {
             (
@@ -485,18 +551,16 @@ pub fn observe(
             .as_deref()
             .map(fingerprint)
             .unwrap_or(EntryFingerprint::Missing);
-        let tracked = path
-            .as_deref()
-            .and_then(|path| path.strip_prefix(target.root()).ok())
-            .map(|relative| {
-                target
-                    .repository()
-                    .facts_for(relative)
-                    .map_or(true, |facts| {
+        let tracked = target.git_repository().is_some_and(|repository| {
+            path.as_deref()
+                .and_then(|path| path.strip_prefix(target.root()).ok())
+                .map(|relative| {
+                    repository.facts_for(relative).map_or(true, |facts| {
                         facts.tracked || facts.staged || facts.unmerged
                     })
-            })
-            .unwrap_or(true);
+                })
+                .unwrap_or(true)
+        });
         enablements.push(EnablementObservation {
             enablement: enablement.clone(),
             expected_entry: expected,
@@ -615,8 +679,11 @@ fn inspect_control_file(
     directory: &SkillDirectoryConfig,
     root_state: RootState,
 ) -> (ControlFileState, bool, bool, bool) {
+    let Some(repository) = target.git_repository() else {
+        return (ControlFileState::NotRequired, true, false, false);
+    };
     let relative = PathBuf::from(directory.path().as_str()).join(".gitignore");
-    let facts = target.repository().facts_for(&relative);
+    let facts = repository.facts_for(&relative);
     if root_state != RootState::Directory {
         return (
             ControlFileState::Missing,
@@ -652,6 +719,7 @@ fn inspect_materialization(
     path: &Path,
     enablement: &Enablement,
     resolved: Option<&crate::library::LibrarySkill>,
+    scope: TargetScope,
 ) -> (Comparison, MaterializationState) {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -710,6 +778,9 @@ fn inspect_materialization(
                     .canonicalize()
             };
             match resolved_link {
+                Ok(candidate) if candidate == source && scope == TargetScope::User => {
+                    (Comparison::InSync, MaterializationState::NoncanonicalLink)
+                }
                 Ok(candidate) if candidate == source => {
                     (Comparison::Drifted, MaterializationState::NoncanonicalLink)
                 }

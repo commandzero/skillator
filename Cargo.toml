@@ -2,23 +2,22 @@
 name = "skillator"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.97"
 
 [dependencies]
-clap = { version = "=4.6.6", features = ["derive"] }
-crossterm = "=0.29.0"
-fs2 = "=0.4.3"
-ignore = "=0.4.33"
-is-terminal = "=0.4.17"
-libc = "=0.2.189"
-ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29"] }
-serde = { version = "=1.0.229", features = ["derive"] }
-serde-saphyr = "=1.1.0"
-serde_json = "=1.0.151"
-sha2 = "=0.11.0"
-thiserror = "=2.0.18"
+clap = { version = "4.6", features = ["derive"] }
+crossterm = "0.29"
+ignore = "0.4"
+is-terminal = "0.4"
+libc = "0.2"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"] }
+serde = { version = "1", features = ["derive"] }
+serde-saphyr = "1.1"
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
 
 [dev-dependencies]
-assert_cmd = "=2.2.2"
-predicates = "=3.1.4"
-tempfile = "=3.27.0"
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"

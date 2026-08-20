@@ -2,12 +2,12 @@ mod support;
 
 use skillator::app::{
     AppPaths, LibraryWorkflow, ReportOutcome, ReportStatus, SyncMode, SyncWorkflow, TargetWorkflow,
-    WorkflowError,
+    UserScopeWorkflow, WorkflowError,
 };
-use skillator::config::{LibraryConfigCodec, LoadResult, RepositoryConfigCodec};
+use skillator::config::{LibraryConfig, LibraryConfigCodec, LoadResult, RepositoryConfigCodec};
 use skillator::library::scan_library;
-use skillator::reconcile::prepare_check;
-use skillator::target::Target;
+use skillator::reconcile::{Action, Authorization, Safety, prepare_check};
+use skillator::target::{CONTROL_FILE_CONTENT, Target, observe};
 use std::collections::BTreeMap;
 
 #[test]
@@ -60,7 +60,7 @@ fn sync_without_repository_configuration_is_invalid_input_and_does_not_write() {
     let paths = AppPaths::new(home.path().to_owned());
 
     let error = SyncWorkflow::run(&paths, &target, SyncMode::Check).unwrap_err();
-    assert!(matches!(error, WorkflowError::InvalidInput { .. }));
+    std::assert_matches!(error, WorkflowError::InvalidInput { .. });
     assert!(!target.join(".agents").exists());
 }
 
@@ -118,7 +118,7 @@ fn active_target_owner_makes_check_busy_without_writes() {
     let _owner = prepare_check(&target, repository.value(), &library).unwrap();
 
     let error = SyncWorkflow::run(&fixture.paths, &fixture.target, SyncMode::Check).unwrap_err();
-    assert!(matches!(error, WorkflowError::Busy));
+    std::assert_matches!(error, WorkflowError::Busy);
     assert!(!fixture.target.join(".agents/skills").exists());
 }
 
@@ -164,7 +164,7 @@ fn stale_target_configuration_blocks_save_before_reconciliation() {
         TargetWorkflow::commit_save(prepared, skillator::reconcile::Authorization::SafeOnly)
             .unwrap_err();
 
-    assert!(matches!(error, WorkflowError::InvalidInput { .. }));
+    std::assert_matches!(error, WorkflowError::InvalidInput { .. });
     assert_eq!(
         std::fs::read_to_string(path).unwrap(),
         "externally changed\n"
@@ -202,7 +202,7 @@ fn unsupported_library_configuration_is_read_only_invalid_input() {
 
     let error = SyncWorkflow::run(&fixture.paths, &fixture.target, SyncMode::Check).unwrap_err();
 
-    assert!(matches!(error, WorkflowError::InvalidInput { .. }));
+    std::assert_matches!(error, WorkflowError::InvalidInput { .. });
     assert!(!fixture.target.join(".agents/skills").exists());
 }
 
@@ -240,7 +240,7 @@ fn first_run_library_remains_staged_until_confirmed_save() {
     assert!(!home.path().join(".skillator").exists());
 
     let cancelled = LibraryWorkflow::save(&paths, &session, &session.config, false).unwrap_err();
-    assert!(matches!(cancelled, WorkflowError::Cancelled));
+    std::assert_matches!(cancelled, WorkflowError::Cancelled);
     assert!(!home.path().join(".skillator").exists());
 
     LibraryWorkflow::save(&paths, &session, &session.config, true).unwrap();
@@ -260,7 +260,7 @@ fn repository_configuration_parent_symlink_is_rejected_without_external_writes()
 
     let error = SyncWorkflow::run(&paths, &target, SyncMode::Check).unwrap_err();
 
-    assert!(matches!(error, WorkflowError::InvalidInput { .. }));
+    std::assert_matches!(error, WorkflowError::InvalidInput { .. });
     assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
 }
 
@@ -318,6 +318,89 @@ fn first_run_detects_existing_native_skill_directories_as_recommendations() {
         vec![".claude/skills", ".cursor/skills"]
     );
     assert_eq!(session.config.skill_directories().len(), 1);
+}
+
+#[test]
+fn first_target_save_creates_required_paths_without_initialization_diagnostics() {
+    let home = support::TestHome::new();
+    let paths = AppPaths::new(home.path().to_owned());
+    let target_root = home.git_repo("target");
+    let session = TargetWorkflow::load(&target_root).unwrap();
+    let staged = session
+        .config
+        .with_skill_directories(vec![
+            session.config.skill_directories()[0].clone(),
+            skillator::config::SkillDirectoryConfig::claude_preset(),
+        ])
+        .unwrap();
+    let library_config = LibraryConfig::first_run();
+    let library = scan_library(
+        &library_config,
+        &paths.library_config(),
+        paths.home(),
+        &BTreeMap::new(),
+    );
+    let observed = observe(&session.target, &staged, &library);
+
+    assert!(!target_root.join(".agents").exists());
+    for directory in observed.directories() {
+        assert!(directory.diagnostics().iter().all(|message| {
+            !message.contains("Skill Directory is not initialized")
+                && !message.contains("Skill Directory Control File is missing")
+        }));
+    }
+
+    let prepared = TargetWorkflow::prepare_save(&paths, &session, staged).unwrap();
+    for relative in [".agents/skills", ".claude/skills"] {
+        assert!(prepared.plan().items().iter().any(|item| {
+            item.action() == Action::CreateDirectory
+                && item.safety() == Safety::Safe
+                && item.path() == session.target.root().join(relative)
+        }));
+    }
+    TargetWorkflow::commit_save(prepared, Authorization::SafeOnly).unwrap();
+
+    assert!(target_root.join(".agents/skillator.yaml").is_file());
+    for relative in [".agents/skills", ".claude/skills"] {
+        let directory = target_root.join(relative);
+        assert!(directory.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(directory.join(".gitignore")).unwrap(),
+            CONTROL_FILE_CONTENT
+        );
+    }
+}
+
+#[test]
+fn first_user_scope_save_creates_desired_state_without_git_control_files() {
+    let home = support::TestHome::new();
+    let paths = AppPaths::new(home.path().to_owned());
+    let session = UserScopeWorkflow::load(&paths).unwrap();
+
+    assert!(session.first_run);
+    assert_eq!(session.config.skill_directories()[0].label(), Some("User"));
+    assert!(!paths.user_config().exists());
+
+    let prepared =
+        UserScopeWorkflow::prepare_save(&paths, &session, session.config.clone()).unwrap();
+    assert!(prepared.plan().items().iter().any(|item| {
+        item.action() == Action::CreateDirectory
+            && item.safety() == Safety::Safe
+            && item.path() == home.path().canonicalize().unwrap().join(".agents/skills")
+    }));
+    assert!(
+        prepared
+            .plan()
+            .items()
+            .iter()
+            .all(|item| item.action() != Action::WriteControlFile)
+    );
+
+    UserScopeWorkflow::commit_save(&paths, prepared, Authorization::SafeOnly).unwrap();
+
+    assert!(paths.user_config().is_file());
+    assert!(home.path().join(".agents/skills").is_dir());
+    assert!(!home.path().join(".agents/skills/.gitignore").exists());
 }
 
 struct Fixture {

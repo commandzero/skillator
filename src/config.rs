@@ -117,6 +117,14 @@ impl SkillDirectoryConfig {
         )
     }
 
+    pub fn user_preset() -> Self {
+        Self::new(
+            SkillDirectoryKey::parse("agents").expect("built-in key is valid"),
+            RepositoryRelativePath::parse(".agents/skills").expect("built-in path is valid"),
+            Some("User".to_owned()),
+        )
+    }
+
     pub fn claude_preset() -> Self {
         Self::new(
             SkillDirectoryKey::parse("claude").expect("built-in key is valid"),
@@ -183,6 +191,13 @@ impl RepositoryConfig {
     pub fn first_run() -> Self {
         Self {
             skill_directories: vec![SkillDirectoryConfig::agents_preset()],
+            enablements: Vec::new(),
+        }
+    }
+
+    pub fn user_first_run() -> Self {
+        Self {
+            skill_directories: vec![SkillDirectoryConfig::user_preset()],
             enablements: Vec::new(),
         }
     }
@@ -1394,7 +1409,7 @@ enablements:
         let result = conditional_save_with(&path, b"desired", &Fingerprint::Absent, || {
             fs::write(&path, b"external").unwrap();
         });
-        assert!(matches!(result, Err(SaveError::Stale)));
+        std::assert_matches!(result, Err(SaveError::Stale));
         assert_eq!(fs::read(&path).unwrap(), b"external");
     }
 
@@ -1407,7 +1422,7 @@ enablements:
         let result = conditional_save_with(&path, b"desired", &expected, || {
             fs::write(&path, b"external").unwrap();
         });
-        assert!(matches!(result, Err(SaveError::Stale)));
+        std::assert_matches!(result, Err(SaveError::Stale));
         assert_eq!(fs::read(&path).unwrap(), b"external");
     }
 }

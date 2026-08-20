@@ -1,5 +1,6 @@
 //! Command-shaped application workflows.
 
+use crate::acquisition::{AcquisitionError, LibraryAcquisition, PreparedAcquisitions};
 use crate::config::{
     Fingerprint, LibraryConfig, LoadResult, RepositoryConfig, SaveError, load_library,
     load_repository, save_library, save_repository,
@@ -39,6 +40,14 @@ impl AppPaths {
 
     pub fn library_config(&self) -> PathBuf {
         self.home.join(".skillator/library.yaml")
+    }
+
+    pub fn user_config(&self) -> PathBuf {
+        self.home.join(".agents/skillator.yaml")
+    }
+
+    pub fn environment(&self) -> &BTreeMap<String, String> {
+        &self.environment
     }
 }
 
@@ -139,7 +148,7 @@ impl SyncWorkflow {
                 message: error.to_string(),
             })?;
         let repository_path = target.root().join(".agents/skillator.yaml");
-        validate_repository_config_path(&target, &repository_path)?;
+        validate_target_config_path(&target, &repository_path, "Repository")?;
         let repository = match load_repository(&repository_path).map_err(fatal)? {
             LoadResult::Missing => {
                 return Err(WorkflowError::InvalidInput {
@@ -339,7 +348,8 @@ fn report_apply(
         .directories()
         .iter()
         .all(|directory| {
-            directory.control_tracked()
+            *directory.control_file() == crate::target::ControlFileState::NotRequired
+                || directory.control_tracked()
                 || *directory.control_file() != crate::target::ControlFileState::Canonical
         })
     {
@@ -546,6 +556,16 @@ impl LibraryWorkflow {
         staged: &LibraryConfig,
         confirmed: bool,
     ) -> Result<Fingerprint, WorkflowError> {
+        Self::save_with_acquisitions(paths, session, staged, &[], confirmed)
+    }
+
+    pub fn save_with_acquisitions(
+        paths: &AppPaths,
+        session: &LibrarySession,
+        staged: &LibraryConfig,
+        acquisitions: &[LibraryAcquisition],
+        confirmed: bool,
+    ) -> Result<Fingerprint, WorkflowError> {
         if !confirmed {
             return Err(WorkflowError::Cancelled);
         }
@@ -569,7 +589,32 @@ impl LibraryWorkflow {
                 }
             }
         }
-        save_library(&paths.library_config(), staged, &session.fingerprint).map_err(save_error)
+        if acquisitions.is_empty() {
+            return save_library(&paths.library_config(), staged, &session.fingerprint)
+                .map_err(save_error);
+        }
+        let local_root = snapshot
+            .locations()
+            .first()
+            .and_then(|location| location.resolved())
+            .ok_or_else(|| WorkflowError::InvalidInput {
+                message: "the first Library Location must be available for acquisition".to_owned(),
+            })?;
+        let mut prepared =
+            PreparedAcquisitions::prepare(local_root, acquisitions).map_err(acquisition_error)?;
+        prepared.publish().map_err(acquisition_error)?;
+        let fingerprint = match save_library(&paths.library_config(), staged, &session.fingerprint)
+        {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                return match prepared.rollback() {
+                    Ok(()) => Err(save_error(error)),
+                    Err(rollback) => Err(acquisition_error(rollback)),
+                };
+            }
+        };
+        prepared.finish().map_err(acquisition_error)?;
+        Ok(fingerprint)
     }
 
     pub fn snapshot(paths: &AppPaths, config: &LibraryConfig) -> LibrarySnapshot {
@@ -615,6 +660,15 @@ impl LibraryWorkflow {
     }
 }
 
+fn acquisition_error(error: AcquisitionError) -> WorkflowError {
+    match error {
+        AcquisitionError::Invalid(message) => WorkflowError::InvalidInput { message },
+        AcquisitionError::Failed(message) | AcquisitionError::RecoveryRequired(message) => {
+            WorkflowError::Fatal { message }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct TargetSession {
     pub target: Target,
@@ -648,7 +702,7 @@ impl TargetWorkflow {
                 message: error.to_string(),
             })?;
         let config_path = target.root().join(".agents/skillator.yaml");
-        validate_repository_config_path(&target, &config_path)?;
+        validate_target_config_path(&target, &config_path, "Repository")?;
         match load_repository(&config_path).map_err(fatal)? {
             LoadResult::Missing => {
                 let recommendations = recognized_skill_directories(target.root());
@@ -681,7 +735,7 @@ impl TargetWorkflow {
         staged: &RepositoryConfig,
     ) -> Result<Fingerprint, WorkflowError> {
         let path = session.target.root().join(".agents/skillator.yaml");
-        validate_repository_config_path(&session.target, &path)?;
+        validate_target_config_path(&session.target, &path, "Repository")?;
         save_repository(&path, staged, &session.fingerprint).map_err(save_error)
     }
 
@@ -707,7 +761,103 @@ impl TargetWorkflow {
         authorization: Authorization,
     ) -> Result<CommandReport, WorkflowError> {
         let path = prepared.target.root().join(".agents/skillator.yaml");
-        validate_repository_config_path(&prepared.target, &path)?;
+        validate_target_config_path(&prepared.target, &path, "Repository")?;
+        save_repository(&path, &prepared.staged, &prepared.expected).map_err(save_error)?;
+        let result = execute(
+            prepared.prepared,
+            authorization,
+            &prepared.target,
+            &prepared.staged,
+            &prepared.library,
+        );
+        let mut diagnostics = prepared.diagnostics;
+        Ok(report_apply(
+            prepared.target.root(),
+            &result,
+            authorization == Authorization::AllGuarded,
+            &mut diagnostics,
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct UserScopeSession {
+    pub target: Target,
+    pub config: RepositoryConfig,
+    pub fingerprint: Fingerprint,
+    pub first_run: bool,
+}
+
+pub struct UserScopeWorkflow;
+
+pub struct PreparedUserScopeSave {
+    target: Target,
+    staged: RepositoryConfig,
+    expected: Fingerprint,
+    library: LibrarySnapshot,
+    prepared: PreparedPlan,
+    diagnostics: Vec<ReportDiagnostic>,
+}
+
+impl PreparedUserScopeSave {
+    pub fn plan(&self) -> &Plan {
+        self.prepared.plan()
+    }
+}
+
+impl UserScopeWorkflow {
+    pub fn load(paths: &AppPaths) -> Result<UserScopeSession, WorkflowError> {
+        let target = Target::user(paths.home()).map_err(|error| WorkflowError::InvalidInput {
+            message: error.to_string(),
+        })?;
+        let config_path = paths.user_config();
+        validate_target_config_path(&target, &config_path, "User Scope")?;
+        match load_repository(&config_path).map_err(fatal)? {
+            LoadResult::Missing => Ok(UserScopeSession {
+                target,
+                config: RepositoryConfig::user_first_run(),
+                fingerprint: Fingerprint::Absent,
+                first_run: true,
+            }),
+            LoadResult::Valid(loaded) => Ok(UserScopeSession {
+                target,
+                config: loaded.value().clone(),
+                fingerprint: loaded.fingerprint().clone(),
+                first_run: false,
+            }),
+            LoadResult::Unsupported { version, .. } => Err(WorkflowError::InvalidInput {
+                message: format!("unsupported User Scope Configuration version {version}"),
+            }),
+            LoadResult::Invalid { issues } => Err(WorkflowError::InvalidInput {
+                message: format_issues("invalid User Scope Configuration", &issues),
+            }),
+        }
+    }
+
+    pub fn prepare_save(
+        paths: &AppPaths,
+        session: &UserScopeSession,
+        staged: RepositoryConfig,
+    ) -> Result<PreparedUserScopeSave, WorkflowError> {
+        let (library, diagnostics) = load_library_snapshot(paths)?;
+        let prepared = prepare_transition(&session.target, &session.config, &staged, &library)?;
+        Ok(PreparedUserScopeSave {
+            target: session.target.clone(),
+            staged,
+            expected: session.fingerprint.clone(),
+            library,
+            prepared,
+            diagnostics,
+        })
+    }
+
+    pub fn commit_save(
+        paths: &AppPaths,
+        prepared: PreparedUserScopeSave,
+        authorization: Authorization,
+    ) -> Result<CommandReport, WorkflowError> {
+        let path = paths.user_config();
+        validate_target_config_path(&prepared.target, &path, "User Scope")?;
         save_repository(&path, &prepared.staged, &prepared.expected).map_err(save_error)?;
         let result = execute(
             prepared.prepared,
@@ -747,16 +897,17 @@ fn save_error(error: SaveError) -> WorkflowError {
     }
 }
 
-fn validate_repository_config_path(
+fn validate_target_config_path(
     target: &Target,
     config_path: &Path,
+    scope: &str,
 ) -> Result<(), WorkflowError> {
     let parent = target.root().join(".agents");
     match std::fs::symlink_metadata(&parent) {
         Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
             return Err(WorkflowError::InvalidInput {
                 message: format!(
-                    "Repository Configuration parent must be a physical directory: {}",
+                    "{scope} Configuration parent must be a physical directory: {}",
                     parent.display()
                 ),
             });
@@ -769,7 +920,7 @@ fn validate_repository_config_path(
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(WorkflowError::InvalidInput {
                 message: format!(
-                    "Repository Configuration must be a physical file: {}",
+                    "{scope} Configuration must be a physical file: {}",
                     config_path.display()
                 ),
             })

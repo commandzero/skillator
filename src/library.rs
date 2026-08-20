@@ -312,7 +312,7 @@ pub fn scan_library(
     snapshot
 }
 
-fn expand_location(
+pub(crate) fn expand_location(
     expression: &str,
     config_parent: &Path,
     home: &Path,
@@ -346,7 +346,27 @@ fn expand_location(
             config_parent.join(path)
         }
     };
-    Ok(path)
+    // Keep the configured expression intact, but present and use a clean resolved
+    // path. `components` removes redundant `.` components without collapsing
+    // `..`, whose meaning can depend on symlinks.
+    Ok(path.components().collect())
+}
+
+pub(crate) fn suggested_source_key(root: &Path, origin: Option<&str>) -> SourceKey {
+    if let Some(origin) = origin
+        && let Some(candidate) = key_from_remote(origin)
+        && let Ok(key) = SourceKey::parse(candidate)
+    {
+        return key;
+    }
+    let name = root
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("library")
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    SourceKey::parse(format!("local/{name}"))
+        .unwrap_or_else(|_| SourceKey::parse("local/library").expect("fallback key is valid"))
 }
 
 fn path_overlap(left: &Path, right: &Path) -> bool {
@@ -384,7 +404,18 @@ fn scan_location(
     } else {
         let mut local =
             DiscoveredSource::new(root.to_owned(), PathBuf::from("."), SourceKind::Local);
-        discover_tree(root, root, &exclusions, &mut local, &mut discovered);
+        let is_local_library = location_index == 0
+            && config.sources().iter().any(|source| {
+                source.key().as_str() == "local/library" && source.path().as_str() == "."
+            });
+        discover_tree(
+            root,
+            root,
+            &exclusions,
+            &mut local,
+            &mut discovered,
+            is_local_library,
+        );
         discovered.push(local);
     }
 
@@ -488,7 +519,14 @@ fn discover_source(
         relative
     };
     let mut source = DiscoveredSource::new(source_root.to_owned(), relative, kind);
-    discover_tree(source_root, location_root, exclusions, &mut source, sources);
+    discover_tree(
+        source_root,
+        location_root,
+        exclusions,
+        &mut source,
+        sources,
+        false,
+    );
     sources.push(source);
 }
 
@@ -498,6 +536,7 @@ fn discover_tree(
     exclusions: &Gitignore,
     current: &mut DiscoveredSource,
     sources: &mut Vec<DiscoveredSource>,
+    follow_root_skill_links: bool,
 ) {
     let relative_to_source = directory
         .strip_prefix(&current.root)
@@ -520,6 +559,20 @@ fn discover_tree(
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
+        if file_type.is_symlink()
+            && follow_root_skill_links
+            && directory == current.root
+            && path.join("SKILL.md").is_file()
+        {
+            let relative_to_location = path.strip_prefix(location_root).unwrap_or(&path);
+            if !exclusions
+                .matched_path_or_any_parents(relative_to_location, true)
+                .is_ignore()
+            {
+                current.skills.push(read_skill(&path, relative_to_location));
+            }
+            continue;
+        }
         if !file_type.is_dir() || file_type.is_symlink() {
             continue;
         }
@@ -533,7 +586,14 @@ fn discover_tree(
         if is_git_root(&path) {
             discover_source(location_root, &path, SourceKind::Git, exclusions, sources);
         } else {
-            discover_tree(&path, location_root, exclusions, current, sources);
+            discover_tree(
+                &path,
+                location_root,
+                exclusions,
+                current,
+                sources,
+                follow_root_skill_links,
+            );
         }
     }
 }
@@ -633,12 +693,16 @@ fn parse_frontmatter(bytes: &[u8]) -> Result<SkillFrontmatter, String> {
     serde_saphyr::from_str(&yaml).map_err(|error| error.to_string())
 }
 
-pub(crate) fn validated_skill_name_at(directory: &Path) -> Option<String> {
+pub(crate) fn validated_skill_metadata_at(directory: &Path) -> Option<(String, String)> {
     let metadata = fs::read(directory.join("SKILL.md"))
         .ok()
         .and_then(|bytes| parse_frontmatter(&bytes).ok())?;
     (valid_skill_name(&metadata.name) && !metadata.description.trim().is_empty())
-        .then_some(metadata.name)
+        .then_some((metadata.name, metadata.description))
+}
+
+pub(crate) fn validated_skill_name_at(directory: &Path) -> Option<String> {
+    validated_skill_metadata_at(directory).map(|(name, _)| name)
 }
 
 fn valid_skill_name(name: &str) -> bool {
@@ -797,21 +861,7 @@ fn insert_unregistered_source(
 }
 
 fn suggest_source_key(source: &DiscoveredSource) -> SourceKey {
-    if let Some(origin) = source.origin.as_deref()
-        && let Some(candidate) = key_from_remote(origin)
-        && let Ok(key) = SourceKey::parse(candidate)
-    {
-        return key;
-    }
-    let name = source
-        .root
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("library")
-        .to_ascii_lowercase()
-        .replace('_', "-");
-    SourceKey::parse(format!("local/{name}"))
-        .unwrap_or_else(|_| SourceKey::parse("local/library").expect("fallback key is valid"))
+    suggested_source_key(&source.root, source.origin.as_deref())
 }
 
 fn key_from_remote(remote: &str) -> Option<String> {

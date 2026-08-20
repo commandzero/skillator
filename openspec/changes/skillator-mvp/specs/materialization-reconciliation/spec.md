@@ -73,8 +73,8 @@ An immediate child not reserved by Skillator and not claimed by an Expected Entr
 - **WHEN** Repository Configuration no longer declares a previously materialized entry
 - **THEN** ordinary sync treats the occupant as Unmanaged and preserves it
 
-### Requirement: Each Skill Directory owns a canonical Git control file
-Every configured Skill Directory SHALL own an exact UTF-8 `.gitignore` ending in a newline with content `# Managed by skillator.`, `*`, and `!.gitignore` on separate lines. Skillator MUST NOT merge user content into this file or modify the Git index. The final directory SHALL not be In Sync until the control file is canonical, eligible for tracking, tracked, and its rules effectively ignore generated and unmanaged entries.
+### Requirement: Each Repository Skill Directory owns a canonical Git control file
+Every configured Repository Skill Directory SHALL own an exact UTF-8 `.gitignore` ending in a newline with content `# Managed by skillator.`, `*`, and `!.gitignore` on separate lines. Skillator MUST NOT merge user content into this file or modify the Git index. The final directory SHALL not be In Sync until the control file is canonical, eligible for tracking, tracked, and its rules effectively ignore generated and unmanaged entries. User Scope Skill Directories SHALL have no Skillator-managed `.gitignore` and no Git tracking requirement.
 
 #### Scenario: Control file created
 - **WHEN** the control file is absent and repository ignore policy permits it

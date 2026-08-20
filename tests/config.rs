@@ -163,7 +163,7 @@ fn conditional_save_refuses_stale_content_and_cleans_staging() {
     std::fs::write(&path, "externally changed\n").unwrap();
 
     let error = save_repository(&path, &config, loaded.fingerprint()).unwrap_err();
-    assert!(matches!(error, SaveError::Stale));
+    std::assert_matches!(error, SaveError::Stale);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         "externally changed\n"

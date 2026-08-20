@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::{Color, Modifier};
 use ratatui::{Terminal, backend::TestBackend};
 use skillator::domain::MaterializationKind;
 use skillator::tui::{
@@ -77,6 +78,35 @@ fn vim_keys_and_save_keys_map_to_the_approved_actions() {
         action_for_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
         Some(Action::Save { fast: false })
     );
+
+    for (key, action) in [
+        (KeyCode::Left, Action::Collapse),
+        (KeyCode::Down, Action::MoveDown),
+        (KeyCode::Up, Action::MoveUp),
+        (KeyCode::Right, Action::Expand),
+    ] {
+        assert_eq!(
+            action_for_key(KeyEvent::new(key, KeyModifiers::NONE)),
+            Some(action)
+        );
+    }
+    for (key, action) in [
+        (KeyCode::Left, Action::Collapse),
+        (KeyCode::Down, Action::NextGroup),
+        (KeyCode::Up, Action::PreviousGroup),
+        (KeyCode::Right, Action::Expand),
+    ] {
+        assert_eq!(
+            action_for_key(KeyEvent::new(key, KeyModifiers::SHIFT)),
+            Some(action)
+        );
+    }
+    for key in [KeyCode::Left, KeyCode::Down, KeyCode::Up, KeyCode::Right] {
+        assert_eq!(
+            action_for_key(KeyEvent::new(key, KeyModifiers::CONTROL)),
+            None
+        );
+    }
 }
 
 #[test]
@@ -136,11 +166,143 @@ fn representative_target_table_renders_columns_and_tree_context() {
             output.push_str(cell.symbol());
             output
         });
-    assert!(screen.contains("Enabled"));
+    assert!(!screen.contains("Enabled"));
     assert!(screen.contains("Mode"));
     assert!(screen.contains("Skill"));
+    assert!(screen.contains("Description"));
+    assert!(screen.contains("Action"));
     assert!(screen.contains("local/library"));
     assert!(screen.contains("release-checklist"));
+}
+
+#[test]
+fn skill_row_color_is_driven_by_pending_action_not_description_prose() {
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![
+            Row::source("local/library", CheckState::Checked),
+            Row::skill(
+                "local/library",
+                "cpr-loop",
+                "Run a Copilot Pull-request Review Loop until complete with no unresolved Copilot-authored threads.",
+                true,
+                true,
+                MaterializationKind::Linked,
+                "In Sync",
+            ),
+        ],
+    );
+    let backend = TestBackend::new(120, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let skill_y = (0..terminal.backend().buffer().area.height)
+        .find(|y| {
+            (0..terminal.backend().buffer().area.width)
+                .map(|x| terminal.backend().buffer()[(x, *y)].symbol())
+                .collect::<String>()
+                .contains("cpr-loop")
+        })
+        .expect("Skill row is rendered");
+    assert!(
+        (0..terminal.backend().buffer().area.width)
+            .all(|x| terminal.backend().buffer()[(x, skill_y)].fg != Color::Indexed(220)),
+        "status-like prose in Description must not color an In-Sync row as a warning"
+    );
+
+    reduce(&mut model, Action::MoveDown);
+    reduce(&mut model, Action::Toggle);
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    assert!(
+        (0..terminal.backend().buffer().area.width)
+            .any(|x| terminal.backend().buffer()[(x, skill_y)].fg == Color::Indexed(220)),
+        "a non-empty pending Action should use the pending-change accent"
+    );
+}
+
+#[test]
+fn rendered_palette_preserves_semantics_and_structure() {
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![
+            Row::source("local/library", CheckState::Unchecked),
+            Row::skill(
+                "local/library",
+                "release-checklist",
+                "Prepare a release",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "Missing",
+            ),
+        ],
+    );
+    let backend = TestBackend::new(120, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let cells = terminal.backend().buffer().content();
+
+    assert!(
+        cells
+            .iter()
+            .any(|cell| cell.symbol() == "┌" && cell.fg == Color::Indexed(99))
+    );
+    assert_eq!(cells[0].fg, Color::Indexed(230));
+    assert!(cells.iter().any(|cell| {
+        matches!(cell.symbol(), "[" | "└")
+            && cell.fg == Color::Indexed(244)
+            && !cell.modifier.contains(Modifier::DIM)
+    }));
+    assert!(
+        cells
+            .iter()
+            .any(|cell| cell.bg == Color::Indexed(24) && cell.fg != Color::Black)
+    );
+
+    reduce(&mut model, Action::Help);
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| { cell.symbol() == "┌" && cell.fg == Color::Indexed(33) })
+    );
+}
+
+#[test]
+fn inherited_user_skill_renders_as_read_only_user_enablement() {
+    let model = Model::new(
+        Workspace::Target,
+        vec![Row::inherited_user(
+            "local/library",
+            "release-checklist",
+            "Prepare a release",
+            true,
+            "User Scope",
+        )],
+    );
+    let backend = TestBackend::new(90, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(screen.contains("[u]"));
+    assert!(screen.contains("user"));
+
+    let mut model = model;
+    assert!(reduce(&mut model, Action::Toggle).is_empty());
+    assert_eq!(model.rows()[0].check(), Some(CheckState::User));
+    std::assert_matches!(
+        model.overlay(),
+        Overlay::Notice(message) if message.contains("User tab")
+    );
 }
 
 #[test]
@@ -191,7 +353,124 @@ fn library_add_uses_location_editor_and_delete_requires_confirmation() {
 }
 
 #[test]
-fn target_edits_show_staged_outcomes_and_restore_observed_state_when_reverted() {
+fn library_footer_explains_how_to_apply_pending_changes() {
+    let model = Model::new(Workspace::Library, vec![Row::location("./library")]);
+    let backend = TestBackend::new(140, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let lines = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(140)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>();
+    let screen = lines.join("\n");
+
+    assert!(screen.contains("s save & exit"));
+    assert!(screen.contains("Ctrl+S quick save"));
+    assert!(screen.contains("Location"));
+    assert!(!screen.contains("Name"));
+    let action_line = lines
+        .iter()
+        .position(|line| line.contains("s save & exit"))
+        .unwrap();
+    assert!(lines[action_line].ends_with("? help┘"));
+    assert!(
+        lines
+            .iter()
+            .skip(action_line + 1)
+            .all(|line| !line.contains('─'))
+    );
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| { cell.symbol() == "─" && cell.fg == Color::Indexed(244) })
+    );
+}
+
+#[test]
+fn onboarding_keeps_the_default_location_in_the_table_until_edit_is_requested() {
+    let mut model = Model::new(Workspace::Onboarding, vec![Row::location("./library")]);
+    let backend = TestBackend::new(140, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+
+    assert!(!screen.contains("Edit Library Location"));
+    assert!(screen.contains("./library"));
+    assert!(screen.contains("e edit location"));
+
+    reduce(&mut model, Action::EditDirectory);
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let editor = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(editor.contains("Edit Library Location"));
+    assert!(editor.contains("Enter apply · Esc cancel"));
+}
+
+#[test]
+fn confirmation_uses_a_descriptive_title_and_bottom_border_controls() {
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![Row::skill(
+            "local/library",
+            "skill",
+            "Description",
+            false,
+            true,
+            MaterializationKind::Linked,
+            "Missing",
+        )],
+    );
+    reduce(&mut model, Action::Toggle);
+    reduce(&mut model, Action::ToggleWorkspace);
+
+    let backend = TestBackend::new(100, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let lines = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(100)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>();
+
+    let title_line = lines
+        .iter()
+        .position(|line| line.contains("Discard Workspace Changes"))
+        .unwrap();
+    let footer_line = lines
+        .iter()
+        .position(|line| line.contains("y/Enter discard"))
+        .unwrap();
+    assert!(lines[title_line].contains("┌ Discard Workspace Changes "));
+    assert!(lines[footer_line].contains("└"));
+    assert!(lines[footer_line].contains("n/Esc return"));
+    assert!(
+        lines[title_line + 1..footer_line]
+            .iter()
+            .all(|line| !line.contains("y/Enter") && !line.contains("n/Esc"))
+    );
+}
+
+#[test]
+fn target_edits_show_pending_actions_and_preserve_observed_state() {
     let mut model = Model::new(
         Workspace::Target,
         vec![Row::skill(
@@ -205,11 +484,65 @@ fn target_edits_show_staged_outcomes_and_restore_observed_state_when_reverted() 
         )],
     );
     reduce(&mut model, Action::Toggle);
-    assert_eq!(model.rows()[0].state(), "Staged Enable");
-    reduce(&mut model, Action::SwitchMode);
-    assert_eq!(model.rows()[0].state(), "Staged Enable");
-    reduce(&mut model, Action::Toggle);
+    assert_eq!(model.rows()[0].action(), "Enable link");
     assert_eq!(model.rows()[0].state(), "Disabled");
+    reduce(&mut model, Action::SwitchMode);
+    assert_eq!(model.rows()[0].action(), "Enable copy");
+    assert_eq!(model.rows()[0].state(), "Disabled");
+    reduce(&mut model, Action::Toggle);
+    assert_eq!(model.rows()[0].action(), "");
+    assert_eq!(model.rows()[0].state(), "Disabled");
+}
+
+#[test]
+fn pending_filter_keeps_group_context_and_hides_no_op_skills() {
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![
+            Row::source("local/library", CheckState::Unchecked),
+            Row::skill(
+                "local/library",
+                "pending-skill",
+                "Pending description",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "Disabled",
+            ),
+            Row::skill(
+                "local/library",
+                "quiet-skill",
+                "Quiet description",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "Disabled",
+            ),
+        ],
+    );
+    reduce(&mut model, Action::MoveDown);
+    reduce(&mut model, Action::Toggle);
+    reduce(&mut model, Action::StartFilter);
+    for character in "pending".chars() {
+        reduce(&mut model, Action::Input(character));
+    }
+    reduce(&mut model, Action::Confirm);
+
+    let backend = TestBackend::new(100, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+
+    assert!(screen.contains("local/library"));
+    assert!(screen.contains("pending-skill"));
+    assert!(screen.contains("Enable link"));
+    assert!(!screen.contains("quiet-skill"));
 }
 
 #[test]

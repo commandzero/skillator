@@ -61,18 +61,15 @@ fn invalid_target_inputs_are_rejected_without_writes() {
     let file = directory.path().join("file");
     std::fs::write(&file, "content").unwrap();
 
-    assert!(matches!(
-        Target::select(&file),
-        Err(TargetError::NotDirectory(_))
-    ));
-    assert!(matches!(
+    std::assert_matches!(Target::select(&file), Err(TargetError::NotDirectory(_)));
+    std::assert_matches!(
         Target::select(directory.path()),
         Err(TargetError::NotGit(_))
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         Target::select(directory.path().join("missing")),
         Err(TargetError::Missing(_))
-    ));
+    );
 }
 
 #[test]

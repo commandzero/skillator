@@ -9,7 +9,7 @@ The MVP SHALL expose `skillator [OPTIONS] [DIRECTORY]`, `skillator library [OPTI
 
 #### Scenario: Default root invocation
 - **WHEN** the user runs `skillator` in a Git worktree with interactive input and output
-- **THEN** Skillator launches the Target TUI for the current worktree root
+- **THEN** Skillator enters first-run Library onboarding when Library Configuration is absent, otherwise launches the Target TUI for the current worktree root with the first Repository Skill Directory selected
 
 #### Scenario: Library invocation outside Git
 - **WHEN** the user runs `skillator library` from a non-Git directory with interactive input and output

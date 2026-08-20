@@ -15,30 +15,30 @@ Skillator SHALL read and write one Library configuration at `~/.skillator/librar
 - **WHEN** the Library document declares a version other than `1`
 - **THEN** Skillator diagnoses the encountered and supported versions, preserves the document byte-for-byte, and performs no configuration or reconciliation writes
 
-### Requirement: First run stages a local Library
-When Library configuration is absent, the Library workspace SHALL stage a `./library` Location relative to `library.yaml`, creation of that directory, and registration of its local Source under `local/library`. No file or directory SHALL be created until the user saves, and the staged defaults SHALL be editable or removable.
+### Requirement: First run enters Library onboarding
+When Library configuration is absent, any root TUI invocation SHALL enter the Library onboarding workflow before loading a Repository workspace. Onboarding SHALL stage the first Library Location as a selected table row with editable expression `./library` relative to `library.yaml`, display its resolved default as `~/.skillator/library`, and stage registration of its local Source under `local/library`. It MUST NOT open a blocking path editor on entry; editing the staged default SHALL be an explicit action from the Location row. No file or directory SHALL be created until final confirmation.
 
 #### Scenario: First-run save
-- **WHEN** a user opens the Library workspace without Library configuration and saves the staged defaults
-- **THEN** Skillator creates `~/.skillator/library.yaml`, `~/.skillator/library/`, and the registered `local/library` Source
+- **WHEN** a user confirms onboarding with the default first Library Location
+- **THEN** Skillator creates `~/.skillator/library.yaml`, `~/.skillator/library/`, and the registered `local/library` Source before opening the User Scope tab
 
 #### Scenario: First-run cancellation
-- **WHEN** a user exits the first-run Library workspace without saving
+- **WHEN** a user exits onboarding without confirming
 - **THEN** Skillator leaves the filesystem unchanged
 
 ### Requirement: Locations resolve machine-local paths
-A Library Location path SHALL support expressions relative to `library.yaml`, absolute paths, home-relative paths, and `${VARIABLE}` interpolation. Skillator SHALL preserve the original expression in configuration while using its canonical resolved path for discovery and overlap checks. Failed expansion or unreadable content SHALL make the Location unavailable with a diagnostic rather than removing its registrations.
+A Library Location path SHALL support expressions relative to `library.yaml`, absolute paths, home-relative paths, and `${VARIABLE}` interpolation. Skillator SHALL preserve the original expression in configuration while using a resolved path without redundant current-directory components for review, discovery, and overlap checks. Existing Locations SHALL use their canonical path for filesystem comparison. Failed expansion or unreadable content SHALL make the Location unavailable with a diagnostic rather than removing its registrations.
 
 #### Scenario: Relative Location resolution
 - **WHEN** a Location uses `./library`
-- **THEN** Skillator resolves it relative to the directory containing `~/.skillator/library.yaml`
+- **THEN** Skillator resolves it relative to the directory containing `~/.skillator/library.yaml` and displays `~/.skillator/library` without an embedded `/./` segment
 
 #### Scenario: Failed variable expansion
 - **WHEN** a Location references an unavailable environment variable
 - **THEN** Skillator reports the Location unavailable and retains its configured expression and registered identities
 
 ### Requirement: Discovery respects Source boundaries
-Skillator SHALL recursively discover Skills beneath every available Location, SHALL always prune entries named `.git`, SHALL not follow directory symlinks, and SHALL apply configured Gitignore-style exclusion patterns relative to the Location. Each nearest enclosing Git repository, including worktrees, submodules, and repositories represented by a `.git` file, SHALL be a distinct Source. Content outside nested Git Sources SHALL belong to that Location's local Source.
+Skillator SHALL recursively discover Skills beneath every available Location, SHALL always prune entries named `.git`, SHALL not recurse through directory symlinks, and SHALL apply configured Gitignore-style exclusion patterns relative to the Location. As the sole exception needed by `link` acquisition, Skillator SHALL recognize a direct child symlink of the first Location's root as one Skill in `local/library` when that link resolves to a valid Skill, without traversing beyond that one Skill boundary. Each nearest enclosing Git repository, including worktrees, submodules, and repositories represented by a `.git` file, SHALL be a distinct Source. Content outside nested Git Sources SHALL belong to that Location's local Source.
 
 #### Scenario: Mixed local and Git discovery
 - **WHEN** a Location contains local Skills and multiple nested Git repositories
@@ -94,3 +94,21 @@ Unregistering a Source or Skill SHALL update only Library configuration after ex
 #### Scenario: Registered Skill removed from Library
 - **WHEN** the user confirms unregistration of a Skill referenced by a Target Repository
 - **THEN** Skillator removes only the Library registration and preserves the Target's declarative Enablement unchanged
+
+### Requirement: The local Library accepts explicit acquisition modes
+The first configured Library Location's `local/library` Source SHALL be the only acquisition destination. Valid Skills in additional Locations MAY be acquired into that local Library with mode `move`, `copy`, or `link`; Skillator MUST NOT acquire content into additional Locations. `move` SHALL be the default and preferred mode for a newly selected external Skill, SHALL transfer the physical Skill into the local Library, and SHALL remove the original only after the destination is verified. `copy` SHALL publish a verified physical duplicate while preserving the original. `link` SHALL publish a symbolic link in the local Library to the canonical original. A blank mode SHALL register the Skill in place without acquisition.
+
+#### Scenario: External Skill moved into the local Library
+- **WHEN** a user selects a valid Skill from an additional Location with default `move` mode and confirms Save
+- **THEN** Skillator publishes and registers the Skill beneath the first Location's `local/library` Source and removes the original only after verified publication
+
+#### Scenario: External Skill copied or linked
+- **WHEN** a user chooses `copy` or `link` for a valid Skill from an additional Location and confirms Save
+- **THEN** Skillator creates the selected representation beneath the local Library and preserves the original Skill
+
+### Requirement: Library acquisition preserves content on failure
+Library acquisition SHALL validate the local destination and Source immediately before mutation, reject collisions without replacement, stage copied content on the destination filesystem, retain recoverable originals until configuration publication succeeds, and roll back every acquisition in the confirmed batch when any acquisition or Library Configuration save fails. Source-root Git Skills and unsupported or uninspectable entries SHALL be Blocked rather than moving an enclosing repository implicitly.
+
+#### Scenario: Acquisition destination collision
+- **WHEN** the local Library already contains the selected Skill name
+- **THEN** Skillator leaves both source and destination untouched and reports the blocked acquisition

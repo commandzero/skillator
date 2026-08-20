@@ -110,7 +110,7 @@ fn prepared_plan_holds_an_exclusive_noncreating_target_lock() {
     let fixture = Fixture::new("linked");
     let first = prepare_check(&fixture.target, &fixture.repository, &fixture.library).unwrap();
     let second = prepare_check(&fixture.target, &fixture.repository, &fixture.library);
-    assert!(matches!(second, Err(TargetBusy)));
+    std::assert_matches!(second, Err(TargetBusy));
     drop(first);
     assert!(prepare_check(&fixture.target, &fixture.repository, &fixture.library).is_ok());
 }
