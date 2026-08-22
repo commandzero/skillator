@@ -40,6 +40,22 @@ pub struct GitRepository {
     superproject: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreePair {
+    primary: PathBuf,
+    current: PathBuf,
+}
+
+impl WorktreePair {
+    pub fn primary_root(&self) -> &Path {
+        &self.primary
+    }
+
+    pub fn current_root(&self) -> &Path {
+        &self.current
+    }
+}
+
 impl GitRepository {
     pub fn discover(path: &Path) -> Result<Self, GitError> {
         let bare_output = git_at(path, ["rev-parse", "--is-bare-repository"])?;
@@ -94,6 +110,49 @@ impl GitRepository {
 
     pub fn superproject(&self) -> Option<&Path> {
         self.superproject.as_deref()
+    }
+
+    /// Return the primary and current roots when this repository is a
+    /// registered linked worktree. Git's worktree metadata is the source of
+    /// truth; directory names and sibling layout are deliberately ignored.
+    pub fn linked_worktree_pair(&self) -> Result<WorktreePair, GitError> {
+        let output = self.command(["worktree", "list", "--porcelain"])?;
+        require_success(&output, "git worktree list")?;
+        let mut roots = Vec::new();
+        let mut pending = None;
+        for line in stdout(&output)?.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                pending = Some(PathBuf::from(path));
+            } else if line.is_empty()
+                && let Some(path) = pending.take()
+            {
+                roots.push(path.canonicalize()?);
+            }
+        }
+        if let Some(path) = pending.take() {
+            roots.push(path.canonicalize()?);
+        }
+
+        let Some(primary) = roots.first().cloned() else {
+            return Err(GitError::NotWorktree {
+                message: "Git has no registered worktrees".to_owned(),
+            });
+        };
+        if self.root == primary {
+            return Err(GitError::NotWorktree {
+                message: "current directory is the primary worktree, not a linked worktree"
+                    .to_owned(),
+            });
+        }
+        if !roots.iter().any(|root| root == &self.root) {
+            return Err(GitError::NotWorktree {
+                message: "current directory is not a registered Git worktree".to_owned(),
+            });
+        }
+        Ok(WorktreePair {
+            primary,
+            current: self.root.clone(),
+        })
     }
 
     pub fn origin(&self) -> Result<Option<String>, GitError> {

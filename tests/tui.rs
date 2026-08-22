@@ -377,7 +377,6 @@ fn inherited_user_skill_renders_as_read_only_user_enablement() {
         "inherited User Scope entries should use the dim foreground"
     );
 
-    let mut model = model;
     reduce(&mut model, Action::MoveUp);
     assert!(reduce(&mut model, Action::Toggle).is_empty());
     assert_eq!(model.rows()[0].check(), Some(CheckState::User));

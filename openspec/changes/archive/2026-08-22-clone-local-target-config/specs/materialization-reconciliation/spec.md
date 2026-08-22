@@ -17,7 +17,7 @@ The generated content SHALL ignore only Skillator-managed materializations and S
 - **WHEN** local Target configuration enables `release-checklist` in `.agents/skills`
 - **THEN** the generated `.agents/.gitignore` ignores `skills/release-checklist` without ignoring other entries in `skills`
 
-#### Scenario: Control file needs tracking
+#### Scenario: Control file is local
 - **WHEN** the generated local control file exists
 - **THEN** the repository root ignore rule hides it from Git status and Skillator never asks the user to stage it
 
