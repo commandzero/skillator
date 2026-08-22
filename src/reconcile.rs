@@ -174,7 +174,12 @@ pub fn plan(
                         &control,
                         Action::TrackControlFile,
                         &format!(
-                            "run `git add -f -- {}/.gitignore`",
+                            "run `git add {}-- {}/.gitignore`",
+                            if directory.control_ignored() {
+                                "-f "
+                            } else {
+                                ""
+                            },
                             control
                                 .parent()
                                 .and_then(|parent| parent.strip_prefix(observed.target_root()).ok())

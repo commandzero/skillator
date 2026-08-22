@@ -1,7 +1,7 @@
 mod support;
 
 use skillator::config::{LibraryConfigCodec, LoadResult};
-use skillator::library::{Registration, SkillValidity, SourceKind, scan_library};
+use skillator::library::{SkillValidity, SourceKind, scan_library};
 use std::collections::BTreeMap;
 
 #[test]
@@ -50,31 +50,20 @@ fn library_scan_keeps_one_inventory_across_local_and_git_sources() {
     let local = snapshot.source("local/library").unwrap();
     assert_eq!(local.kind(), SourceKind::Local);
     assert_eq!(
-        local.skill("local-skill").unwrap().registration(),
-        Registration::Registered
-    );
-    assert_eq!(
         local.skill("legacy-helper").unwrap().validity(),
         SkillValidity::Invalid
     );
     let git = snapshot.source("elastic/agent-skills").unwrap();
     assert_eq!(git.kind(), SourceKind::Git);
-    assert_eq!(
-        git.skill(".").unwrap().registration(),
-        Registration::Registered
-    );
-    assert_eq!(
-        git.skill("nested").unwrap().registration(),
-        Registration::Unregistered
-    );
+    assert!(git.skill(".").is_some());
+    assert!(git.skill("nested").is_some());
 }
 
 #[test]
-fn unavailable_and_moved_registrations_remain_visible() {
+fn manually_added_skill_is_discovered_without_config_refresh() {
     let home = support::TestHome::new();
     let library = home.path().join("library");
-    std::fs::create_dir_all(library.join("new-place")).unwrap();
-    write_skill(&library.join("new-place"), "new-place", "Moved skill");
+    std::fs::create_dir_all(&library).unwrap();
     let yaml = format!(
         "version: 1\nlocations:\n  - path: {}\n    exclusions: []\n    allow_overlap: false\n    sources:\n      - key: local/library\n        path: .\n        skills:\n          - path: old-place\n      - key: missing/source\n        path: missing\n        skills:\n          - path: absent\n",
         serde_json::to_string(library.to_str().unwrap()).unwrap()
@@ -83,31 +72,38 @@ fn unavailable_and_moved_registrations_remain_visible() {
         panic!("valid fixture config");
     };
 
-    let snapshot = scan_library(
+    let before = scan_library(
         config.value(),
         &home.library_config(),
         home.path(),
         &BTreeMap::new(),
     );
 
-    assert!(!snapshot.source("missing/source").unwrap().available());
+    assert!(before.source("missing/source").is_none());
     assert!(
-        !snapshot
+        before
             .source("local/library")
             .unwrap()
-            .skill("old-place")
-            .unwrap()
-            .available()
+            .skill("unslop")
+            .is_none()
     );
-    assert_eq!(
-        snapshot
-            .source("local/library")
-            .unwrap()
-            .skill("new-place")
-            .unwrap()
-            .registration(),
-        Registration::Unregistered
+
+    std::fs::create_dir_all(library.join("unslop")).unwrap();
+    write_skill(&library.join("unslop"), "unslop", "Remove AI writing tells");
+
+    let after = scan_library(
+        config.value(),
+        &home.library_config(),
+        home.path(),
+        &BTreeMap::new(),
     );
+    let skill = after
+        .source("local/library")
+        .unwrap()
+        .skill("unslop")
+        .unwrap();
+    assert_eq!(skill.name(), Some("unslop"));
+    assert_eq!(skill.description(), Some("Remove AI writing tells"));
 }
 
 #[test]
@@ -138,7 +134,7 @@ fn expressions_exclusions_and_directory_symlinks_are_respected() {
     let source = snapshot.source("local/skills").unwrap();
     assert!(source.skill("kept").is_some());
     assert!(source.skill("ignored/hidden").is_none());
-    assert!(source.skill("linked").is_none());
+    assert!(source.skill("linked").is_some());
 }
 
 #[test]
@@ -165,7 +161,7 @@ fn repository_root_skill_uses_frontmatter_name_independently_of_source_directory
     );
 
     let skill = snapshot
-        .source("local/repository")
+        .source("local/repository-name")
         .unwrap()
         .skill(".")
         .unwrap();
@@ -203,7 +199,7 @@ fn allowed_overlaps_are_visible_as_advisories() {
 }
 
 #[test]
-fn discovered_source_key_collision_preserves_registered_and_discovered_rows() {
+fn legacy_source_inventory_does_not_create_phantom_sources() {
     let home = support::TestHome::new();
     let library = home.path().join("library");
     let discovered = library.join("different-path");
@@ -234,17 +230,8 @@ fn discovered_source_key_collision_preserves_registered_and_discovered_rows() {
         &BTreeMap::new(),
     );
 
-    assert_eq!(
-        snapshot
-            .sources()
-            .filter(|source| source.key().as_str() == "acme/skills")
-            .count(),
-        2
-    );
-    assert!(!snapshot.source("acme/skills").unwrap().available());
-    assert!(snapshot.sources().any(|source| {
-        source.key().as_str() == "acme/skills" && source.available() && source.key_collision()
-    }));
+    assert_eq!(snapshot.sources().len(), 2);
+    assert!(snapshot.source("acme/skills").unwrap().available());
 }
 
 #[test]
@@ -275,7 +262,6 @@ fn invalid_registered_skill_keeps_its_registration_identity() {
         .unwrap();
 
     assert_eq!(skill.validity(), SkillValidity::Invalid);
-    assert_eq!(skill.registration(), Registration::Registered);
 }
 
 fn write_skill(directory: &std::path::Path, name: &str, description: &str) {

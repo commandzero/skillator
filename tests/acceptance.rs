@@ -10,7 +10,7 @@ use skillator::config::{
     LibraryConfig, LibraryConfigCodec, LoadResult, RepositoryConfig, RepositoryConfigCodec,
 };
 use skillator::domain::MaterializationKind;
-use skillator::library::{LibrarySnapshot, Registration, SkillValidity, scan_library};
+use skillator::library::{LibrarySnapshot, SkillValidity, scan_library};
 use skillator::reconcile::{Authorization, Outcome, Safety, execute, plan, prepare_check};
 use skillator::target::{Comparison, MaterializationState, ObservedState, Target, observe};
 use skillator::tui::{Action as TuiAction, CheckState, Model, Overlay, Row, Workspace, reduce};
@@ -134,7 +134,7 @@ impl AcceptanceFixture {
 fn wayfinder_01_discovers_multiple_locations_and_sources() {
     let fixture = AcceptanceFixture::new();
     assert_eq!(fixture.library_config.locations().len(), 2);
-    assert!(fixture.library.sources().len() >= 3);
+    assert_eq!(fixture.library.sources().len(), 2);
 }
 
 #[test]
@@ -142,9 +142,7 @@ fn wayfinder_02_keeps_registered_valid_skills_available() {
     let fixture = AcceptanceFixture::new();
     let source = fixture.library.source("local/catalog").unwrap();
     assert!(source.skills().any(|skill| {
-        skill.path() == "release-checklist"
-            && skill.registration() == Registration::Registered
-            && skill.validity() == SkillValidity::Valid
+        skill.path() == "release-checklist" && skill.validity() == SkillValidity::Valid
     }));
 }
 
@@ -158,11 +156,9 @@ fn wayfinder_03_surfaces_invalid_skills_without_registering_them() {
 }
 
 #[test]
-fn wayfinder_04_preserves_unavailable_registered_sources() {
+fn wayfinder_04_missing_locations_do_not_create_phantom_sources() {
     let fixture = AcceptanceFixture::new();
-    let source = fixture.library.source("missing/source").unwrap();
-    assert_eq!(source.registration(), Registration::Registered);
-    assert!(!source.available());
+    assert!(fixture.library.source("missing/source").is_none());
 }
 
 #[test]

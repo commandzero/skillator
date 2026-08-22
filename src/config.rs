@@ -8,7 +8,7 @@ use crate::fs_safety::{rename_exchange, rename_noreplace};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -69,6 +69,8 @@ pub enum LoadError {
 pub enum RenderError {
     #[error("cannot encode YAML string: {0}")]
     String(#[from] serde_json::Error),
+    #[error("Skill name `{skill}` appears more than once in target `{target}")]
+    DuplicateTargetSkill { target: String, skill: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -113,7 +115,7 @@ impl SkillDirectoryConfig {
         Self::new(
             SkillDirectoryKey::parse("agents").expect("built-in key is valid"),
             RepositoryRelativePath::parse(".agents/skills").expect("built-in path is valid"),
-            Some("Generic / OpenAI Codex".to_owned()),
+            Some(".agents".to_owned()),
         )
     }
 
@@ -223,65 +225,18 @@ impl RepositoryConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegisteredSkillConfig {
-    path: SkillPath,
-}
-
-impl RegisteredSkillConfig {
-    pub fn new(path: SkillPath) -> Self {
-        Self { path }
-    }
-
-    pub fn path(&self) -> &SkillPath {
-        &self.path
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegisteredSourceConfig {
-    key: SourceKey,
-    path: SkillPath,
-    skills: Vec<RegisteredSkillConfig>,
-}
-
-impl RegisteredSourceConfig {
-    pub fn new(key: SourceKey, path: SkillPath, skills: Vec<RegisteredSkillConfig>) -> Self {
-        Self { key, path, skills }
-    }
-
-    pub fn key(&self) -> &SourceKey {
-        &self.key
-    }
-
-    pub fn path(&self) -> &SkillPath {
-        &self.path
-    }
-
-    pub fn skills(&self) -> &[RegisteredSkillConfig] {
-        &self.skills
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryLocationConfig {
     path: String,
     exclusions: Vec<String>,
     allow_overlap: bool,
-    sources: Vec<RegisteredSourceConfig>,
 }
 
 impl LibraryLocationConfig {
-    pub fn new(
-        path: String,
-        exclusions: Vec<String>,
-        allow_overlap: bool,
-        sources: Vec<RegisteredSourceConfig>,
-    ) -> Self {
+    pub fn new(path: String, exclusions: Vec<String>, allow_overlap: bool) -> Self {
         Self {
             path,
             exclusions,
             allow_overlap,
-            sources,
         }
     }
 
@@ -296,20 +251,20 @@ impl LibraryLocationConfig {
     pub fn allow_overlap(&self) -> bool {
         self.allow_overlap
     }
-
-    pub fn sources(&self) -> &[RegisteredSourceConfig] {
-        &self.sources
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryConfig {
     locations: Vec<LibraryLocationConfig>,
+    hidden_skills: BTreeSet<SkillKey>,
 }
 
 impl LibraryConfig {
     pub fn new(locations: Vec<LibraryLocationConfig>) -> Result<Self, Vec<ConfigIssue>> {
-        let value = Self { locations };
+        let value = Self {
+            locations,
+            hidden_skills: BTreeSet::new(),
+        };
         let issues = validate_library(&value);
         if issues.is_empty() {
             Ok(value)
@@ -321,6 +276,7 @@ impl LibraryConfig {
     pub fn empty() -> Self {
         Self {
             locations: Vec::new(),
+            hidden_skills: BTreeSet::new(),
         }
     }
 
@@ -330,17 +286,37 @@ impl LibraryConfig {
                 "./library".to_owned(),
                 Vec::new(),
                 false,
-                vec![RegisteredSourceConfig::new(
-                    SourceKey::parse("local/library").expect("built-in key is valid"),
-                    SkillPath::parse(".").expect("root path is valid"),
-                    Vec::new(),
-                )],
             )],
+            hidden_skills: BTreeSet::new(),
         }
     }
 
     pub fn locations(&self) -> &[LibraryLocationConfig] {
         &self.locations
+    }
+
+    pub fn is_visible(&self, skill: &SkillKey) -> bool {
+        !self.hidden_skills.contains(skill)
+    }
+
+    pub fn hidden_skills(&self) -> &BTreeSet<SkillKey> {
+        &self.hidden_skills
+    }
+
+    pub fn with_hidden_skills(
+        &self,
+        hidden_skills: BTreeSet<SkillKey>,
+    ) -> Result<Self, Vec<ConfigIssue>> {
+        let value = Self {
+            locations: self.locations.clone(),
+            hidden_skills,
+        };
+        let issues = validate_library(&value);
+        if issues.is_empty() {
+            Ok(value)
+        } else {
+            Err(issues)
+        }
     }
 
     pub fn with_locations(
@@ -383,10 +359,39 @@ struct RawSkill {
 }
 
 #[derive(Deserialize)]
+struct RawTargetMap {
+    version: u64,
+    #[serde(flatten)]
+    targets: BTreeMap<String, RawTargetDirectory>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTargetDirectory {
+    path: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    skills: BTreeMap<String, RawTargetSkill>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTargetSkill {
+    source: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default, rename = "type")]
+    materialization: Option<String>,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawLibrary {
     version: u64,
     locations: Vec<RawLocation>,
+    #[serde(default)]
+    hidden_skills: Vec<RawSkill>,
 }
 
 #[derive(Deserialize)]
@@ -398,22 +403,7 @@ struct RawLocation {
     #[serde(default)]
     allow_overlap: bool,
     #[serde(default)]
-    sources: Vec<RawSource>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawSource {
-    key: String,
-    path: String,
-    #[serde(default)]
-    skills: Vec<RawRegisteredSkill>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawRegisteredSkill {
-    path: String,
+    sources: Vec<Value>,
 }
 
 pub struct RepositoryConfigCodec;
@@ -422,12 +412,17 @@ impl RepositoryConfigCodec {
     pub fn parse(bytes: &[u8]) -> LoadResult<RepositoryConfig> {
         parse_document(bytes, |text| {
             let value: Value = parse_yaml(text)?;
-            let issues = validate_repository_shape(&value);
-            if !issues.is_empty() {
-                return Err(issues);
+            if value
+                .as_object()
+                .is_some_and(|root| root.contains_key("skill_directories"))
+            {
+                let issues = validate_repository_shape(&value);
+                if !issues.is_empty() {
+                    return Err(issues);
+                }
+                return convert_repository(parse_yaml(text)?);
             }
-            let raw: RawRepository = parse_yaml(text)?;
-            convert_repository(raw)
+            convert_target_map(parse_yaml(text)?)
         })
     }
 
@@ -443,39 +438,51 @@ impl RepositoryConfigCodec {
             ))
         });
 
-        let mut output = String::from("version: 1\nskill_directories:");
-        if directories.is_empty() {
-            output.push_str(" []\n");
-        } else {
-            output.push('\n');
-            for directory in directories {
-                output.push_str(&format!(
-                    "  - key: {}\n    path: {}\n",
-                    quote(directory.key.as_str())?,
-                    quote(directory.path.as_str())?
-                ));
-                if let Some(label) = directory.label {
-                    output.push_str(&format!("    label: {}\n", quote(&label)?));
-                }
+        let mut output = String::from("version: 1\n");
+        for directory in directories {
+            output.push_str(&format!("{}:\n", directory.key.as_str()));
+            output.push_str(&format!("  path: {}\n", quote(directory.path.as_str())?));
+            if let Some(label) = directory.label {
+                output.push_str(&format!("  label: {}\n", quote(&label)?));
             }
-        }
-        output.push_str("enablements:");
-        if enablements.is_empty() {
-            output.push_str(" []\n");
-        } else {
-            output.push('\n');
-            for enablement in enablements {
-                let mode = match enablement.materialization() {
-                    MaterializationKind::Linked => "linked",
-                    MaterializationKind::Copied => "copied",
-                };
-                output.push_str(&format!(
-                    "  - directory: {}\n    skill:\n      source: {}\n      path: {}\n    materialization: {}\n",
-                    quote(enablement.directory().as_str())?,
-                    quote(enablement.skill().source().as_str())?,
-                    quote(enablement.skill().path().as_str())?,
-                    quote(mode)?
-                ));
+            let entries = enablements
+                .iter()
+                .filter(|enablement| enablement.directory() == &directory.key)
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                output.push_str("  skills: {}\n");
+            } else {
+                output.push_str("  skills:\n");
+                let mut names = BTreeSet::new();
+                for enablement in entries {
+                    let name = enablement
+                        .skill()
+                        .path()
+                        .as_str()
+                        .rsplit('/')
+                        .next()
+                        .expect("Skill path has a final segment");
+                    if !names.insert(name) {
+                        return Err(RenderError::DuplicateTargetSkill {
+                            target: directory.key.as_str().to_owned(),
+                            skill: name.to_owned(),
+                        });
+                    }
+                    output.push_str(&format!("    {}:\n", quote(name)?));
+                    output.push_str(&format!(
+                        "      source: {}\n",
+                        quote(enablement.skill().source().as_str())?
+                    ));
+                    if enablement.skill().path().as_str() != name {
+                        output.push_str(&format!(
+                            "      path: {}\n",
+                            quote(enablement.skill().path().as_str())?
+                        ));
+                    }
+                    if enablement.materialization() == MaterializationKind::Copied {
+                        output.push_str("      type: \"copied\"\n");
+                    }
+                }
             }
         }
         Ok(output)
@@ -501,46 +508,29 @@ impl LibraryConfigCodec {
         let mut output = String::from("version: 1\nlocations:");
         if config.locations.is_empty() {
             output.push_str(" []\n");
-            return Ok(output);
-        }
-        output.push('\n');
-        for location in &config.locations {
-            output.push_str(&format!("  - path: {}\n", quote(&location.path)?));
-            if location.exclusions.is_empty() {
-                output.push_str("    exclusions: []\n");
-            } else {
-                output.push_str("    exclusions:\n");
-                for exclusion in &location.exclusions {
-                    output.push_str(&format!("      - {}\n", quote(exclusion)?));
-                }
-            }
-            output.push_str(&format!("    allow_overlap: {}\n", location.allow_overlap));
-            if location.sources.is_empty() {
-                output.push_str("    sources: []\n");
-            } else {
-                output.push_str("    sources:\n");
-                let mut sources = location.sources.clone();
-                sources.sort_by(|left, right| left.key.cmp(&right.key));
-                for source in sources {
-                    output.push_str(&format!(
-                        "      - key: {}\n        path: {}\n",
-                        quote(source.key.as_str())?,
-                        quote(source.path.as_str())?
-                    ));
-                    if source.skills.is_empty() {
-                        output.push_str("        skills: []\n");
-                    } else {
-                        output.push_str("        skills:\n");
-                        let mut skills = source.skills.clone();
-                        skills.sort_by(|left, right| left.path.cmp(&right.path));
-                        for skill in skills {
-                            output.push_str(&format!(
-                                "          - path: {}\n",
-                                quote(skill.path.as_str())?
-                            ));
-                        }
+        } else {
+            output.push('\n');
+            for location in &config.locations {
+                output.push_str(&format!("  - path: {}\n", quote(&location.path)?));
+                if location.exclusions.is_empty() {
+                    output.push_str("    exclusions: []\n");
+                } else {
+                    output.push_str("    exclusions:\n");
+                    for exclusion in &location.exclusions {
+                        output.push_str(&format!("      - {}\n", quote(exclusion)?));
                     }
                 }
+                output.push_str(&format!("    allow_overlap: {}\n", location.allow_overlap));
+            }
+        }
+        if !config.hidden_skills.is_empty() {
+            output.push_str("hidden_skills:\n");
+            for skill in &config.hidden_skills {
+                output.push_str(&format!(
+                    "  - source: {}\n",
+                    quote(skill.source().as_str())?
+                ));
+                output.push_str(&format!("    path: {}\n", quote(skill.path().as_str())?));
             }
         }
         Ok(output)
@@ -757,11 +747,29 @@ fn validate_library_shape(value: &Value) -> Vec<ConfigIssue> {
     validate_keys(
         root,
         "$",
-        &["version", "locations"],
+        &["version", "locations", "hidden_skills"],
         &["version", "locations"],
         &mut issues,
     );
     expect_unsigned(root.get("version"), "version", &mut issues);
+    if let Some(hidden) =
+        expect_optional_array(root.get("hidden_skills"), "hidden_skills", &mut issues)
+    {
+        for (index, skill) in hidden.iter().enumerate() {
+            let path = format!("hidden_skills[{index}]");
+            if let Some(skill) = expect_object(skill, &path, &mut issues) {
+                validate_keys(
+                    skill,
+                    &path,
+                    &["source", "path"],
+                    &["source", "path"],
+                    &mut issues,
+                );
+                expect_string(skill.get("source"), &format!("{path}.source"), &mut issues);
+                expect_string(skill.get("path"), &format!("{path}.path"), &mut issues);
+            }
+        }
+    }
     if let Some(locations) = expect_array(root.get("locations"), "locations", &mut issues) {
         for (location_index, value) in locations.iter().enumerate() {
             let path = format!("locations[{location_index}]");
@@ -1045,6 +1053,80 @@ fn convert_repository(raw: RawRepository) -> Result<RepositoryConfig, Vec<Config
     }
 }
 
+fn convert_target_map(raw: RawTargetMap) -> Result<RepositoryConfig, Vec<ConfigIssue>> {
+    if raw.version != VERSION {
+        return Err(vec![ConfigIssue {
+            path: "version".to_owned(),
+            message: "only version 1 is supported".to_owned(),
+        }]);
+    }
+    let mut directories = Vec::new();
+    let mut enablements = Vec::new();
+    let mut issues = Vec::new();
+    for (key_text, target) in raw.targets {
+        let key = match SkillDirectoryKey::parse(&key_text) {
+            Ok(key) => key,
+            Err(error) => {
+                issue(&mut issues, key_text, error);
+                continue;
+            }
+        };
+        let path = match RepositoryRelativePath::parse(&target.path) {
+            Ok(path) => path,
+            Err(error) => {
+                issue(&mut issues, format!("{}.path", key.as_str()), error);
+                continue;
+            }
+        };
+        for (name, skill) in target.skills {
+            let source = SourceKey::parse(&skill.source).map_err(|error| {
+                issue(
+                    &mut issues,
+                    format!("{}.skills.{name}.source", key.as_str()),
+                    error,
+                )
+            });
+            let path_text = skill.path.as_deref().unwrap_or(&name);
+            let skill_path = SkillPath::parse(path_text).map_err(|error| {
+                issue(
+                    &mut issues,
+                    format!("{}.skills.{name}.path", key.as_str()),
+                    error,
+                )
+            });
+            let materialization = match skill.materialization.as_deref().unwrap_or("linked") {
+                "linked" => Ok(MaterializationKind::Linked),
+                "copied" => Ok(MaterializationKind::Copied),
+                _ => Err(issue(
+                    &mut issues,
+                    format!("{}.skills.{name}.type", key.as_str()),
+                    "expected `linked` or `copied`",
+                )),
+            };
+            if let (Ok(source), Ok(skill_path), Ok(materialization)) =
+                (source, skill_path, materialization)
+            {
+                enablements.push(Enablement::new(
+                    key.clone(),
+                    SkillKey::new(source, skill_path),
+                    materialization,
+                ));
+            }
+        }
+        directories.push(SkillDirectoryConfig::new(key, path, target.label));
+    }
+    let candidate = RepositoryConfig {
+        skill_directories: directories,
+        enablements,
+    };
+    issues.extend(validate_repository(&candidate));
+    if issues.is_empty() {
+        Ok(candidate)
+    } else {
+        Err(issues)
+    }
+}
+
 fn issue(
     issues: &mut Vec<ConfigIssue>,
     path: String,
@@ -1121,7 +1203,12 @@ fn paths_overlap(left: &str, right: &str) -> bool {
 }
 
 fn convert_library(raw: RawLibrary) -> Result<LibraryConfig, Vec<ConfigIssue>> {
-    if raw.version != VERSION {
+    let RawLibrary {
+        version,
+        locations: raw_locations,
+        hidden_skills: raw_hidden_skills,
+    } = raw;
+    if version != VERSION {
         return Err(vec![ConfigIssue {
             path: "version".to_owned(),
             message: "only version 1 is supported".to_owned(),
@@ -1129,56 +1216,46 @@ fn convert_library(raw: RawLibrary) -> Result<LibraryConfig, Vec<ConfigIssue>> {
     }
     let mut issues = Vec::new();
     let mut locations = Vec::new();
-    for (location_index, raw) in raw.locations.into_iter().enumerate() {
+    for (location_index, raw) in raw_locations.into_iter().enumerate() {
         if raw.path.trim().is_empty() {
             issues.push(ConfigIssue {
                 path: format!("locations[{location_index}].path"),
                 message: "Location path cannot be empty".to_owned(),
             });
         }
-        let mut sources = Vec::new();
-        for (source_index, source) in raw.sources.into_iter().enumerate() {
-            let key = SourceKey::parse(&source.key).map_err(|error| {
-                issue(
-                    &mut issues,
-                    format!("locations[{location_index}].sources[{source_index}].key"),
-                    error,
-                )
-            });
-            let path = SkillPath::parse(&source.path).map_err(|error| {
-                issue(
-                    &mut issues,
-                    format!("locations[{location_index}].sources[{source_index}].path"),
-                    error,
-                )
-            });
-            let mut skills = Vec::new();
-            for (skill_index, skill) in source.skills.into_iter().enumerate() {
-                match SkillPath::parse(&skill.path) {
-                    Ok(path) => skills.push(RegisteredSkillConfig::new(path)),
-                    Err(error) => {
-                        issue(
-                            &mut issues,
-                            format!(
-                                "locations[{location_index}].sources[{source_index}].skills[{skill_index}].path"
-                            ),
-                            error,
-                        );
-                    }
-                }
-            }
-            if let (Ok(key), Ok(path)) = (key, path) {
-                sources.push(RegisteredSourceConfig::new(key, path, skills));
-            }
-        }
+        // `sources` is accepted as legacy input so development builds can open
+        // previously written configuration.  Source and Skill inventory is now
+        // discovered from the Location at runtime and is deliberately not
+        // retained in the configuration model.
+        let _legacy_sources = raw.sources;
         locations.push(LibraryLocationConfig::new(
             raw.path,
             raw.exclusions,
             raw.allow_overlap,
-            sources,
         ));
     }
-    let candidate = LibraryConfig { locations };
+    let hidden_skills = raw_hidden_skills
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, raw)| {
+            match (SourceKey::parse(&raw.source), SkillPath::parse(&raw.path)) {
+                (Ok(source), Ok(path)) => Some(SkillKey::new(source, path)),
+                (source, path) => {
+                    if let Err(error) = source {
+                        issue(&mut issues, format!("hidden_skills[{index}].source"), error);
+                    }
+                    if let Err(error) = path {
+                        issue(&mut issues, format!("hidden_skills[{index}].path"), error);
+                    }
+                    None
+                }
+            }
+        })
+        .collect();
+    let candidate = LibraryConfig {
+        locations,
+        hidden_skills,
+    };
     issues.extend(validate_library(&candidate));
     if issues.is_empty() {
         Ok(candidate)
@@ -1188,38 +1265,8 @@ fn convert_library(raw: RawLibrary) -> Result<LibraryConfig, Vec<ConfigIssue>> {
 }
 
 fn validate_library(config: &LibraryConfig) -> Vec<ConfigIssue> {
-    let mut issues = Vec::new();
-    let mut keys = BTreeSet::new();
-    for location in &config.locations {
-        let mut source_paths = BTreeSet::new();
-        for source in &location.sources {
-            if !keys.insert(source.key.as_str()) {
-                issues.push(ConfigIssue {
-                    path: "locations.sources.key".to_owned(),
-                    message: format!("duplicate Source Key `{}`", source.key),
-                });
-            }
-            if !source_paths.insert(source.path.as_str()) {
-                issues.push(ConfigIssue {
-                    path: "locations.sources.path".to_owned(),
-                    message: format!(
-                        "duplicate Source path `{}` within Library Location",
-                        source.path
-                    ),
-                });
-            }
-            let mut skills = BTreeSet::new();
-            for skill in &source.skills {
-                if !skills.insert(skill.path.as_str()) {
-                    issues.push(ConfigIssue {
-                        path: "locations.sources.skills.path".to_owned(),
-                        message: format!("duplicate registered Skill `{}`", skill.path),
-                    });
-                }
-            }
-        }
-    }
-    issues
+    let _ = config;
+    Vec::new()
 }
 
 pub fn load_repository(path: &Path) -> Result<LoadResult<RepositoryConfig>, LoadError> {

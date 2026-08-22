@@ -71,6 +71,10 @@ fn vim_keys_and_save_keys_map_to_the_approved_actions() {
         Some(Action::ToggleWorkspace)
     );
     assert_eq!(
+        action_for_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+        Some(Action::NewTargetTab)
+    );
+    assert_eq!(
         action_for_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
         Some(Action::Save { fast: true })
     );
@@ -176,6 +180,69 @@ fn representative_target_table_renders_columns_and_tree_context() {
 }
 
 #[test]
+fn temporary_messages_use_the_final_status_line() {
+    let model = Model::new(
+        Workspace::Target,
+        vec![
+            Row::diagnostic("Skill Directory needs attention"),
+            Row::source("local/library", CheckState::Unchecked),
+        ],
+    );
+    let backend = TestBackend::new(100, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let lines = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(100)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>();
+
+    assert!(
+        lines
+            .last()
+            .unwrap()
+            .contains("Skill Directory needs attention")
+    );
+    assert!(
+        lines[..lines.len() - 1]
+            .iter()
+            .all(|line| !line.contains("Skill Directory needs attention"))
+    );
+    assert!(!lines.iter().any(|line| line.contains("Diagnostic")));
+}
+
+#[test]
+fn notice_messages_use_the_final_status_line_without_a_modal() {
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![Row::inherited_user(
+            "local/library",
+            "release-checklist",
+            "Prepare a release",
+            true,
+            "User Scope",
+        )],
+    );
+    reduce(&mut model, Action::Toggle);
+
+    let backend = TestBackend::new(100, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let lines = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(100)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>();
+
+    assert!(lines.last().unwrap().contains("User tab"));
+    assert!(lines.iter().all(|line| !line.contains("Notice")));
+}
+
+#[test]
 fn skill_row_color_is_driven_by_pending_action_not_description_prose() {
     let mut model = Model::new(
         Workspace::Target,
@@ -212,11 +279,12 @@ fn skill_row_color_is_driven_by_pending_action_not_description_prose() {
 
     reduce(&mut model, Action::MoveDown);
     reduce(&mut model, Action::Toggle);
+    reduce(&mut model, Action::MoveUp);
     terminal.draw(|frame| render(frame, &model)).unwrap();
     assert!(
         (0..terminal.backend().buffer().area.width)
-            .any(|x| terminal.backend().buffer()[(x, skill_y)].fg == Color::Indexed(220)),
-        "a non-empty pending Action should use the pending-change accent"
+            .any(|x| terminal.backend().buffer()[(x, skill_y)].fg == Color::Indexed(196)),
+        "a Disable action should use the removed-action accent"
     );
 }
 
@@ -245,12 +313,12 @@ fn rendered_palette_preserves_semantics_and_structure() {
     assert!(
         cells
             .iter()
-            .any(|cell| cell.symbol() == "┌" && cell.fg == Color::Indexed(99))
+            .any(|cell| cell.symbol() == "▛" && cell.fg == Color::Indexed(99))
     );
     assert_eq!(cells[0].fg, Color::Indexed(230));
     assert!(cells.iter().any(|cell| {
         matches!(cell.symbol(), "[" | "└")
-            && cell.fg == Color::Indexed(244)
+            && cell.fg == Color::Indexed(240)
             && !cell.modifier.contains(Modifier::DIM)
     }));
     assert!(
@@ -273,16 +341,20 @@ fn rendered_palette_preserves_semantics_and_structure() {
 
 #[test]
 fn inherited_user_skill_renders_as_read_only_user_enablement() {
-    let model = Model::new(
+    let mut model = Model::new(
         Workspace::Target,
-        vec![Row::inherited_user(
-            "local/library",
-            "release-checklist",
-            "Prepare a release",
-            true,
-            "User Scope",
-        )],
+        vec![
+            Row::inherited_user(
+                "local/library",
+                "release-checklist",
+                "Prepare a release",
+                true,
+                "User Scope",
+            ),
+            Row::source("another/library", CheckState::Unchecked),
+        ],
     );
+    reduce(&mut model, Action::MoveDown);
     let backend = TestBackend::new(90, 14);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, &model)).unwrap();
@@ -295,14 +367,30 @@ fn inherited_user_skill_renders_as_read_only_user_enablement() {
         .collect::<String>();
     assert!(screen.contains("[u]"));
     assert!(screen.contains("user"));
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "r" && cell.fg == Color::Indexed(240)),
+        "inherited User Scope entries should use the dim foreground"
+    );
 
     let mut model = model;
+    reduce(&mut model, Action::MoveUp);
     assert!(reduce(&mut model, Action::Toggle).is_empty());
     assert_eq!(model.rows()[0].check(), Some(CheckState::User));
     std::assert_matches!(
         model.overlay(),
         Overlay::Notice(message) if message.contains("User tab")
     );
+    assert!(reduce(&mut model, Action::MoveDown).is_empty());
+    assert_eq!(
+        model.selected_row().unwrap().check(),
+        Some(CheckState::Unchecked)
+    );
+    assert_eq!(model.overlay(), &Overlay::None);
 }
 
 #[test]
@@ -327,6 +415,41 @@ fn target_and_directory_editors_collect_input_before_emitting_effects() {
             edit: false,
             value: "docs,.docs/skills,Docs".to_owned(),
         }]
+    );
+
+    reduce(&mut model, Action::NewTargetTab);
+    assert_eq!(
+        model.overlay(),
+        &Overlay::DirectoryEditor {
+            edit: false,
+            input: ".claude".to_owned(),
+        }
+    );
+    assert_eq!(
+        reduce(&mut model, Action::Confirm),
+        [Effect::ApplyDirectoryEdit {
+            edit: false,
+            value: ".claude".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn editor_modal_renders_a_visible_input_cursor() {
+    let mut model = Model::new(Workspace::Library, Vec::new());
+    reduce(&mut model, Action::AddDirectory);
+    let backend = TestBackend::new(80, 16);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "▌" && cell.fg == Color::Indexed(230))
     );
 }
 
@@ -367,20 +490,20 @@ fn library_footer_explains_how_to_apply_pending_changes() {
         .collect::<Vec<_>>();
     let screen = lines.join("\n");
 
-    assert!(screen.contains("s save & exit"));
-    assert!(screen.contains("Ctrl+S quick save"));
+    assert!(screen.contains("s save"));
+    assert!(screen.contains("Ctrl+S save & exit"));
     assert!(screen.contains("Location"));
     assert!(!screen.contains("Name"));
     let action_line = lines
         .iter()
-        .position(|line| line.contains("s save & exit"))
+        .position(|line| line.contains("Ctrl+S save & exit"))
         .unwrap();
-    assert!(lines[action_line].ends_with("? help┘"));
+    assert!(lines[action_line].ends_with("? help ▟"));
     assert!(
         lines
             .iter()
             .skip(action_line + 1)
-            .all(|line| !line.contains('─'))
+            .all(|line| !line.contains('▄'))
     );
     assert!(
         terminal
@@ -388,13 +511,31 @@ fn library_footer_explains_how_to_apply_pending_changes() {
             .buffer()
             .content()
             .iter()
-            .any(|cell| { cell.symbol() == "─" && cell.fg == Color::Indexed(244) })
+            .any(|cell| { cell.symbol() == "▄" && cell.fg == Color::Indexed(33) })
     );
 }
 
 #[test]
-fn onboarding_keeps_the_default_location_in_the_table_until_edit_is_requested() {
-    let mut model = Model::new(Workspace::Onboarding, vec![Row::location("./library")]);
+fn library_table_uses_a_blue_frame() {
+    let model = Model::new(Workspace::Library, vec![Row::location("./library")]);
+    let backend = TestBackend::new(80, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "▛" && cell.fg == Color::Indexed(33))
+    );
+}
+
+#[test]
+fn library_keeps_the_default_location_in_the_table_until_edit_is_requested() {
+    let mut model = Model::new(Workspace::Library, vec![Row::location("./library")]);
     let backend = TestBackend::new(140, 14);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, &model)).unwrap();
@@ -408,7 +549,7 @@ fn onboarding_keeps_the_default_location_in_the_table_until_edit_is_requested() 
 
     assert!(!screen.contains("Edit Library Location"));
     assert!(screen.contains("./library"));
-    assert!(screen.contains("e edit location"));
+    assert!(screen.contains("a/e/d location"));
 
     reduce(&mut model, Action::EditDirectory);
     terminal.draw(|frame| render(frame, &model)).unwrap();

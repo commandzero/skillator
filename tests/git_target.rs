@@ -56,6 +56,29 @@ fn git_facts_cover_origin_tracking_staging_and_ignore_rules() {
 }
 
 #[test]
+fn batched_git_facts_match_single_path_facts() {
+    let home = support::TestHome::new();
+    let repository = home.git_repo("project");
+    std::fs::create_dir_all(repository.join("managed/child")).unwrap();
+    std::fs::write(repository.join("managed/child/file"), "content").unwrap();
+    std::fs::write(repository.join(".gitignore"), "ignored\n").unwrap();
+    support::git(&repository, &["add", "managed", ".gitignore"]);
+    let git = GitRepository::discover(&repository).unwrap();
+    let paths = vec![
+        std::path::PathBuf::from("managed"),
+        std::path::PathBuf::from("ignored"),
+        std::path::PathBuf::from("missing"),
+    ];
+
+    let batched = git.facts_for_many(&paths).unwrap();
+    for path in paths {
+        assert_eq!(batched.get(&path), Some(&git.facts_for(&path).unwrap()));
+    }
+    assert!(batched[&std::path::PathBuf::from("managed")].tracked);
+    assert!(batched[&std::path::PathBuf::from("ignored")].ignored);
+}
+
+#[test]
 fn invalid_target_inputs_are_rejected_without_writes() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("file");

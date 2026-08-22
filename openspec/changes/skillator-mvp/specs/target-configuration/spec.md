@@ -63,7 +63,7 @@ Skill Directory Keys SHALL be unique case-insensitively. Each Enablement's `dire
 - **THEN** Skillator rejects the configuration as ambiguous
 
 ### Requirement: Skill Directory presets are creation-time suggestions
-The MVP SHALL offer exactly two built-in presets: `agents`, labeled `Generic / OpenAI Codex`, at `.agents/skills`; and `claude`, labeled `Claude Code`, at `.claude/skills`. A preset SHALL prefill editable key, label, and path values but MUST NOT persist a preset identifier or built-in/custom flag. A saved preset-created directory SHALL behave identically to a custom directory.
+The MVP SHALL offer exactly two built-in presets: `agents`, labeled `.agents`, at `.agents/skills`; and `claude`, labeled `Claude Code`, at `.claude/skills`. A preset SHALL prefill editable key, label, and path values but MUST NOT persist a preset identifier or built-in/custom flag. A saved preset-created directory SHALL behave identically to a custom directory.
 
 #### Scenario: First-run Target default
 - **WHEN** Repository Configuration is absent and the Target TUI opens

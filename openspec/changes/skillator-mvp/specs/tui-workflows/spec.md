@@ -1,29 +1,25 @@
 ## Purpose
 
-Defines the keyboard-oriented onboarding, Library, User Scope, and Target Repository workflows that let users curate available Skills and stage Enablements without writes until an explicit save.
+Defines the keyboard-oriented Library, User Scope, and Target Repository workflows that let users curate available Skills and stage Enablements without writes until an explicit save.
 
 ## ADDED Requirements
 
 ### Requirement: The Library uses one hierarchical table
-The Library workspace SHALL present one unlabeled checkbox column followed by `Mode`, `Location`, `Description`, and `Action`. Library Locations SHALL be full-width dividers; Sources SHALL be selectable dividers beneath Locations; and Skills SHALL be indented children beneath Sources. Adding a Location or registering a Source SHALL append it within this same inventory rather than move it to another list. A valid Skill's `Description` SHALL be the `description` value from its `SKILL.md` frontmatter; Location and Source descriptions SHALL be concise metadata summaries. `Description` MUST NOT contain a pending operation. `Action` SHALL describe only work that Save will attempt, SHALL use a concise one-to-three-word phrase, and SHALL remain blank when Save has no work for that row.
+The Library workspace SHALL present one unlabeled checkbox column followed by `Mode`, `Location`, `Description`, and `Action`. Library Locations SHALL be full-width dividers; Sources SHALL be collapsible dividers beneath Locations; and Skills SHALL be indented children beneath Sources. Adding a Location SHALL append its live inventory within this same table rather than move it to another list. A valid Skill's `Description` SHALL be the `description` value from its `SKILL.md` frontmatter; Location and Source descriptions SHALL be concise metadata summaries. `Description` MUST NOT contain a pending operation. `Action` SHALL describe only work that Save will attempt, SHALL use a concise one-to-three-word phrase, and SHALL remain blank when Save has no work for that row.
 
 #### Scenario: Multiple Locations and Sources
 - **WHEN** discovery finds local content and Git Sources across several Locations
 - **THEN** one table preserves the Location, Source, and Skill hierarchy without repeating Source identity on each Skill row
 
-### Requirement: Library selection separates Source and Skill registration
-Skill rows SHALL show Registered, valid Unregistered, or non-selectable Invalid status. A Source checkbox SHALL roll up valid child Skill registration and toggle all or none of those Skills, excluding Invalid Skills. A separate registration action SHALL register or unregister the selected Source so Source identity and Skill curation remain distinct.
-
-#### Scenario: Partial Source registration
-- **WHEN** only some valid Skills in a Source are selected
-- **THEN** the Source divider shows a mixed rollup while the Source's own registration state remains independent
+### Requirement: Library acquisition is explicit
+Library inventory is live and has no register or unregister action. A valid external Skill SHALL show no pending action until the user cycles its acquisition mode with `m`; that mode stages `move`, `copy`, or `link` into the first Library Location. The `Space` key MUST NOT stage a fictional membership change.
 
 ### Requirement: The Library inspector exposes contextual diagnostics
-Selecting a Location, Source, or Skill SHALL expose relevant details in a contextual inspector, including original and resolved paths, Source kind and key, Git facts, registration state, validation errors, unavailability, and overlap warnings. Unavailable registrations and Invalid Skills SHALL remain visible rather than disappear.
+Selecting a Location, Source, or Skill SHALL expose relevant details in a contextual inspector, including original and resolved paths, Source kind and key, Git facts, validation errors, unavailability, and overlap warnings. Invalid Skills SHALL remain visible rather than disappear.
 
-#### Scenario: Unavailable Registered Source
-- **WHEN** a Registered Source is missing locally
-- **THEN** its row and identity remain visible with an unavailable diagnostic in the inspector
+#### Scenario: Unavailable Location
+- **WHEN** a configured Location is missing locally
+- **THEN** its row remains visible with an unavailable diagnostic in the inspector
 
 ### Requirement: The TUI uses a consistent 256-color visual hierarchy
 The TUI SHALL use indexed 256-color palette values by default. Main workspace borders SHALL be purple, modal and input-overlay borders SHALL be blue, and titles plus persistent hotkey labels SHALL use an off-white bone color. Every modal title SHALL be capitalized, describe the modal's action or purpose rather than repeat the application name, and include one space between the left border and title text. Modal confirmation controls SHALL appear in the bottom border rather than as body text. Warning states SHALL use yellow accents and error states SHALL use red accents. Structural child-tree glyphs, divider lines, and unchecked `[ ]` markers SHALL use a visible dark gray without the terminal dim modifier. The selected row SHALL add only a dark-blue background and MUST NOT replace its existing foreground color.
@@ -72,7 +68,7 @@ Source rows SHALL show tri-state enabled rollups and child counts. Toggling a mi
 ### Requirement: Desired, observed, and pending action remain distinguishable
 Checkboxes SHALL represent staged desired state. Mode SHALL display compact `link`, `copy`, `user`, or Library-acquisition `move`. The Action column SHALL distinguish pending Enable, Disable, Convert, Repair, Register, Unregister, Move, Copy, and Link work while remaining blank for no-op rows. Observed states including In Sync, Missing, Diverged Copy, and Unresolved SHALL remain available in the contextual inspector instead of occupying Description or Action. Non-Skill directory diagnostics SHALL appear as selectable diagnostics above the Skill rows rather than as fake Skills. An absent Skill Directory staged during first Repository setup SHALL be ordinary pending Save work and MUST NOT produce an initialization or missing-control-file Diagnostic row; existing malformed, uninspectable, or unexpectedly incomplete directories SHALL retain their diagnostics.
 
-Ordinary table entries SHALL receive the yellow pending-change accent only when their Action is non-empty. Skill names, descriptions, inspector details, and other free-form metadata MUST NOT determine row color. Structured Diagnostic rows SHALL retain warning or error accents, Invalid entries SHALL retain the error accent, and unavailable entries with no pending Action MAY remain structurally dimmed.
+Ordinary table entries with a non-empty Action SHALL use Git-style semantic accents: green for additions, red for removals, and cyan for modifications. Yellow SHALL be reserved for actual conflicts. Skill names, descriptions, inspector details, and other free-form metadata MUST NOT determine row color. Invalid entries SHALL retain the error accent, and unavailable entries with no pending Action MAY remain structurally dimmed.
 
 #### Scenario: Diverged copy selected
 - **WHEN** the user selects a Diverged Copy row
@@ -88,10 +84,10 @@ Ordinary table entries SHALL receive the yellow pending-change accent only when 
 
 #### Scenario: Skill has a pending action
 - **WHEN** an ordinary Skill row has a non-empty Action
-- **THEN** its row uses the yellow pending-change accent while the Action remains pending
+- **THEN** its row uses the semantic added, removed, or modified accent for that Action while the Action remains pending
 
 ### Requirement: Target navigation follows the approved key contract
-The Target workspace SHALL support `j/k` for rows, `J/K` for Sources, `h/l` to collapse or expand Sources, `Space` to toggle, `m` to switch Link or Copy, `Tab/Shift+Tab` for Skill Directories, `/` to filter, `Esc` to clear or close, `s` for confirmed Save and Exit, `Ctrl+S` for safe fast Save and Exit, `q` to quit, `t` to change Target, `a/e/d` to add/edit/delete a Skill Directory, `Ctrl+L` to toggle Library and Target workspaces, and `?` for help. Plain arrow keys SHALL mirror `h/j/k/l`; Shift+Up and Shift+Down SHALL mirror `K/J` Source movement, while Shift+Left and Shift+Right SHALL retain collapse and expand. Ctrl-modified arrows SHALL remain unmapped. In Library management, `m` SHALL cycle the available acquisition modes. The persistent action legend SHALL identify `s` as Save and Exit and `Ctrl+S` as quick Save, SHALL be right-aligned within the main table's bottom border, and SHALL NOT create a separate horizontal footer rule. The special filters `/pending` and `/pending actions` SHALL show only rows whose Action is non-empty while preserving their containing dividers.
+The Target workspace SHALL support `j/k` for rows, `J/K` for Sources, `h/l` to collapse or expand Sources, `Space` to toggle, `m` to switch Link or Copy, `Tab/Shift+Tab` for Skill Directories, `/` to filter, `Esc` to clear or close, `s` for confirmed Save and Exit, `Ctrl+S` for safe fast Save and Exit, `q` to quit, `t` to change Target, `Ctrl+T` to open a new Target Tab prefilled as `.claude`, `a/e/d` to add/edit/delete a Skill Directory, `Ctrl+L` to toggle Library and Target workspaces, and `?` for help. Editable overlays SHALL capture literal unmodified text keys, display a cursor, and use `Tab` to complete Location and Target paths. Plain arrow keys SHALL mirror `h/j/k/l`; Shift+Up and Shift+Down SHALL mirror `K/J` Source movement, while Shift+Left and Shift+Right SHALL retain collapse and expand. Ctrl-modified arrows SHALL remain unmapped. In Library management, `m` SHALL cycle the available acquisition modes. The persistent action legend SHALL identify `s` as Save and Exit and `Ctrl+S` as quick Save, SHALL be right-aligned within the main table's bottom border, and SHALL NOT create a separate horizontal footer rule. The special filters `/pending` and `/pending actions` SHALL show only rows whose Action is non-empty while preserving their containing dividers.
 
 #### Scenario: Filtering collapsed Sources
 - **WHEN** a filter matches children inside collapsed Sources
@@ -102,15 +98,15 @@ The Target workspace SHALL support `j/k` for rows, `J/K` for Sources, `h/l` to c
 - **THEN** selection moves between Source dividers and skips directory diagnostics and individual Skills
 
 ### Requirement: Skill Directory edits use one validated overlay
-Adding, editing, and deleting Skill Directories SHALL use one compact overlay with the Generic/Codex preset, Claude preset, and a custom option for addition. The same configuration validation and collision rules SHALL apply before save. Library first run SHALL use the dedicated onboarding workflow; after onboarding, an absent Repository Configuration SHALL stage the Generic/Codex Repository directory in the normal Target workspace.
+Adding, editing, and deleting Skill Directories SHALL use one compact overlay with the Generic/Codex preset, Claude preset, and a custom option for addition. The same configuration validation and collision rules SHALL apply before save. Library first run SHALL use the normal Library workspace with a welcome modal; after the Library is saved, an absent Repository Configuration SHALL stage the Generic/Codex Repository directory in the normal Target workspace.
 
 #### Scenario: Existing recognized path
 - **WHEN** first run detects a recognized agent path not yet configured
 - **THEN** Skillator presents it as an unchecked recommendation and does not activate it automatically
 
-#### Scenario: First onboarding screen
-- **WHEN** Library onboarding opens with the default first Location staged
-- **THEN** Skillator shows the normal onboarding table with `./library` selected, identifies `e` as the location-edit action, and opens the path editor only after that explicit action
+#### Scenario: First Library screen
+- **WHEN** Library Configuration is absent
+- **THEN** Skillator shows the ordinary Library table with `./library` selected beneath the `I AM SKILLATOR!` welcome modal, identifies `e` as the location-edit action, and opens the path editor only after that explicit action
 
 ### Requirement: Workspace and Target changes do not carry staged edits
 Switching Target, toggling between Target and Library, or crossing between User Scope and Repository tabs while edits are staged SHALL offer Save, Discard and Continue, or Return to Editing as appropriate. User Scope and Repository edits SHALL remain separate and MUST NOT be written to the other configuration.
@@ -141,8 +137,8 @@ Pressing `s` SHALL always show a confirmation, even for a clean or Safe-only pla
 - **WHEN** the user presses `Ctrl+S` and the prepared plan contains a Guarded Change
 - **THEN** Skillator shows the same guarded batch confirmation instead of bypassing it
 
-#### Scenario: Reviewing desired onboarding actions
-- **WHEN** onboarding asks the user to confirm moves, copies, links, or configuration writes
+#### Scenario: Reviewing desired Library actions
+- **WHEN** Library management asks the user to confirm moves, copies, links, or configuration writes
 - **THEN** the question and hotkey prompt are off-white while ordinary desired-action rows retain the normal foreground
 
 ### Requirement: Busy and partial outcomes preserve user understanding

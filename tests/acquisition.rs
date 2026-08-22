@@ -2,11 +2,7 @@ mod support;
 
 use skillator::acquisition::{LibraryAcquisition, LibraryAcquisitionMode};
 use skillator::app::{AppPaths, LibraryWorkflow, WorkflowError};
-use skillator::config::{
-    Fingerprint, LibraryConfig, LibraryLocationConfig, RegisteredSkillConfig,
-    RegisteredSourceConfig, save_library,
-};
-use skillator::domain::{SkillPath, SourceKey};
+use skillator::config::{Fingerprint, LibraryConfig, LibraryLocationConfig, save_library};
 
 #[cfg(unix)]
 #[test]
@@ -184,40 +180,13 @@ impl AcquisitionFixture {
     }
 }
 
-fn config(external_root: &std::path::Path, acquired: bool) -> LibraryConfig {
-    let local_skills = if acquired {
-        vec![RegisteredSkillConfig::new(
-            SkillPath::parse("demo").unwrap(),
-        )]
-    } else {
-        Vec::new()
-    };
+fn config(external_root: &std::path::Path, _acquired: bool) -> LibraryConfig {
     LibraryConfig::new(vec![
-        LibraryLocationConfig::new(
-            "./library".to_owned(),
-            Vec::new(),
-            false,
-            vec![RegisteredSourceConfig::new(
-                SourceKey::parse("local/library").unwrap(),
-                SkillPath::parse(".").unwrap(),
-                local_skills,
-            )],
-        ),
+        LibraryLocationConfig::new("./library".to_owned(), Vec::new(), false),
         LibraryLocationConfig::new(
             external_root.to_string_lossy().into_owned(),
             Vec::new(),
             false,
-            vec![RegisteredSourceConfig::new(
-                SourceKey::parse("external/skills").unwrap(),
-                SkillPath::parse(".").unwrap(),
-                if acquired {
-                    Vec::new()
-                } else {
-                    vec![RegisteredSkillConfig::new(
-                        SkillPath::parse("demo").unwrap(),
-                    )]
-                },
-            )],
         ),
     ])
     .unwrap()

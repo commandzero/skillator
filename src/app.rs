@@ -6,7 +6,7 @@ use crate::config::{
     load_repository, save_library, save_repository,
 };
 use crate::domain::SkillKey;
-use crate::library::{LibrarySnapshot, Registration, scan_library};
+use crate::library::{LibrarySnapshot, scan_library};
 use crate::reconcile::{
     Action, ApplyResult, Authorization, Outcome, Plan, PreparedPlan, Safety, TargetBusy, execute,
     prepare_apply, prepare_check, prepare_transition,
@@ -224,7 +224,7 @@ fn load_library_snapshot(
         }
     };
     let snapshot = scan_library(&config, &path, paths.home(), &paths.environment);
-    let mut diagnostics = snapshot
+    let diagnostics = snapshot
         .diagnostics()
         .iter()
         .map(|diagnostic| ReportDiagnostic {
@@ -236,33 +236,6 @@ fn load_library_snapshot(
             }),
         })
         .collect::<Vec<_>>();
-    for source in snapshot.sources() {
-        if source.registration() == Registration::Unregistered {
-            diagnostics.push(ReportDiagnostic {
-                code: "unregistered_source".to_owned(),
-                severity: "advisory".to_owned(),
-                message: format!(
-                    "discovered Unregistered Source `{}`",
-                    source.suggested_key()
-                ),
-                data: None,
-            });
-        }
-        for skill in source.skills() {
-            if skill.registration() == Registration::Unregistered {
-                diagnostics.push(ReportDiagnostic {
-                    code: "unregistered_skill".to_owned(),
-                    severity: "advisory".to_owned(),
-                    message: format!(
-                        "discovered Unregistered Skill `{}/{}`",
-                        source.key(),
-                        skill.path()
-                    ),
-                    data: None,
-                });
-            }
-        }
-    }
     Ok((snapshot, diagnostics))
 }
 
@@ -361,7 +334,14 @@ fn report_apply(
                 diagnostics.push(ReportDiagnostic {
                     code: "control_file_untracked".to_owned(),
                     severity: "warning".to_owned(),
-                    message: format!("run `git add -f -- {relative}/.gitignore`"),
+                    message: format!(
+                        "run `git add {}-- {relative}/.gitignore`",
+                        if directory.control_ignored() {
+                            "-f "
+                        } else {
+                            ""
+                        }
+                    ),
                     data: None,
                 });
             }
@@ -627,36 +607,14 @@ impl LibraryWorkflow {
     }
 
     pub fn affected_references(
-        original: &LibraryConfig,
-        staged: &LibraryConfig,
-        repository: &RepositoryConfig,
+        _original: &LibraryConfig,
+        _staged: &LibraryConfig,
+        _repository: &RepositoryConfig,
     ) -> Vec<SkillKey> {
-        let registered = |config: &LibraryConfig| {
-            config
-                .locations()
-                .iter()
-                .flat_map(|location| location.sources())
-                .flat_map(|source| {
-                    source
-                        .skills()
-                        .iter()
-                        .map(|skill| SkillKey::new(source.key().clone(), skill.path().clone()))
-                })
-                .collect::<std::collections::BTreeSet<_>>()
-        };
-        let removed = registered(original)
-            .difference(&registered(staged))
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>();
-        repository
-            .enablements()
-            .iter()
-            .map(|enablement| enablement.skill())
-            .filter(|skill| removed.contains(*skill))
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect()
+        // Locations are discovery roots, not a persisted source inventory.  A
+        // reference is resolved against the fresh Snapshot immediately before
+        // Target planning, so there is no configuration-only removal set.
+        Vec::new()
     }
 }
 

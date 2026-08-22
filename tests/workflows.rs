@@ -49,7 +49,7 @@ fn ordinary_sync_applies_safe_work_but_keeps_tracking_remediation_nonconverged()
     assert!(report.diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("git add -f -- .agents/skills/.gitignore")
+            .contains("git add -- .agents/skills/.gitignore")
     }));
 }
 
@@ -123,7 +123,7 @@ fn active_target_owner_makes_check_busy_without_writes() {
 }
 
 #[test]
-fn library_unregistration_identifies_current_target_references_without_rewriting_them() {
+fn library_inventory_changes_do_not_rewrite_target_references() {
     let fixture = Fixture::new();
     let original_bytes = std::fs::read(fixture.paths.library_config()).unwrap();
     let LoadResult::Valid(original) = LibraryConfigCodec::parse(&original_bytes) else {
@@ -142,9 +142,7 @@ fn library_unregistration_identifies_current_target_references_without_rewriting
     let affected =
         LibraryWorkflow::affected_references(original.value(), staged.value(), repository.value());
 
-    assert_eq!(affected.len(), 1);
-    assert_eq!(affected[0].source().as_str(), "local/library");
-    assert_eq!(affected[0].path().as_str(), "release-checklist");
+    assert!(affected.is_empty());
     assert_eq!(
         std::fs::read(fixture.target.join(".agents/skillator.yaml")).unwrap(),
         repository_bytes

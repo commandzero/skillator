@@ -5,48 +5,32 @@ Skillator manages which agent skills from a Library are active in the User Scope
 ## Language
 
 **Library**:
-A user's logical collection of Sources and their available Skills. Membership in the Library does not make a Skill active.
-_Avoid_: Source, source directory, registry
+A user's live inventory of Sources and available Skills discovered beneath configured Library Locations. Presence in the Library does not make a Skill active.
+_Avoid_: Registry, static inventory
 
 **Library Location**:
 A user-configured local path that contributes Sources to the Library. Nested Git repositories form independent Sources; Skills outside a nested Git repository belong to the Library Location's local Source.
 _Avoid_: Source, Library
 
 **Source**:
-A stable discovery boundary within a Library Location that contributes one or more Skills. A Source is either a Git repository or the Library Location's local region outside nested Git repositories.
+A discovery boundary within a Library Location that contributes one or more Skills. A Source is either a Git repository or the Library Location's local region outside nested Git repositories.
 _Avoid_: Library, marketplace
 
-**Registered Source**:
-A discovered Source whose Source Key and location have been accepted and persisted in Library configuration.
-_Avoid_: Available Skill
-
-**Unregistered Source**:
-A Source discovered within a Library Location but not yet accepted into the Library. Its suggested Source Key may be staged for registration, but non-interactive synchronization does not register it.
-_Avoid_: Unavailable Source, Invalid Skill
-
 **Source Key**:
-A portable, immutable, case-insensitive identifier that uniquely names a Registered Source within a Library and maps to its machine-local location. Keys normalize to lowercase slash-separated segments; Git Sources default to `owner/repository` and non-Git Sources to `local/name`.
+A portable, case-insensitive identifier derived from a discovered Source. Keys normalize to lowercase slash-separated segments; Git Sources default to `owner/repository` and non-Git Sources to `local/name`. A collision is surfaced rather than silently resolved.
 _Avoid_: Repository name, remote URL, local path
 
 **Unavailable Source**:
-A registered Source whose local path is missing or unreadable. Its identity and desired Enablements remain intact, but its Skills cannot be materialized or synchronized.
+A Source that cannot be discovered because its Library Location is missing or unreadable. It is absent from the live inventory; existing Target Enablements that name it remain declarative but cannot be resolved.
 _Avoid_: Removed Source, empty Source
 
 **Skill**:
 A directory supplied by a Source that contains a `SKILL.md` file.
 _Avoid_: Package, plugin
 
-**Registered Skill**:
-A valid Skill explicitly selected into the Library from a Registered Source. Only Registered Skills appear in the normal Target Repository enablement workflow.
-_Avoid_: Enabled Skill, discovered Skill
-
-**Unregistered Skill**:
-A valid Skill discovered in a Source but not selected into the Library. New and moved Skills begin unregistered and appear only in Source management.
-_Avoid_: Invalid Skill, disabled Skill
-
 **Unavailable Skill**:
-A previously Registered Skill that cannot currently be found at its Skill Key or whose Source is unavailable. Its identity and desired Enablements remain intact.
-_Avoid_: Unregistered Skill, Invalid Skill
+A Skill named by an existing Target Enablement that is absent from the current Library Snapshot. Its Enablement remains declarative but cannot be materialized or synchronized.
+_Avoid_: Invalid Skill
 
 **Skill Key**:
 The stable identity of a Skill, formed from its Source Key and slash-normalized directory path relative to the Source. A Skill's frontmatter name and directory basename are display metadata, not identity.
@@ -57,7 +41,7 @@ A discovered Skill whose `SKILL.md` does not provide valid required metadata. It
 _Avoid_: Missing Skill, unavailable Skill
 
 **Overlapping Library Locations**:
-Separately configured Library Locations whose canonical discovery boundaries overlap. Registration is rejected by default; an explicit override preserves distinct Skill identities while surfacing warnings on affected Enablements.
+Separately configured Library Locations whose canonical discovery boundaries overlap. Configuration is rejected by default; an explicit override preserves distinct discovered identities while surfacing warnings on affected Enablements.
 
 **Target Repository**:
 A Git repository whose active Skills Skillator manages. It is selected from the current working directory or an explicit directory argument.
@@ -107,9 +91,9 @@ _Avoid_: Library configuration, observed state
 The machine-local `~/.agents/skillator.yaml` file describing User Scope Skill Directories and desired Enablements. It uses the same desired-state shape as Repository Configuration but resolves paths relative to the user's home directory and has no Git tracking contract.
 _Avoid_: Library configuration, Repository Configuration
 
-**First-run Onboarding**:
-The staged workflow entered when Library Configuration is absent. It chooses the first Library Location, offers safe import of existing physical Skills from `~/.agents/skills`, offers registration of Sources behind existing symlinks, and creates User Scope links only after one final confirmation.
-_Avoid_: schema migration, marketplace, automatic acquisition
+**First-run Library Welcome**:
+The one-time-in-process welcome shown when Library Configuration is absent. It opens the normal Library workspace with the default `./library` Location; the user configures Locations through ordinary Library controls and then uses `Ctrl+L` to manage the current Target. It performs no automatic acquisition or User Scope changes.
+_Avoid_: onboarding mode, schema migration, marketplace, automatic acquisition
 
 **Observed State**:
 An immutable snapshot of filesystem facts for the configured Skill Directories and their immediate entries. It supports comparison with desired state without prescribing reconciliation actions.

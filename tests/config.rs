@@ -28,8 +28,25 @@ fn repository_configuration_parses_and_renders_canonically() {
     assert_eq!(loaded.value().skill_directories().len(), 2);
     assert_eq!(
         RepositoryConfigCodec::render(loaded.value()).unwrap(),
-        "version: 1\nskill_directories:\n  - key: \"agents\"\n    path: \".agents/skills\"\n  - key: \"claude\"\n    path: \".claude/skills\"\n    label: \"Claude Code\"\nenablements:\n  - directory: \"claude\"\n    skill:\n      source: \"elastic/agent-skills\"\n      path: \"release/checklist\"\n    materialization: \"copied\"\n"
+        "version: 1\nagents:\n  path: \".agents/skills\"\n  skills: {}\nclaude:\n  path: \".claude/skills\"\n  label: \"Claude Code\"\n  skills:\n    \"checklist\":\n      source: \"elastic/agent-skills\"\n      path: \"release/checklist\"\n      type: \"copied\"\n"
     );
+}
+
+#[test]
+fn target_keyed_repository_configuration_parses() {
+    let input = br#"version: 1
+agents:
+  path: ".agents/skills"
+  skills:
+    unslop:
+      source: "local/library"
+"#;
+
+    let LoadResult::Valid(loaded) = RepositoryConfigCodec::parse(input) else {
+        panic!("expected target-keyed configuration to parse");
+    };
+    assert_eq!(loaded.value().skill_directories().len(), 1);
+    assert_eq!(loaded.value().enablements().len(), 1);
 }
 
 #[test]
@@ -89,7 +106,7 @@ fn repository_validation_collects_independent_field_errors() {
 }
 
 #[test]
-fn library_configuration_round_trips_registered_sources_and_skills() {
+fn library_configuration_accepts_legacy_inventory_but_renders_locations_only() {
     let input = b"version: 1\nlocations:\n  - path: ~/Development\n    exclusions:\n      - target/\n    allow_overlap: true\n    sources:\n      - key: elastic/agent-skills\n        path: agent-skills\n        skills:\n          - path: nested/release\n";
     let LoadResult::Valid(loaded) = LibraryConfigCodec::parse(input) else {
         panic!("expected valid Library configuration");
@@ -99,29 +116,20 @@ fn library_configuration_round_trips_registered_sources_and_skills() {
     assert_eq!(location.exclusions(), ["target/"]);
     assert!(location.allow_overlap());
     assert_eq!(
-        location.sources()[0].skills()[0].path().as_str(),
-        "nested/release"
-    );
-    assert!(
-        LibraryConfigCodec::render(loaded.value())
-            .unwrap()
-            .ends_with('\n')
+        LibraryConfigCodec::render(loaded.value()).unwrap(),
+        "version: 1\nlocations:\n  - path: \"~/Development\"\n    exclusions:\n      - \"target/\"\n    allow_overlap: true\n"
     );
 }
 
 #[test]
-fn library_configuration_rejects_duplicate_source_paths_within_a_location() {
+fn legacy_source_inventory_does_not_define_library_validity() {
     let parsed = LibraryConfigCodec::parse(
         b"version: 1\nlocations:\n  - path: ./library\n    sources:\n      - key: first/source\n        path: shared\n      - key: second/source\n        path: shared\n",
     );
 
-    let LoadResult::Invalid { issues } = parsed else {
-        panic!("duplicate Source paths must be invalid");
+    let LoadResult::Valid(_) = parsed else {
+        panic!("legacy Source inventory must not define Library validity");
     };
-    assert!(issues.iter().any(|issue| {
-        issue.path == "locations.sources.path"
-            && issue.message.contains("duplicate Source path `shared`")
-    }));
 }
 
 #[test]
@@ -141,12 +149,8 @@ fn library_first_run_is_staged_and_canonical() {
     let config = LibraryConfig::first_run();
     assert_eq!(config.locations()[0].path(), "./library");
     assert_eq!(
-        config.locations()[0].sources()[0].key().as_str(),
-        "local/library"
-    );
-    assert_eq!(
         LibraryConfigCodec::render(&config).unwrap(),
-        "version: 1\nlocations:\n  - path: \"./library\"\n    exclusions: []\n    allow_overlap: false\n    sources:\n      - key: \"local/library\"\n        path: \".\"\n        skills: []\n"
+        "version: 1\nlocations:\n  - path: \"./library\"\n    exclusions: []\n    allow_overlap: false\n"
     );
 }
 

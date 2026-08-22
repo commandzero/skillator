@@ -1,6 +1,7 @@
 //! Structured, read-only Git facts.
 
-use std::ffi::OsStr;
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -105,70 +106,164 @@ impl GitRepository {
     }
 
     pub fn facts_for(&self, relative: impl AsRef<Path>) -> Result<PathFacts, GitError> {
-        let relative = relative.as_ref();
-        let tracked_output = self.command_os([
-            OsStr::new("ls-files"),
-            OsStr::new("--error-unmatch"),
-            OsStr::new("--"),
-            relative.as_os_str(),
-        ])?;
-        let tracked = status_bool(&tracked_output, "git ls-files", 0, 1)?;
-        let staged_output = self.command_os([
-            OsStr::new("diff"),
-            OsStr::new("--cached"),
-            OsStr::new("--quiet"),
-            OsStr::new("--"),
-            relative.as_os_str(),
-        ])?;
-        let staged = status_bool(&staged_output, "git diff --cached", 1, 0)?;
-        let unmerged_output = self.command_os([
-            OsStr::new("ls-files"),
-            OsStr::new("-u"),
-            OsStr::new("--"),
-            relative.as_os_str(),
-        ])?;
+        let relative = relative.as_ref().to_owned();
+        self.facts_for_many(std::slice::from_ref(&relative))?
+            .remove(&relative)
+            .ok_or_else(|| GitError::Command {
+                command: "git facts",
+                status: -1,
+                message: format!("Git returned no facts for {}", relative.display()),
+            })
+    }
+
+    /// Collect tracked, staged, unmerged, and ignored facts for many paths with
+    /// one Git process per fact kind rather than one process per path.
+    pub fn facts_for_many(
+        &self,
+        relatives: &[PathBuf],
+    ) -> Result<BTreeMap<PathBuf, PathFacts>, GitError> {
+        if relatives.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let path_args = |command: &str| {
+            let mut args = vec![OsString::from(command), OsString::from("--")];
+            args.extend(relatives.iter().map(|path| path.as_os_str().to_owned()));
+            args
+        };
+
+        let tracked_output = self.command_os(path_args("ls-files"))?;
+        require_success(&tracked_output, "git ls-files")?;
+        let tracked_paths = output_paths(&tracked_output)?;
+
+        let staged_output = self.command_os(
+            [
+                OsStr::new("diff"),
+                OsStr::new("--cached"),
+                OsStr::new("--name-only"),
+            ]
+            .into_iter()
+            .chain([OsStr::new("--")])
+            .chain(relatives.iter().map(|path| path.as_os_str()))
+            .collect::<Vec<_>>(),
+        )?;
+        require_success(&staged_output, "git diff --cached")?;
+        let staged_paths = output_paths(&staged_output)?;
+
+        let unmerged_output = self.command_os(
+            [OsStr::new("ls-files"), OsStr::new("-u")]
+                .into_iter()
+                .chain([OsStr::new("--")])
+                .chain(relatives.iter().map(|path| path.as_os_str()))
+                .collect::<Vec<_>>(),
+        )?;
         require_success(&unmerged_output, "git ls-files -u")?;
-        let unmerged = !unmerged_output.stdout.is_empty();
-        let ignored_output = self.command_os([
-            OsStr::new("check-ignore"),
-            OsStr::new("-v"),
-            OsStr::new("--no-index"),
-            OsStr::new("--"),
-            relative.as_os_str(),
-        ])?;
-        let has_ignore_rule = status_bool(&ignored_output, "git check-ignore", 0, 1)?;
-        let ignore_rule = has_ignore_rule
-            .then(|| String::from_utf8(ignored_output.stdout).ok())
-            .flatten()
-            .map(|value| value.trim().to_owned());
-        let ignored = ignore_rule.as_deref().is_some_and(|line| {
-            let rule = line
-                .split_once('\t')
-                .map(|(rule, _)| rule)
-                .unwrap_or(line)
-                .rsplit_once(':')
-                .map(|(_, pattern)| pattern)
-                .unwrap_or(line);
-            !rule.starts_with('!')
-        });
-        Ok(PathFacts {
-            tracked,
-            staged,
-            unmerged,
-            ignored,
-            ignore_rule,
-        })
+        let unmerged_paths = output_paths_with_tab_suffix(&unmerged_output)?;
+
+        let ignored_output = self.command_os(
+            [
+                OsStr::new("check-ignore"),
+                OsStr::new("-v"),
+                OsStr::new("--no-index"),
+            ]
+            .into_iter()
+            .chain([OsStr::new("--")])
+            .chain(relatives.iter().map(|path| path.as_os_str()))
+            .collect::<Vec<_>>(),
+        )?;
+        let ignored_paths = match ignored_output.status.code() {
+            Some(0) => output_ignore_paths(&ignored_output)?,
+            Some(1) => Vec::new(),
+            status => {
+                return Err(command_error(
+                    &ignored_output,
+                    "git check-ignore",
+                    status.unwrap_or(-1),
+                ));
+            }
+        };
+
+        Ok(relatives
+            .iter()
+            .map(|relative| {
+                let tracked = tracked_paths
+                    .iter()
+                    .any(|path| path_matches(relative, path));
+                let staged = staged_paths.iter().any(|path| path_matches(relative, path));
+                let unmerged = unmerged_paths
+                    .iter()
+                    .any(|path| path_matches(relative, path));
+                let ignore_rule = ignored_paths
+                    .iter()
+                    .find(|(path, _)| path_matches(relative, path))
+                    .map(|(_, rule)| rule.clone());
+                let ignored = ignore_rule.as_deref().is_some_and(ignore_rule_is_active);
+                (
+                    relative.clone(),
+                    PathFacts {
+                        tracked,
+                        staged,
+                        unmerged,
+                        ignored,
+                        ignore_rule,
+                    },
+                )
+            })
+            .collect())
     }
 
     fn command<const N: usize>(&self, args: [&str; N]) -> Result<Output, GitError> {
         git_at(&self.root, args)
     }
 
-    fn command_os<const N: usize>(&self, args: [&OsStr; N]) -> Result<Output, GitError> {
+    fn command_os<I, S>(&self, args: I) -> Result<Output, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let mut command = git_command(&self.root);
         command.args(args);
         Ok(command.output()?)
     }
+}
+
+fn output_paths(output: &Output) -> Result<Vec<PathBuf>, GitError> {
+    let text = stdout(output)?;
+    Ok(text.lines().map(PathBuf::from).collect())
+}
+
+fn output_paths_with_tab_suffix(output: &Output) -> Result<Vec<PathBuf>, GitError> {
+    let text = stdout(output)?;
+    Ok(text
+        .lines()
+        .filter_map(|line| line.split_once('\t').map(|(_, path)| PathBuf::from(path)))
+        .collect())
+}
+
+fn output_ignore_paths(output: &Output) -> Result<Vec<(PathBuf, String)>, GitError> {
+    let text = stdout(output)?;
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            line.rsplit_once('\t')
+                .map(|(_, path)| (PathBuf::from(path), line.to_owned()))
+        })
+        .collect())
+}
+
+fn path_matches(requested: &Path, reported: &Path) -> bool {
+    requested == reported || reported.starts_with(requested)
+}
+
+fn ignore_rule_is_active(line: &str) -> bool {
+    let rule = line
+        .split_once('\t')
+        .map(|(rule, _)| rule)
+        .unwrap_or(line)
+        .rsplit_once(':')
+        .map(|(_, pattern)| pattern)
+        .unwrap_or(line);
+    !rule.starts_with('!')
 }
 
 fn git_at<I, S>(path: &Path, args: I) -> Result<Output, GitError>
@@ -187,19 +282,6 @@ fn git_command(path: &Path) -> Command {
 
 fn stdout(output: &Output) -> Result<&str, GitError> {
     std::str::from_utf8(&output.stdout).map_err(|_| GitError::NonUtf8)
-}
-
-fn status_bool(
-    output: &Output,
-    command: &'static str,
-    true_status: i32,
-    false_status: i32,
-) -> Result<bool, GitError> {
-    match output.status.code() {
-        Some(status) if status == true_status => Ok(true),
-        Some(status) if status == false_status => Ok(false),
-        status => Err(command_error(output, command, status.unwrap_or(-1))),
-    }
 }
 
 fn require_success(output: &Output, command: &'static str) -> Result<(), GitError> {

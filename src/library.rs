@@ -1,6 +1,6 @@
 //! Library discovery and immutable snapshots.
 
-use crate::config::{LibraryConfig, LibraryLocationConfig, RegisteredSourceConfig};
+use crate::config::{LibraryConfig, LibraryLocationConfig};
 use crate::domain::{SkillKey, SourceKey};
 use crate::git::GitRepository;
 use crate::materialization::{EntryFingerprint, skill_fingerprint};
@@ -10,12 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Registration {
-    Registered,
-    Unregistered,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillValidity {
@@ -43,7 +37,6 @@ pub struct LibrarySkill {
     name: Option<String>,
     description: Option<String>,
     validity: SkillValidity,
-    registration: Registration,
     available: bool,
     diagnostics: Vec<String>,
     absolute_path: Option<PathBuf>,
@@ -65,10 +58,6 @@ impl LibrarySkill {
 
     pub fn validity(&self) -> SkillValidity {
         self.validity
-    }
-
-    pub fn registration(&self) -> Registration {
-        self.registration
     }
 
     pub fn available(&self) -> bool {
@@ -93,7 +82,6 @@ pub struct LibrarySource {
     key: SourceKey,
     suggested_key: SourceKey,
     kind: SourceKind,
-    registration: Registration,
     available: bool,
     root: Option<PathBuf>,
     origin: Option<String>,
@@ -114,10 +102,6 @@ impl LibrarySource {
 
     pub fn kind(&self) -> SourceKind {
         self.kind
-    }
-
-    pub fn registration(&self) -> Registration {
-        self.registration
     }
 
     pub fn available(&self) -> bool {
@@ -249,7 +233,6 @@ pub fn scan_library(
                     message,
                     path: None,
                 });
-                add_unavailable_sources(location_index, location_config, &mut snapshot);
                 continue;
             }
         };
@@ -266,7 +249,6 @@ pub fn scan_library(
                     message: format!("Library Location is unavailable: {}", expanded.display()),
                     path: Some(expanded),
                 });
-                add_unavailable_sources(location_index, location_config, &mut snapshot);
                 continue;
             }
         };
@@ -373,24 +355,6 @@ fn path_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
-fn add_unavailable_sources(
-    location_index: usize,
-    config: &LibraryLocationConfig,
-    snapshot: &mut LibrarySnapshot,
-) {
-    for source in config.sources() {
-        insert_registered_source(
-            snapshot,
-            location_index,
-            source,
-            None,
-            SourceKind::Unknown,
-            None,
-            Vec::new(),
-        );
-    }
-}
-
 fn scan_location(
     location_index: usize,
     config: &LibraryLocationConfig,
@@ -404,10 +368,7 @@ fn scan_location(
     } else {
         let mut local =
             DiscoveredSource::new(root.to_owned(), PathBuf::from("."), SourceKind::Local);
-        let is_local_library = location_index == 0
-            && config.sources().iter().any(|source| {
-                source.key().as_str() == "local/library" && source.path().as_str() == "."
-            });
+        let is_local_library = location_index == 0;
         discover_tree(
             root,
             root,
@@ -419,40 +380,8 @@ fn scan_location(
         discovered.push(local);
     }
 
-    let mut matched = BTreeSet::new();
     for discovered_source in discovered {
-        let relative_text = path_text(&discovered_source.relative);
-        let registered = config
-            .sources()
-            .iter()
-            .find(|source| source.path().as_str() == relative_text);
-        if let Some(registered) = registered {
-            matched.insert(registered.key().as_str().to_owned());
-            insert_registered_source(
-                snapshot,
-                location_index,
-                registered,
-                Some(discovered_source.root),
-                discovered_source.kind,
-                discovered_source.origin,
-                discovered_source.skills,
-            );
-        } else {
-            insert_unregistered_source(snapshot, location_index, discovered_source);
-        }
-    }
-    for registered in config.sources() {
-        if !matched.contains(registered.key().as_str()) {
-            insert_registered_source(
-                snapshot,
-                location_index,
-                registered,
-                None,
-                SourceKind::Unknown,
-                None,
-                Vec::new(),
-            );
-        }
+        insert_discovered_source(snapshot, location_index, discovered_source);
     }
 }
 
@@ -649,7 +578,6 @@ fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
                 } else {
                     SkillValidity::Invalid
                 },
-                registration: Registration::Unregistered,
                 available: true,
                 diagnostics,
                 absolute_path,
@@ -661,7 +589,6 @@ fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
             name: None,
             description: None,
             validity: SkillValidity::Invalid,
-            registration: Registration::Unregistered,
             available: true,
             diagnostics: vec![error],
             absolute_path,
@@ -726,79 +653,7 @@ fn path_text(path: &Path) -> String {
     }
 }
 
-fn insert_registered_source(
-    snapshot: &mut LibrarySnapshot,
-    location_index: usize,
-    registered: &RegisteredSourceConfig,
-    root: Option<PathBuf>,
-    kind: SourceKind,
-    origin: Option<String>,
-    discovered_skills: Vec<LibrarySkill>,
-) {
-    let available = root.is_some();
-    let mut skills: BTreeMap<String, LibrarySkill> = discovered_skills
-        .into_iter()
-        .map(|skill| (skill.path.clone(), skill))
-        .collect();
-    for registered_skill in registered.skills() {
-        if let Some(skill) = skills.get_mut(registered_skill.path().as_str()) {
-            skill.registration = Registration::Registered;
-        } else {
-            skills.insert(
-                registered_skill.path().as_str().to_owned(),
-                LibrarySkill {
-                    path: registered_skill.path().as_str().to_owned(),
-                    name: None,
-                    description: None,
-                    validity: SkillValidity::Valid,
-                    registration: Registration::Registered,
-                    available: false,
-                    diagnostics: vec!["Registered Skill is unavailable".to_owned()],
-                    absolute_path: None,
-                    fingerprint: EntryFingerprint::Missing,
-                },
-            );
-        }
-    }
-    let key = registered.key().clone();
-    let key_text = key.as_str().to_owned();
-    if let Some(mut collision) = snapshot.sources.remove(&key_text) {
-        collision.key_collision = true;
-        let collision_path = collision.root.clone();
-        let inventory_key = format!(
-            "collision:{}:{}",
-            collision.location_index,
-            collision.root.as_deref().map_or_else(
-                || collision.relative_path.clone(),
-                |path| { path.to_string_lossy().into_owned() }
-            )
-        );
-        snapshot.diagnostics.push(LibraryDiagnostic {
-            code: "source_key_collision",
-            message: format!("Source Key `{key}` collides with another discovered Source"),
-            path: collision_path,
-        });
-        snapshot.sources.insert(inventory_key, collision);
-    }
-    snapshot.sources.insert(
-        key_text,
-        LibrarySource {
-            suggested_key: key.clone(),
-            key,
-            kind,
-            registration: Registration::Registered,
-            available,
-            root,
-            origin,
-            skills,
-            location_index,
-            relative_path: registered.path().as_str().to_owned(),
-            key_collision: false,
-        },
-    );
-}
-
-fn insert_unregistered_source(
+fn insert_discovered_source(
     snapshot: &mut LibrarySnapshot,
     location_index: usize,
     source: DiscoveredSource,
@@ -822,7 +677,6 @@ fn insert_unregistered_source(
                 key: suggested.clone(),
                 suggested_key: suggested,
                 kind: source.kind,
-                registration: Registration::Unregistered,
                 available: true,
                 root: Some(source.root),
                 origin: source.origin,
@@ -844,7 +698,6 @@ fn insert_unregistered_source(
             key: suggested.clone(),
             suggested_key: suggested,
             kind: source.kind,
-            registration: Registration::Unregistered,
             available: true,
             root: Some(source.root),
             origin: source.origin,

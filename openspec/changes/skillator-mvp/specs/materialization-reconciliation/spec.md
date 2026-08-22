@@ -82,7 +82,7 @@ Every configured Repository Skill Directory SHALL own an exact UTF-8 `.gitignore
 
 #### Scenario: Control file needs tracking
 - **WHEN** the canonical file is untracked
-- **THEN** Skillator reports Git exclusion Drift and the exact remediation `git add -f -- <skill-directory>/.gitignore` without staging it
+- **THEN** Skillator reports Git exclusion Drift and the exact remediation `git add -- <skill-directory>/.gitignore` without staging it
 
 #### Scenario: Tracked occupant
 - **WHEN** an Expected Entry or Unmanaged Entry is Git-tracked

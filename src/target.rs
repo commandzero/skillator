@@ -2,7 +2,7 @@
 
 use crate::config::{RepositoryConfig, SkillDirectoryConfig};
 use crate::domain::{Enablement, MaterializationKind};
-use crate::git::{GitError, GitRepository};
+use crate::git::{GitError, GitRepository, PathFacts};
 use crate::library::LibrarySnapshot;
 use crate::materialization::{EntryFingerprint, TreeSnapshot, fingerprint};
 use std::collections::{BTreeMap, BTreeSet};
@@ -321,6 +321,7 @@ pub fn observe(
 ) -> ObservedState {
     let mut enablements = Vec::new();
     let mut directories = Vec::new();
+    let mut observed_git_facts = BTreeMap::<PathBuf, PathFacts>::new();
     let mut expected_by_directory: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     let mut expected_names = Vec::new();
     for enablement in config.enablements() {
@@ -372,6 +373,27 @@ pub fn observe(
             .into_iter()
             .flat_map(|names| names.keys().cloned())
             .collect();
+        let control_relative = PathBuf::from(directory.path().as_str()).join(".gitignore");
+        let probe_relative = PathBuf::from(directory.path().as_str()).join(".skillator-probe");
+        let mut fact_paths = children
+            .iter()
+            .filter_map(|child| child.strip_prefix(target.root()).ok().map(Path::to_owned))
+            .collect::<Vec<_>>();
+        fact_paths.extend(
+            expected
+                .iter()
+                .map(|name| PathBuf::from(directory.path().as_str()).join(name)),
+        );
+        fact_paths.push(control_relative.clone());
+        fact_paths.push(probe_relative.clone());
+        fact_paths.sort();
+        fact_paths.dedup();
+        let git_facts = target
+            .git_repository()
+            .map(|repository| repository.facts_for_many(&fact_paths));
+        if let Some(Ok(facts)) = &git_facts {
+            observed_git_facts.extend(facts.clone());
+        }
         let mut unmanaged_entries = Vec::new();
         let mut unmanaged = Vec::new();
         let mut duplicate_entries = Vec::new();
@@ -389,13 +411,16 @@ pub fn observe(
             } else if !expected.contains(name) {
                 unmanaged_entries.push(child.clone());
                 let relative = child.strip_prefix(target.root()).unwrap_or(child);
+                let protected = git_facts
+                    .as_ref()
+                    .and_then(|facts| facts.as_ref().ok())
+                    .and_then(|facts| facts.get(relative))
+                    .map_or(target.git_repository().is_some(), |facts| {
+                        facts.tracked || facts.staged || facts.unmerged
+                    });
                 unmanaged.push(UnmanagedObservation {
                     path: child.clone(),
-                    tracked: target.git_repository().is_some_and(|repository| {
-                        repository.facts_for(relative).map_or(true, |facts| {
-                            facts.tracked || facts.staged || facts.unmerged
-                        })
-                    }),
+                    tracked: protected,
                     fingerprint: fingerprint(child),
                 });
                 if expected
@@ -424,38 +449,43 @@ pub fn observe(
                 }
             }
         }
+        let control_facts = git_facts
+            .as_ref()
+            .and_then(|facts| facts.as_ref().ok())
+            .and_then(|facts| facts.get(&control_relative));
         let (control_file, control_tracked, control_protected, control_ignored) =
-            inspect_control_file(target, directory, root_state);
-        let probe = PathBuf::from(directory.path().as_str()).join(".skillator-probe");
-        let generated_ignored = target.git_repository().is_none_or(|repository| {
-            repository
-                .facts_for(&probe)
-                .is_ok_and(|facts| facts.ignored)
+            inspect_control_file(target, directory, root_state, control_facts);
+        let generated_ignored = target.git_repository().is_none_or(|_| {
+            git_facts
+                .as_ref()
+                .and_then(|facts| facts.as_ref().ok())
+                .and_then(|facts| facts.get(&probe_relative))
+                .is_some_and(|facts| facts.ignored)
         });
-        let relative_control = PathBuf::from(directory.path().as_str()).join(".gitignore");
         match control_file {
             ControlFileState::Missing if root_state == RootState::Absent => {}
             ControlFileState::Missing => diagnostics.push(format!(
                 "Skill Directory Control File is missing at {}; save to create it",
-                relative_control.display()
+                control_relative.display()
             )),
             ControlFileState::Modified => diagnostics.push(format!(
                 "Skill Directory Control File differs from Skillator's required content at {}; save to review replacement",
-                relative_control.display()
+                control_relative.display()
             )),
             ControlFileState::WrongKind => diagnostics.push(format!(
                 "Skill Directory Control File path is not a regular file: {}",
-                relative_control.display()
+                control_relative.display()
             )),
             ControlFileState::Uninspectable => diagnostics.push(format!(
                 "Skill Directory Control File cannot be read: {}",
-                relative_control.display()
+                control_relative.display()
             )),
             ControlFileState::Canonical | ControlFileState::NotRequired => {}
         }
         if control_file == ControlFileState::Canonical && !control_tracked {
             diagnostics.push(format!(
-                "track the control file with `git add -f -- {}/.gitignore`",
+                "track the control file with `git add {}-- {}/.gitignore`",
+                if control_ignored { "-f " } else { "" },
                 directory.path()
             ));
         }
@@ -551,16 +581,17 @@ pub fn observe(
             .as_deref()
             .map(fingerprint)
             .unwrap_or(EntryFingerprint::Missing);
-        let tracked = target.git_repository().is_some_and(|repository| {
-            path.as_deref()
-                .and_then(|path| path.strip_prefix(target.root()).ok())
-                .map(|relative| {
-                    repository.facts_for(relative).map_or(true, |facts| {
+        let tracked = path
+            .as_deref()
+            .and_then(|path| path.strip_prefix(target.root()).ok())
+            .map(|relative| {
+                observed_git_facts
+                    .get(relative)
+                    .map_or(target.git_repository().is_some(), |facts| {
                         facts.tracked || facts.staged || facts.unmerged
                     })
-                })
-                .unwrap_or(true)
-        });
+            })
+            .unwrap_or(true);
         enablements.push(EnablementObservation {
             enablement: enablement.clone(),
             expected_entry: expected,
@@ -678,20 +709,18 @@ fn inspect_control_file(
     target: &Target,
     directory: &SkillDirectoryConfig,
     root_state: RootState,
+    facts: Option<&PathFacts>,
 ) -> (ControlFileState, bool, bool, bool) {
-    let Some(repository) = target.git_repository() else {
+    if target.git_repository().is_none() {
         return (ControlFileState::NotRequired, true, false, false);
-    };
+    }
     let relative = PathBuf::from(directory.path().as_str()).join(".gitignore");
-    let facts = repository.facts_for(&relative);
     if root_state != RootState::Directory {
         return (
             ControlFileState::Missing,
-            facts.as_ref().map_or(true, |facts| facts.tracked),
-            facts.as_ref().map_or(true, |facts| {
-                facts.tracked || facts.staged || facts.unmerged
-            }),
-            facts.as_ref().map_or(true, |facts| facts.ignored),
+            facts.is_none_or(|facts| facts.tracked),
+            facts.is_none_or(|facts| facts.tracked || facts.staged || facts.unmerged),
+            facts.is_none_or(|facts| facts.ignored),
         );
     }
     let path = target.root().join(&relative);
@@ -707,11 +736,9 @@ fn inspect_control_file(
     };
     (
         state,
-        facts.as_ref().map_or(true, |facts| facts.tracked),
-        facts.as_ref().map_or(true, |facts| {
-            facts.tracked || facts.staged || facts.unmerged
-        }),
-        facts.as_ref().map_or(true, |facts| facts.ignored),
+        facts.is_none_or(|facts| facts.tracked),
+        facts.is_none_or(|facts| facts.tracked || facts.staged || facts.unmerged),
+        facts.is_none_or(|facts| facts.ignored),
     )
 }
 

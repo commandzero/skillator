@@ -7,7 +7,6 @@ mod fs_safety;
 pub mod git;
 pub mod library;
 mod materialization;
-pub mod onboarding;
 pub mod reconcile;
 pub mod target;
 pub mod tui;
