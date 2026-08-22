@@ -82,11 +82,11 @@ impl AcceptanceFixture {
         let root = target_path.join(".agents/skills");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
-            root.join(".gitignore"),
-            "# Managed by skillator.\n*\n!.gitignore\n",
+            root.parent().unwrap().join(".gitignore"),
+            "# Managed by skillator.\n*\n!.gitignore\n!skillator.yaml\n",
         )
         .unwrap();
-        support::git(&target_path, &["add", "-f", ".agents/skills/.gitignore"]);
+        support::git(&target_path, &["add", "-f", ".agents/.gitignore"]);
         std::os::unix::fs::symlink(
             release.canonicalize().unwrap(),
             root.join("release-checklist"),

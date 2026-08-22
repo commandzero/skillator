@@ -7,8 +7,7 @@ use crate::git::PathFacts;
 use crate::library::LibrarySnapshot;
 use crate::materialization::{EntryFingerprint, TreeSnapshot, copy_tree, fingerprint};
 use crate::target::{
-    CONTROL_FILE_CONTENT, Comparison, ControlFileState, MaterializationState, ObservedState,
-    RootState, Target, observe,
+    Comparison, ControlFileState, MaterializationState, ObservedState, RootState, Target, observe,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -145,24 +144,24 @@ pub fn plan(
                 continue;
             }
         }
-        let control = directory.path().join(".gitignore");
+        let control = directory.control_path();
         match directory.control_file() {
             ControlFileState::NotRequired => {}
             ControlFileState::Missing => {
                 if directory.control_protected() {
                     items.push(blocked(
-                        &control,
+                        control,
                         Action::WriteControlFile,
                         "Skill Directory Control File has Git index protection",
                     ));
                 } else {
                     items.push(PlanItem {
-                        path: control,
+                        path: control.to_owned(),
                         action: Action::WriteControlFile,
                         safety: Safety::Safe,
                         reason: "Skill Directory Control File is missing".to_owned(),
                         operation: Operation::WriteFile {
-                            bytes: CONTROL_FILE_CONTENT.as_bytes().to_vec(),
+                            bytes: directory.control_content().to_vec(),
                             expected: EntryFingerprint::Missing,
                         },
                     });
@@ -171,7 +170,7 @@ pub fn plan(
             ControlFileState::Canonical => {
                 if !directory.control_tracked() {
                     items.push(blocked(
-                        &control,
+                        control,
                         Action::TrackControlFile,
                         &format!(
                             "run `git add {}-- {}/.gitignore`",
@@ -189,14 +188,14 @@ pub fn plan(
                     ));
                 } else if directory.control_ignored() {
                     items.push(blocked(
-                        &control,
+                        control,
                         Action::TrackControlFile,
                         "control file is excluded by an effective Git ignore rule",
                     ));
                 }
             }
             ControlFileState::Modified | ControlFileState::WrongKind => {
-                let expected = fingerprint(&control);
+                let expected = fingerprint(control);
                 let safety = if expected == EntryFingerprint::Uninspectable
                     || directory.control_protected()
                 {
@@ -205,7 +204,7 @@ pub fn plan(
                     Safety::Guarded
                 };
                 items.push(PlanItem {
-                    path: control,
+                    path: control.to_owned(),
                     action: Action::WriteControlFile,
                     safety,
                     reason: "Skill Directory Control File differs from canonical content"
@@ -214,14 +213,14 @@ pub fn plan(
                         Operation::None
                     } else {
                         Operation::WriteFile {
-                            bytes: CONTROL_FILE_CONTENT.as_bytes().to_vec(),
+                            bytes: directory.control_content().to_vec(),
                             expected,
                         }
                     },
                 });
             }
             ControlFileState::Uninspectable => items.push(blocked(
-                &control,
+                control,
                 Action::WriteControlFile,
                 "control file cannot be inspected",
             )),
@@ -232,31 +231,6 @@ pub fn plan(
                 Action::Recover,
                 "Recovery Artifact requires deterministic recovery or manual review",
             ));
-        }
-        for unmanaged in directory.unmanaged() {
-            let safety =
-                if unmanaged.tracked || unmanaged.fingerprint == EntryFingerprint::Uninspectable {
-                    Safety::Blocked
-                } else {
-                    Safety::Guarded
-                };
-            items.push(PlanItem {
-                path: unmanaged.path.clone(),
-                action: Action::RemoveUnmanaged,
-                safety,
-                reason: if unmanaged.tracked {
-                    "Unmanaged Entry is Git-tracked".to_owned()
-                } else {
-                    "Unmanaged Entry is not declared".to_owned()
-                },
-                operation: if safety == Safety::Blocked {
-                    Operation::None
-                } else {
-                    Operation::Remove {
-                        expected: unmanaged.fingerprint.clone(),
-                    }
-                },
-            });
         }
     }
 
@@ -430,26 +404,55 @@ pub fn prepare_transition(
     let original_observed = observe(target, original, library);
     let staged_observed = observe(target, staged, library);
     let mut plan = plan(staged, library, &staged_observed);
-    let disabled_in_sync = original_observed
+    let disabled = original_observed
         .enablements()
-        .filter(|entry| entry.comparison() == Comparison::InSync)
         .filter(|entry| {
             !staged.enablements().iter().any(|enablement| {
                 enablement.directory() == entry.enablement().directory()
                     && enablement.skill() == entry.enablement().skill()
             })
         })
-        .filter_map(|entry| entry.path().map(Path::to_owned))
-        .collect::<std::collections::BTreeSet<_>>();
-    for item in &mut plan.items {
-        if item.action == Action::RemoveUnmanaged
-            && item.safety == Safety::Guarded
-            && disabled_in_sync.contains(&item.path)
-        {
-            item.safety = Safety::Safe;
-            item.reason = "reviewed removal of an In-Sync disabled Materialization".to_owned();
-        }
+        .filter_map(|entry| entry.path().map(|path| (entry, path.to_owned())))
+        .collect::<Vec<_>>();
+    for (entry, path) in disabled {
+        let safety = if entry.tracked() || entry.fingerprint() == &EntryFingerprint::Uninspectable {
+            Safety::Blocked
+        } else if entry.comparison() == Comparison::InSync {
+            Safety::Safe
+        } else {
+            Safety::Guarded
+        };
+        plan.items.push(PlanItem {
+            path,
+            action: Action::RemoveUnmanaged,
+            safety,
+            reason: if safety == Safety::Safe {
+                "remove an In-Sync disabled Materialization".to_owned()
+            } else if entry.tracked() {
+                "disabled Materialization is Git-tracked".to_owned()
+            } else {
+                "disabled Materialization differs from its desired state".to_owned()
+            },
+            operation: if safety == Safety::Blocked {
+                Operation::None
+            } else {
+                Operation::Remove {
+                    expected: entry.fingerprint().clone(),
+                }
+            },
+        });
     }
+    plan.items.sort_by_key(|item| {
+        let order = match item.action {
+            Action::Recover => 0,
+            Action::CreateDirectory => 1,
+            Action::WriteControlFile => 2,
+            Action::Link | Action::Copy | Action::Replace => 3,
+            Action::TrackControlFile => 4,
+            Action::RemoveUnmanaged => 5,
+        };
+        (order, item.path.clone())
+    });
     plan_recovery(&mut plan, target, staged);
     Ok(PreparedPlan {
         git_facts: capture_git_facts(target, &plan),

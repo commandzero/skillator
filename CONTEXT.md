@@ -60,7 +60,7 @@ A managed exposure boundary where active Skills are materialized for discovery b
 _Avoid_: Target, library
 
 **Skill Directory Control File**:
-The canonical, Skillator-owned `.gitignore` inside a Repository Skill Directory. It excludes every other entry beneath that boundary while remaining eligible for repository tracking. User Scope Skill Directories do not use control files.
+The canonical, Skillator-owned `.gitignore` in the parent of a Repository Skill Directory (for example, `.agents/.gitignore` for `.agents/skills`). It ignores Skillator-managed materializations while explicitly allowing the repository configuration and pre-existing unmanaged entries. It remains eligible for repository tracking. User Scope Skill Directories do not use control files.
 _Avoid_: Repository ignore policy, user `.gitignore`
 
 **Skill Directory Key**:
@@ -140,7 +140,7 @@ Multiple entries within one Skill Directory that can be associated with the same
 _Avoid_: Compatibility overlap
 
 **Unmanaged Entry**:
-An immediate child of a Skill Directory that is neither a reserved Skillator control entry nor at the expected path of an Enablement. Association with a known Skill does not prove that Skillator created it.
+An immediate child of a Skill Directory that is neither a reserved Skillator control entry nor at the expected path of an Enablement. Association with a known Skill does not prove that Skillator created it. It is repository-owned content: Skillator preserves it and allow-lists it in the control file rather than planning removal.
 _Avoid_: Disabled Skill, previously managed entry
 
 **Recovery Artifact**:

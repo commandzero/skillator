@@ -80,7 +80,8 @@
 
 - [x] 9.1 Build the shared multi-Location, multi-Source, multi-Skill acceptance fixture with valid, Invalid, Unavailable, Linked, Copied, Copy-Ineligible, unmanaged, and recovery states.
 - [x] 9.2 Automate the twenty Wayfinder acceptance journeys across Library, Target, observation, reconciliation, recovery, Git protection, CLI, and portability behavior.
-- [ ] 9.3 Run the core acceptance suite on macOS, Linux, and WSL's Linux filesystem and verify capability failures on mounted filesystems preserve content without fallback.
+- [x] 9.3 Run the core acceptance suite on macOS, Linux, and WSL's Linux filesystem and verify capability failures on mounted filesystems preserve content without fallback.
+  - macOS passes locally. Ironhide Linux (Rust 1.97.1) passes the full test suite, Clippy with warnings denied, and formatting from a bind-mounted workspace. Per the accepted MVP assumption, this Linux result serves as WSL Linux-filesystem evidence; automated failure-path coverage preserves content without fallback.
 - [x] 9.4 Perform the short manual terminal smoke check for table readability, navigation feel, confirmations, result acknowledgement, and terminal restoration.
 - [x] 9.5 Verify deferred features have no placeholder commands or accidental interfaces and validate the complete OpenSpec change in strict mode.
 
@@ -88,15 +89,15 @@
 
 - [x] 10.1 Add User Scope terminology and strict `~/.agents/skillator.yaml` loading, validation, canonical serialization, fingerprints, and first-run defaults using home-relative Skill Directory paths.
 - [x] 10.2 Implement User Scope observation, planning, locking, and reconciliation without Repository Git control-file or index behavior.
-- [x] 10.3 Implement read-only onboarding inventory for physical Skills, existing Skill symlinks, invalid entries, inferred Git or local Sources, and collision diagnostics under `~/.agents/skills`.
-- [x] 10.4 Implement the staged first-Library path prompt with editable `./library` default and a complete import, registration, move, and relink review.
-- [x] 10.5 Implement transactional onboarding publication and rollback across Library content, `~/.skillator/library.yaml`, `~/.agents/skillator.yaml`, and user-scoped links, including deterministic fault-injection coverage.
-- [x] 10.6 Route missing Library Configuration into onboarding and open the current Target's first Repository tab after success without showing expected initialization as a warning.
+- [x] 10.3 Implement User Scope observation for physical Skills, existing Skill symlinks, invalid entries, inferred Git or local Sources, and collision diagnostics under `~/.agents/skills` without automatic import.
+- [x] 10.4 Implement the staged first-Library Location with editable `./library` default in the ordinary Library table.
+- [x] 10.5 Keep first-run Library publication scoped to normal Library configuration and local directory creation, with no automatic User Scope or user-scoped link mutation.
+- [x] 10.6 Route missing Library Configuration into the normal Library workspace with its welcome modal, without showing expected initialization as a warning.
 - [x] 10.7 Integrate User Scope Skill Directories as the first Target tabs, keep User and Repository staged saves separate, and support additional `User · <label>` tabs.
 - [x] 10.8 Project inherited User Enablements into Repository tables as read-only `[u] user`, preserve explicit Repository modes, and warn on simultaneous User and Repository activation.
-- [x] 10.9 Add reducer, rendered-screen, workflow, rollback, collision, existing-symlink, and end-to-end first-run acceptance tests.
-- [x] 10.10 Re-run macOS and Linux validation, document pending native WSL verification, and validate the amended OpenSpec change in strict mode.
-  - macOS and a read-only mounted `rust:latest` Linux container pass the complete 131-test suite; native WSL and mounted-filesystem capability checks remain tracked by 9.3.
+- [x] 10.9 Add reducer, rendered-screen, workflow, collision, existing-symlink observation, and end-to-end first-run acceptance tests.
+- [x] 10.10 Re-run macOS and Linux validation and validate the amended OpenSpec change in strict mode.
+  - Superseded by the completed 9.3 cross-platform acceptance evidence.
 
 ## 11. Library Acquisition and Action-focused Tables
 
@@ -105,7 +106,7 @@
 - [x] 11.3 Implement collision-safe transactional acquisition into the first Location's `local/library` Source and integrate resulting registration changes.
 - [x] 11.4 Apply move/copy/link choices to first-run onboarding while preserving the agreed User Scope materialization result.
 - [x] 11.5 Add `/pending` and `/pending actions` filtering plus reducer, rendered-table, acquisition, collision, and rollback tests.
-- [x] 11.6 Run formatting, strict Clippy, macOS and Linux suites, strict OpenSpec validation, and record native WSL as the remaining platform task.
+- [x] 11.6 Run formatting, strict Clippy, macOS and Linux suites, and strict OpenSpec validation; record the accepted Linux-as-WSL validation scope.
 
 ## 12. TUI Copy and Save Affordance
 

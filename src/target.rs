@@ -40,6 +40,13 @@ pub enum TargetScope {
 
 pub const CONTROL_FILE_CONTENT: &str = "# Managed by skillator.\n*\n!.gitignore\n";
 
+pub fn control_file_path(directory: &SkillDirectoryConfig) -> PathBuf {
+    Path::new(directory.path().as_str())
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".gitignore")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootState {
     Absent,
@@ -127,7 +134,7 @@ impl EnablementObservation {
 pub(crate) struct UnmanagedObservation {
     pub path: PathBuf,
     pub tracked: bool,
-    pub fingerprint: EntryFingerprint,
+    pub ignored: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +151,8 @@ pub enum ControlFileState {
 pub struct DirectoryObservation {
     key: String,
     path: PathBuf,
+    control_path: PathBuf,
+    control_content: Vec<u8>,
     root_state: RootState,
     comparison: Comparison,
     control_file: ControlFileState,
@@ -152,7 +161,6 @@ pub struct DirectoryObservation {
     control_ignored: bool,
     generated_ignored: bool,
     unmanaged_entries: Vec<PathBuf>,
-    unmanaged: Vec<UnmanagedObservation>,
     duplicate_entries: Vec<PathBuf>,
     compatible_agents: Vec<&'static str>,
     recovery_artifacts: Vec<PathBuf>,
@@ -166,6 +174,14 @@ impl DirectoryObservation {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn control_path(&self) -> &Path {
+        &self.control_path
+    }
+
+    pub(crate) fn control_content(&self) -> &[u8] {
+        &self.control_content
     }
 
     pub fn root_state(&self) -> RootState {
@@ -198,10 +214,6 @@ impl DirectoryObservation {
 
     pub fn unmanaged_entries(&self) -> &[PathBuf] {
         &self.unmanaged_entries
-    }
-
-    pub(crate) fn unmanaged(&self) -> &[UnmanagedObservation] {
-        &self.unmanaged
     }
 
     pub fn recovery_artifacts(&self) -> &[PathBuf] {
@@ -373,7 +385,7 @@ pub fn observe(
             .into_iter()
             .flat_map(|names| names.keys().cloned())
             .collect();
-        let control_relative = PathBuf::from(directory.path().as_str()).join(".gitignore");
+        let control_relative = control_file_path(directory);
         let probe_relative = PathBuf::from(directory.path().as_str()).join(".skillator-probe");
         let mut fact_paths = children
             .iter()
@@ -411,17 +423,16 @@ pub fn observe(
             } else if !expected.contains(name) {
                 unmanaged_entries.push(child.clone());
                 let relative = child.strip_prefix(target.root()).unwrap_or(child);
-                let protected = git_facts
+                let facts = git_facts
                     .as_ref()
                     .and_then(|facts| facts.as_ref().ok())
-                    .and_then(|facts| facts.get(relative))
-                    .map_or(target.git_repository().is_some(), |facts| {
-                        facts.tracked || facts.staged || facts.unmerged
-                    });
+                    .and_then(|facts| facts.get(relative));
                 unmanaged.push(UnmanagedObservation {
                     path: child.clone(),
-                    tracked: protected,
-                    fingerprint: fingerprint(child),
+                    tracked: facts.map_or(target.git_repository().is_some(), |facts| {
+                        facts.tracked || facts.staged || facts.unmerged
+                    }),
+                    ignored: facts.is_some_and(|facts| facts.ignored),
                 });
                 if expected
                     .iter()
@@ -453,8 +464,9 @@ pub fn observe(
             .as_ref()
             .and_then(|facts| facts.as_ref().ok())
             .and_then(|facts| facts.get(&control_relative));
+        let control_content = control_file_content(target, directory, &unmanaged).into_bytes();
         let (control_file, control_tracked, control_protected, control_ignored) =
-            inspect_control_file(target, directory, root_state, control_facts);
+            inspect_control_file(target, &control_relative, control_facts, &control_content);
         let generated_ignored = target.git_repository().is_none_or(|_| {
             git_facts
                 .as_ref()
@@ -484,9 +496,9 @@ pub fn observe(
         }
         if control_file == ControlFileState::Canonical && !control_tracked {
             diagnostics.push(format!(
-                "track the control file with `git add {}-- {}/.gitignore`",
+                "track the control file with `git add {}-- {}`",
                 if control_ignored { "-f " } else { "" },
-                directory.path()
+                control_relative.display()
             ));
         }
         if control_file == ControlFileState::Canonical && !generated_ignored {
@@ -528,6 +540,8 @@ pub fn observe(
         directories.push(DirectoryObservation {
             key: directory.key().as_str().to_owned(),
             path: root,
+            control_path: target.root().join(&control_relative),
+            control_content,
             root_state,
             comparison,
             control_file,
@@ -536,7 +550,6 @@ pub fn observe(
             control_ignored,
             generated_ignored,
             unmanaged_entries,
-            unmanaged,
             duplicate_entries,
             compatible_agents,
             recovery_artifacts,
@@ -707,27 +720,18 @@ fn read_children_stable_with(
 
 fn inspect_control_file(
     target: &Target,
-    directory: &SkillDirectoryConfig,
-    root_state: RootState,
+    relative: &Path,
     facts: Option<&PathFacts>,
+    expected_content: &[u8],
 ) -> (ControlFileState, bool, bool, bool) {
     if target.git_repository().is_none() {
         return (ControlFileState::NotRequired, true, false, false);
     }
-    let relative = PathBuf::from(directory.path().as_str()).join(".gitignore");
-    if root_state != RootState::Directory {
-        return (
-            ControlFileState::Missing,
-            facts.is_none_or(|facts| facts.tracked),
-            facts.is_none_or(|facts| facts.tracked || facts.staged || facts.unmerged),
-            facts.is_none_or(|facts| facts.ignored),
-        );
-    }
-    let path = target.root().join(&relative);
+    let path = target.root().join(relative);
     let state = match fs::symlink_metadata(&path) {
         Ok(metadata) if !metadata.is_file() => ControlFileState::WrongKind,
         Ok(_) => match fs::read(&path) {
-            Ok(bytes) if bytes == CONTROL_FILE_CONTENT.as_bytes() => ControlFileState::Canonical,
+            Ok(bytes) if bytes == expected_content => ControlFileState::Canonical,
             Ok(_) => ControlFileState::Modified,
             Err(_) => ControlFileState::Uninspectable,
         },
@@ -740,6 +744,61 @@ fn inspect_control_file(
         facts.is_none_or(|facts| facts.tracked || facts.staged || facts.unmerged),
         facts.is_none_or(|facts| facts.ignored),
     )
+}
+
+fn control_file_content(
+    target: &Target,
+    directory: &SkillDirectoryConfig,
+    unmanaged: &[UnmanagedObservation],
+) -> String {
+    let control = control_file_path(directory);
+    let control_parent = control.parent().unwrap_or_else(|| Path::new("."));
+    let mut allow = std::collections::BTreeSet::new();
+    let config = Path::new(".agents/skillator.yaml");
+    if let Ok(relative) = config.strip_prefix(control_parent) {
+        allow_path(&mut allow, relative, false);
+    }
+    for entry in unmanaged
+        .iter()
+        .filter(|entry| entry.tracked || !entry.ignored)
+    {
+        let Ok(relative) = entry.path.strip_prefix(target.root().join(control_parent)) else {
+            continue;
+        };
+        let directory = fs::metadata(&entry.path).is_ok_and(|metadata| metadata.is_dir());
+        allow_path(&mut allow, relative, directory);
+    }
+    let mut content = CONTROL_FILE_CONTENT.to_owned();
+    for rule in allow {
+        content.push('!');
+        content.push_str(&rule);
+        content.push('\n');
+    }
+    content
+}
+
+fn allow_path(allow: &mut std::collections::BTreeSet<String>, path: &Path, directory: bool) {
+    let components = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return;
+    }
+    for depth in 1..components.len() {
+        allow.insert(format!("{}/", components[..depth].join("/")));
+    }
+    let joined = components.join("/");
+    if directory {
+        allow.insert(format!("{joined}/"));
+        allow.insert(format!("{joined}/**"));
+    } else {
+        allow.insert(joined);
+    }
 }
 
 fn inspect_materialization(

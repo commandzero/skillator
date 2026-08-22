@@ -2,7 +2,7 @@
 
 The repository currently contains only a minimal Rust binary and the canonical domain glossary in `CONTEXT.md`. This change introduces the first functional version of Skillator, so there is no legacy runtime architecture or configuration to preserve. The behavior contracts live in the five capability specs in this change.
 
-The design must keep filesystem mutation understandable and testable across macOS, Linux, and WSL while serving both a synchronous TUI and a non-interactive command. The same validated configuration, discovery, observation, planning, and execution behavior must be shared by both interfaces. First-run onboarding also needs a bounded transaction spanning Library initialization, import of existing user-scoped Skills, and User Scope desired state.
+The design must keep filesystem mutation understandable and testable across macOS, Linux, and WSL while serving both a synchronous TUI and a non-interactive command. The same validated configuration, discovery, observation, planning, and execution behavior must be shared by both interfaces. First run opens the ordinary Library workspace with a staged default Location and does not mutate or import existing user-scoped Skills.
 
 ## Goals / Non-Goals
 
@@ -138,13 +138,13 @@ User Scope reuses desired-state validation and materialization inspection, but i
 
 Alternative considered: a separate User Target screen. Rejected because User Scope is inherited context for every repository and the user explicitly needs to see that relationship while configuring the current Target.
 
-### Make first-run onboarding one reviewed transaction
+### Make first run ordinary Library management
 
-Missing Library Configuration routes the root TUI into onboarding before Repository observation. The onboarding model stages the first Location, inventories `~/.agents/skills` physically, preselects valid physical Skills, and offers Source registration for existing valid symlinks. The final review names all moves, links, registrations, configuration files, collisions, and skipped entries.
+Missing Library Configuration routes the root TUI to the normal Library workspace before Repository observation. A welcome modal explains that the user must configure the Library before switching to the Target workspace. The ordinary table stages `./library` as its editable first Location and creates neither configuration nor directories until a normal confirmed save.
 
-Execution stages and verifies destination content and both YAML documents before displacing originals. Original user-scoped entries and prior documents remain recoverable until all publication succeeds. A failure rolls back the whole onboarding attempt; rollback failure retains named Recovery Artifacts. Existing symlinks are never followed for movement and retain their original stored text.
+Existing `~/.agents/skills` content remains User Scope observation only. Skillator does not import, move, copy, relink, or register those entries automatically; users configure Library Locations and User Scope Enablements through their normal explicit workflows.
 
-Alternative considered: saving the Library first and importing Skills incrementally. Rejected because it can strand a half-initialized User Scope and contradicts the single-confirmation onboarding contract.
+Alternative considered: a bespoke multi-root onboarding transaction. Rejected because it added a separate, confusing interaction mode and inferred actions for user-scoped content that was not part of the MVP's ordinary Library management model.
 
 ### Keep Library acquisition explicit and local
 
@@ -195,7 +195,7 @@ Tests assert observable outcomes through module interfaces rather than preservin
 
 - **Filesystem behavior differs across mounts and operating systems** → Probe required capabilities, stage on the destination filesystem, and return Blocked or capability diagnostics without fallback.
 - **Strict YAML support can vary between libraries** → Constrain the accepted and emitted data model, select a compatible semver range, retain the application lockfile, and validate duplicate-key, multi-document, quoting, and deterministic-output fixtures before relying on it.
-- **Onboarding spans two configurations and multiple filesystem roots** → Preflight the entire plan, stage before displacement, retain originals until complete, and test rollback at every publication boundary without claiming power-loss durability.
+- **First-run configuration is initially empty** → Keep the default Location staged in the ordinary Library table, require normal save confirmation, and leave user-scoped entries untouched until explicit User Scope actions.
 - **Partial application is more complex than fail-fast mutation** → Keep one immutable reviewed Plan, isolate Expected Entry operations, retain recoverable backups, and always return fresh final observation.
 - **Absolute links are machine-specific** → Keep Source paths only in user-local Library configuration and recreate links from portable Repository Configuration on each machine.
 - **Synchronous scans may pause the TUI on large Libraries** → Keep the MVP synchronous and surface progress where useful; do not add async state until real measurements justify it.

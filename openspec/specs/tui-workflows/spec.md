@@ -1,9 +1,8 @@
+# tui-workflows Specification
+
 ## Purpose
-
 Defines the keyboard-oriented Library, User Scope, and Target Repository workflows that let users curate available Skills and stage Enablements without writes until an explicit save.
-
-## ADDED Requirements
-
+## Requirements
 ### Requirement: The Library uses one hierarchical table
 The Library workspace SHALL present one unlabeled checkbox column followed by `Mode`, `Location`, `Description`, and `Action`. Library Locations SHALL be full-width dividers; Sources SHALL be collapsible dividers beneath Locations; and Skills SHALL be indented children beneath Sources. Adding a Location SHALL append its live inventory within this same table rather than move it to another list. A valid Skill's `Description` SHALL be the `description` value from its `SKILL.md` frontmatter; Location and Source descriptions SHALL be concise metadata summaries. `Description` MUST NOT contain a pending operation. `Action` SHALL describe only work that Save will attempt, SHALL use a concise one-to-three-word phrase, and SHALL remain blank when Save has no work for that row.
 
@@ -12,7 +11,11 @@ The Library workspace SHALL present one unlabeled checkbox column followed by `M
 - **THEN** one table preserves the Location, Source, and Skill hierarchy without repeating Source identity on each Skill row
 
 ### Requirement: Library acquisition is explicit
-Library inventory is live and has no register or unregister action. A valid external Skill SHALL show no pending action until the user cycles its acquisition mode with `m`; that mode stages `move`, `copy`, or `link` into the first Library Location. The `Space` key MUST NOT stage a fictional membership change.
+Library inventory is live and has no register or unregister action. `Space` SHALL stage whether a valid Skill is visible in Target inventories without changing its discovered Library membership. A valid external Skill SHALL show no pending acquisition action until the user cycles its acquisition mode with `m`; that mode stages `move`, `copy`, or `link` into the first Library Location.
+
+#### Scenario: Hide a Library Skill from Target inventories
+- **WHEN** a user presses `Space` on a valid Library Skill
+- **THEN** the Skill remains visible in the Library table and is hidden from new Target choices after save
 
 ### Requirement: The Library inspector exposes contextual diagnostics
 Selecting a Location, Source, or Skill SHALL expose relevant details in a contextual inspector, including original and resolved paths, Source kind and key, Git facts, validation errors, unavailability, and overlap warnings. Invalid Skills SHALL remain visible rather than disappear.
@@ -22,11 +25,11 @@ Selecting a Location, Source, or Skill SHALL expose relevant details in a contex
 - **THEN** its row remains visible with an unavailable diagnostic in the inspector
 
 ### Requirement: The TUI uses a consistent 256-color visual hierarchy
-The TUI SHALL use indexed 256-color palette values by default. Main workspace borders SHALL be purple, modal and input-overlay borders SHALL be blue, and titles plus persistent hotkey labels SHALL use an off-white bone color. Every modal title SHALL be capitalized, describe the modal's action or purpose rather than repeat the application name, and include one space between the left border and title text. Modal confirmation controls SHALL appear in the bottom border rather than as body text. Warning states SHALL use yellow accents and error states SHALL use red accents. Structural child-tree glyphs, divider lines, and unchecked `[ ]` markers SHALL use a visible dark gray without the terminal dim modifier. The selected row SHALL add only a dark-blue background and MUST NOT replace its existing foreground color.
+The TUI SHALL use indexed 256-color palette values by default. Target borders SHALL be purple, Library borders plus modal and input-overlay borders SHALL be blue, and titles plus persistent hotkey labels SHALL use an off-white bone color. The top title SHALL identify `Skillator`, color the active `Target` or `Library` label with its border color, and show a Target's home-relative path as `Target: <path>`. Every modal title SHALL be capitalized, describe the modal's action or purpose rather than repeat the application name, and include one space between the left border and title text. Modal confirmation controls SHALL appear in the bottom border rather than as body text. Warning states SHALL use yellow accents and error states SHALL use red accents. Structural child-tree glyphs, divider lines, and unchecked `[ ]` markers SHALL use a visible dark gray without the terminal dim modifier. A selected row SHALL use a dark-blue background, bright primary text, and lighter subdued structural elements.
 
 #### Scenario: Selecting a warning row
 - **WHEN** the user selects a row carrying a warning state
-- **THEN** its yellow foreground accent remains visible over the dark-blue selection background
+- **THEN** its selected primary text is bright over the dark-blue selection background while unselected warnings retain their yellow accent
 
 #### Scenario: Opening an editor
 - **WHEN** the user opens any modal or input overlay
@@ -48,7 +51,7 @@ The Target workspace SHALL show one flat horizontal strip beginning with the pri
 - **THEN** the selected User or Repository Skill Directory changes while table-row focus remains stable where possible
 
 ### Requirement: User Scope inheritance is explicit and read-only in Repository tabs
-On a User Scope tab, desired Enablements SHALL remain editable and display ordinary `[x] link` or `[x] copy` state. On a Repository tab, a Skill active only through User Scope SHALL display `[u] user`, SHALL not persist a Repository Enablement, and SHALL be read-only. Attempting to toggle or change mode on such a row SHALL direct the user to its User tab. When the same Skill also has an explicit Repository Enablement, the explicit `[x] link` or `[x] copy` state SHALL remain visible with an `also active in User Scope` warning.
+On a User Scope tab, desired Enablements SHALL remain editable and display ordinary `[✓] link` or `[✓] copy` state. On a Repository tab, a Skill active only through User Scope SHALL display `[u] user`, SHALL not persist a Repository Enablement, and SHALL be read-only. Attempting to toggle or change mode on such a row SHALL direct the user to its User tab. When the same Skill also has an explicit Repository Enablement, the explicit `[✓] link` or `[✓] copy` state SHALL remain visible with an `also active in User Scope` warning.
 
 #### Scenario: Inherited User Skill
 - **WHEN** a Skill is enabled in User Scope but has no Enablement in the selected Repository Skill Directory
@@ -87,7 +90,7 @@ Ordinary table entries with a non-empty Action SHALL use Git-style semantic acce
 - **THEN** its row uses the semantic added, removed, or modified accent for that Action while the Action remains pending
 
 ### Requirement: Target navigation follows the approved key contract
-The Target workspace SHALL support `j/k` for rows, `J/K` for Sources, `h/l` to collapse or expand Sources, `Space` to toggle, `m` to switch Link or Copy, `Tab/Shift+Tab` for Skill Directories, `/` to filter, `Esc` to clear or close, `s` for confirmed Save and Exit, `Ctrl+S` for safe fast Save and Exit, `q` to quit, `t` to change Target, `Ctrl+T` to open a new Target Tab prefilled as `.claude`, `a/e/d` to add/edit/delete a Skill Directory, `Ctrl+L` to toggle Library and Target workspaces, and `?` for help. Editable overlays SHALL capture literal unmodified text keys, display a cursor, and use `Tab` to complete Location and Target paths. Plain arrow keys SHALL mirror `h/j/k/l`; Shift+Up and Shift+Down SHALL mirror `K/J` Source movement, while Shift+Left and Shift+Right SHALL retain collapse and expand. Ctrl-modified arrows SHALL remain unmapped. In Library management, `m` SHALL cycle the available acquisition modes. The persistent action legend SHALL identify `s` as Save and Exit and `Ctrl+S` as quick Save, SHALL be right-aligned within the main table's bottom border, and SHALL NOT create a separate horizontal footer rule. The special filters `/pending` and `/pending actions` SHALL show only rows whose Action is non-empty while preserving their containing dividers.
+The Target workspace SHALL support `j/k` for rows, `J/K` for Sources, `h/l` to collapse or expand Sources, `Space` to toggle, `m` to switch Link or Copy, `Tab/Shift+Tab` for Skill Directories, `/` to filter, `Esc` to clear or close, `s` for confirmed Save, `Ctrl+S` for safe fast Save and Exit, `u` to reset staged edits to their saved state, `q` to quit, `t` to change Target, `Ctrl+T` to open a new Target Tab prefilled as `.claude`, `a/e/d` to add/edit/delete a Skill Directory, `Ctrl+L` to toggle Library and Target workspaces, and `?` for help. Editable overlays SHALL capture literal unmodified text keys, display a cursor, and use `Tab` to complete Location and Target paths. Plain arrow keys SHALL mirror `h/j/k/l`; Shift+Up and Shift+Down SHALL mirror `K/J` Source movement, while Shift+Left and Shift+Right SHALL retain collapse and expand. Ctrl-modified arrows SHALL remain unmapped. In Library management, `m` SHALL cycle the available acquisition modes. The persistent action legend SHALL identify `s` as Save and `Ctrl+S` as Save and Exit, SHALL be right-aligned with one-cell padding inside the main table's bottom border, and SHALL NOT create a separate horizontal footer rule. The special filters `/pending` and `/pending actions` SHALL show only rows whose Action is non-empty while preserving their containing dividers.
 
 #### Scenario: Filtering collapsed Sources
 - **WHEN** a filter matches children inside collapsed Sources
@@ -142,7 +145,7 @@ Pressing `s` SHALL always show a confirmation, even for a clean or Safe-only pla
 - **THEN** the question and hotkey prompt are off-white while ordinary desired-action rows retain the normal foreground
 
 ### Requirement: Busy and partial outcomes preserve user understanding
-An active Target lock SHALL not prevent browsing or staging; Save SHALL report Target Busy with Retry or Return to Editing and MUST NOT discard edits or retry automatically. A fully successful save SHALL exit immediately. A partial or failed save SHALL remain on a concise result screen until acknowledged, identify applied, blocked, rolled-back, or Recovery Required work, and then exit nonzero.
+An active Target lock SHALL not prevent browsing or staging; Save SHALL report Target Busy with Retry or Return to Editing and MUST NOT discard edits or retry automatically. A successful `s` save SHALL reload the current workspace with the saved state; a successful `Ctrl+S` save SHALL exit immediately. A partial or failed save SHALL remain on a concise result screen until acknowledged, identify applied, blocked, rolled-back, or Recovery Required work, and then exit nonzero.
 
 #### Scenario: Partial save
 - **WHEN** a confirmed save applies some changes while others remain blocked
@@ -154,3 +157,4 @@ Invalid or unsupported Repository or Library configuration SHALL open a read-onl
 #### Scenario: Unsupported Repository version
 - **WHEN** the Target TUI opens a repository with unsupported Repository Configuration
 - **THEN** it shows the version diagnostic, allows a normal read-only exit, and performs no writes
+

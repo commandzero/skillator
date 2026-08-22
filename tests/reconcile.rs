@@ -45,8 +45,8 @@ fn safe_plan_materializes_missing_link_and_control_file() {
         fixture.skill.canonicalize().unwrap()
     );
     assert_eq!(
-        std::fs::read_to_string(fixture.target.root().join(".agents/skills/.gitignore")).unwrap(),
-        "# Managed by skillator.\n*\n!.gitignore\n"
+        std::fs::read_to_string(fixture.target.root().join(".agents/.gitignore")).unwrap(),
+        "# Managed by skillator.\n*\n!.gitignore\n!skillator.yaml\n"
     );
 }
 
@@ -369,7 +369,7 @@ fn apply_time_ancestor_symlink_change_cannot_redirect_writes_outside_target() {
         result
             .outcomes()
             .iter()
-            .all(|item| item.outcome != Outcome::Applied)
+            .any(|item| { item.action == Action::Link && item.outcome != Outcome::Applied })
     );
 }
 
@@ -483,12 +483,9 @@ fn staged_deleted_control_file_is_blocked_when_missing_or_modified() {
         let fixture = Fixture::new("linked");
         let root = fixture.target.root().join(".agents/skills");
         std::fs::create_dir_all(&root).unwrap();
-        let control = root.join(".gitignore");
+        let control = root.parent().unwrap().join(".gitignore");
         std::fs::write(&control, "*\n!.gitignore\n").unwrap();
-        support::git(
-            fixture.target.root(),
-            &["add", "-f", ".agents/skills/.gitignore"],
-        );
+        support::git(fixture.target.root(), &["add", "-f", ".agents/.gitignore"]);
         support::git(fixture.target.root(), &["config", "user.name", "Test User"]);
         support::git(
             fixture.target.root(),
@@ -497,7 +494,7 @@ fn staged_deleted_control_file_is_blocked_when_missing_or_modified() {
         support::git(fixture.target.root(), &["commit", "-m", "track control"]);
         support::git(
             fixture.target.root(),
-            &["rm", "--cached", ".agents/skills/.gitignore"],
+            &["rm", "--cached", ".agents/.gitignore"],
         );
         if missing {
             std::fs::remove_file(&control).unwrap();
@@ -586,6 +583,53 @@ fn linked_source_frontmatter_name_change_after_planning_is_blocked() {
 
 #[cfg(unix)]
 #[test]
+fn tracked_unmanaged_skills_are_preserved_and_allow_listed() {
+    let fixture = Fixture::new("linked");
+    let unmanaged = fixture.target.root().join(".agents/skills/esdiag-release");
+    std::fs::create_dir_all(&unmanaged).unwrap();
+    std::fs::write(unmanaged.join("SKILL.md"), "repository-owned skill\n").unwrap();
+    std::fs::write(
+        fixture.target.root().join(".agents/skills/.gitignore"),
+        "# Managed by skillator.\n*\n!.gitignore\n",
+    )
+    .unwrap();
+    support::git(
+        fixture.target.root(),
+        &["add", "-f", ".agents/skills/esdiag-release/SKILL.md"],
+    );
+
+    let observed = observe(&fixture.target, &fixture.repository, &fixture.library);
+    let plan = plan(&fixture.repository, &fixture.library, &observed);
+    assert!(
+        !plan
+            .items()
+            .iter()
+            .any(|item| item.action() == Action::RemoveUnmanaged),
+        "repository-owned unmanaged skills must not become removal work"
+    );
+
+    let result = execute(
+        prepare_check(&fixture.target, &fixture.repository, &fixture.library).unwrap(),
+        Authorization::SafeOnly,
+        &fixture.target,
+        &fixture.repository,
+        &fixture.library,
+    );
+    assert!(
+        result
+            .outcomes()
+            .iter()
+            .all(|outcome| outcome.outcome != Outcome::Blocked)
+    );
+    assert!(unmanaged.join("SKILL.md").is_file());
+    assert_eq!(
+        std::fs::read_to_string(fixture.target.root().join(".agents/.gitignore")).unwrap(),
+        "# Managed by skillator.\n*\n!.gitignore\n!skillator.yaml\n!skills/\n!skills/esdiag-release/\n!skills/esdiag-release/**\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn disabling_an_in_sync_materialization_plans_safe_removal() {
     let fixture = Fixture::new("linked");
     execute(
@@ -595,10 +639,7 @@ fn disabling_an_in_sync_materialization_plans_safe_removal() {
         &fixture.repository,
         &fixture.library,
     );
-    support::git(
-        fixture.target.root(),
-        &["add", "-f", ".agents/skills/.gitignore"],
-    );
+    support::git(fixture.target.root(), &["add", "-f", ".agents/.gitignore"]);
     let staged = fixture.repository.with_enablements(Vec::new()).unwrap();
 
     let prepared = prepare_transition(

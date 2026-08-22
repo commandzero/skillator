@@ -17,11 +17,11 @@ fn linked_materializations_are_compared_to_canonical_absolute_sources() {
     let skill_directory = fixture.target.join(".agents/skills");
     std::fs::create_dir_all(&skill_directory).unwrap();
     std::fs::write(
-        skill_directory.join(".gitignore"),
-        "# Managed by skillator.\n*\n!.gitignore\n",
+        skill_directory.parent().unwrap().join(".gitignore"),
+        "# Managed by skillator.\n*\n!.gitignore\n!skillator.yaml\n",
     )
     .unwrap();
-    support::git(&fixture.target, &["add", "-f", ".agents/skills/.gitignore"]);
+    support::git(&fixture.target, &["add", "-f", ".agents/.gitignore"]);
     std::os::unix::fs::symlink(
         fixture.skill.canonicalize().unwrap(),
         skill_directory.join("release-checklist"),
@@ -61,11 +61,11 @@ fn copied_materializations_compare_content_and_executable_state_not_timestamps()
     let destination = fixture.target.join(".agents/skills/release-checklist");
     copy_fixture(&fixture.skill, &destination);
     std::fs::write(
-        fixture.target.join(".agents/skills/.gitignore"),
+        fixture.target.join(".agents/.gitignore"),
         "# Managed by skillator.\n*\n!.gitignore\n",
     )
     .unwrap();
-    support::git(&fixture.target, &["add", "-f", ".agents/skills/.gitignore"]);
+    support::git(&fixture.target, &["add", "-f", ".agents/.gitignore"]);
 
     let entry = fixture.observe().enablements().next().unwrap().clone();
     assert_eq!(entry.comparison(), Comparison::InSync);
@@ -147,7 +147,7 @@ fn case_variants_and_links_to_known_skills_remain_unmanaged_duplicates() {
         root.join("Release-Checklist"),
     )
     .unwrap();
-    std::fs::write(root.join(".gitignore"), "user rules\n").unwrap();
+    std::fs::write(fixture.target.join(".agents/.gitignore"), "user rules\n").unwrap();
 
     let observed = fixture.observe();
     let directory = &observed.directories()[0];

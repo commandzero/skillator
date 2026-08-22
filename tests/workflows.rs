@@ -46,11 +46,12 @@ fn ordinary_sync_applies_safe_work_but_keeps_tracking_remediation_nonconverged()
             .file_type()
             .is_symlink()
     );
-    assert!(report.diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("git add -- .agents/skills/.gitignore")
-    }));
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("git add -- .agents/.gitignore") })
+    );
 }
 
 #[test]
@@ -74,7 +75,7 @@ fn repeated_sync_converges_without_rewriting_materializations() {
         SyncMode::Apply { force: false },
     )
     .unwrap();
-    support::git(&fixture.target, &["add", "-f", ".agents/skills/.gitignore"]);
+    support::git(&fixture.target, &["add", "-f", ".agents/.gitignore"]);
     let link = fixture.target.join(".agents/skills/release-checklist");
     let before = std::fs::symlink_metadata(&link)
         .unwrap()
@@ -226,7 +227,7 @@ fn ordinary_sync_partially_applies_safe_work_and_preserves_guarded_occupants() {
             .iter()
             .any(|change| change.outcome == ReportOutcome::NotAuthorized)
     );
-    assert!(fixture.target.join(".agents/skills/.gitignore").exists());
+    assert!(fixture.target.join(".agents/.gitignore").exists());
 }
 
 #[test]
@@ -359,14 +360,16 @@ fn first_target_save_creates_required_paths_without_initialization_diagnostics()
     TargetWorkflow::commit_save(prepared, Authorization::SafeOnly).unwrap();
 
     assert!(target_root.join(".agents/skillator.yaml").is_file());
-    for relative in [".agents/skills", ".claude/skills"] {
-        let directory = target_root.join(relative);
-        assert!(directory.is_dir());
-        assert_eq!(
-            std::fs::read_to_string(directory.join(".gitignore")).unwrap(),
-            CONTROL_FILE_CONTENT
-        );
-    }
+    assert!(target_root.join(".agents/skills").is_dir());
+    assert!(target_root.join(".claude/skills").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(target_root.join(".agents/.gitignore")).unwrap(),
+        "# Managed by skillator.\n*\n!.gitignore\n!skillator.yaml\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target_root.join(".claude/.gitignore")).unwrap(),
+        CONTROL_FILE_CONTENT
+    );
 }
 
 #[test]
@@ -398,7 +401,7 @@ fn first_user_scope_save_creates_desired_state_without_git_control_files() {
 
     assert!(paths.user_config().is_file());
     assert!(home.path().join(".agents/skills").is_dir());
-    assert!(!home.path().join(".agents/skills/.gitignore").exists());
+    assert!(!home.path().join(".agents/.gitignore").exists());
 }
 
 struct Fixture {

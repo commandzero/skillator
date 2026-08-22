@@ -1,9 +1,8 @@
+# materialization-reconciliation Specification
+
 ## Purpose
-
 Defines how Skillator observes and safely reconciles declared Skill Enablements into Linked or Copied filesystem representations without losing user-controlled content.
-
-## ADDED Requirements
-
+## Requirements
 ### Requirement: Observation is action-free and fact-based
 Skillator SHALL build an immutable Observed State for configured Skill Directories without prescribing actions or claiming historical ownership. Each Enablement SHALL compare as Drifted when a mismatch is proven, otherwise Unverifiable when conformity cannot be proven, otherwise In Sync. Unresolved identity SHALL remain orthogonal to that comparison.
 
@@ -73,8 +72,8 @@ An immediate child not reserved by Skillator and not claimed by an Expected Entr
 - **WHEN** Repository Configuration no longer declares a previously materialized entry
 - **THEN** ordinary sync treats the occupant as Unmanaged and preserves it
 
-### Requirement: Each Repository Skill Directory owns a canonical Git control file
-Every configured Repository Skill Directory SHALL own an exact UTF-8 `.gitignore` ending in a newline with content `# Managed by skillator.`, `*`, and `!.gitignore` on separate lines. Skillator MUST NOT merge user content into this file or modify the Git index. The final directory SHALL not be In Sync until the control file is canonical, eligible for tracking, tracked, and its rules effectively ignore generated and unmanaged entries. User Scope Skill Directories SHALL have no Skillator-managed `.gitignore` and no Git tracking requirement.
+### Requirement: Repository controls live beside, not inside, Skill Directories
+Every configured Repository Skill Directory SHALL use an exact UTF-8 control file named `.gitignore` in the directory's parent (for example, `.agents/.gitignore` for `.agents/skills`), ending in a newline. Its generated content SHALL begin with `# Managed by skillator.`, `*`, and `!.gitignore` on separate lines; it SHALL additionally allow-list `.agents/skillator.yaml` when applicable and every pre-existing unmanaged entry beneath the Skill Directory. Skillator MUST NOT merge user content into this file or modify the Git index. The final directory SHALL not be In Sync until the control file is canonical, eligible for tracking, tracked, and its rules effectively ignore managed materializations without hiding allow-listed repository-owned entries. User Scope Skill Directories SHALL have no Skillator-managed `.gitignore` and no Git tracking requirement.
 
 #### Scenario: Control file created
 - **WHEN** the control file is absent and repository ignore policy permits it
@@ -82,11 +81,15 @@ Every configured Repository Skill Directory SHALL own an exact UTF-8 `.gitignore
 
 #### Scenario: Control file needs tracking
 - **WHEN** the canonical file is untracked
-- **THEN** Skillator reports Git exclusion Drift and the exact remediation `git add -- <skill-directory>/.gitignore` without staging it
+- **THEN** Skillator reports Git exclusion Drift and the exact remediation `git add -- <control-file>` without staging it
 
-#### Scenario: Tracked occupant
-- **WHEN** an Expected Entry or Unmanaged Entry is Git-tracked
-- **THEN** Skillator blocks its replacement or removal even under force and leaves unrelated Git worktree changes untouched
+#### Scenario: Tracked repository-owned entry
+- **WHEN** an Unmanaged Entry is Git-tracked
+- **THEN** Skillator preserves it, allow-lists it in the control file, and leaves unrelated Git worktree changes untouched
+
+#### Scenario: Tracked expected entry
+- **WHEN** an Expected Entry is Git-tracked
+- **THEN** Skillator blocks its replacement even under force and leaves unrelated Git worktree changes untouched
 
 ### Requirement: Reconciliation plans classify every change
 Every planned mutation SHALL be exactly Safe, Guarded, or Blocked. Safe Changes SHALL be eligible for automatic apply. Guarded Changes SHALL require explicit TUI batch confirmation or invocation-wide `--force`. Blocked Changes SHALL remain unauthorized by either mechanism. Already conforming entries SHALL be No Change.
@@ -100,7 +103,7 @@ Every planned mutation SHALL be exactly Safe, Guarded, or Blocked. Safe Changes 
 - **THEN** Skillator authorizes every viable Guarded Change but does not authorize Blocked work or Recovery Required
 
 ### Requirement: Safety boundaries protect uncertain or unrecoverable content
-Missing roots and Materializations, canonicalization of a correct link, replacement of a broken link after Source verification, conversion of an In-Sync Materialization, and reviewed removal of an In-Sync disabled Materialization SHALL be Safe. Replacement or removal of recoverable conflicting content, Diverged Copies, eligible Unmanaged Entries, or modified control files SHALL be Guarded. Invalid configuration, containment violations, unresolved required content, Copy-Ineligible Skills, inaccessible entries, unsupported capabilities, changed preconditions, tracked occupants, collisions, ambiguous recovery, or inability to preserve content SHALL be Blocked.
+Missing roots and Materializations, canonicalization of a correct link, replacement of a broken link after Source verification, conversion of an In-Sync Materialization, and reviewed removal of an In-Sync disabled Materialization SHALL be Safe. Replacement of recoverable conflicting content, Diverged Copies, or modified control files SHALL be Guarded. Unmanaged Entries SHALL be preserved. Invalid configuration, containment violations, unresolved required content, Copy-Ineligible Skills, inaccessible entries, unsupported capabilities, changed preconditions, tracked expected occupants, collisions, ambiguous recovery, or inability to preserve content SHALL be Blocked.
 
 #### Scenario: Misdirected link
 - **WHEN** an Expected Entry is a symlink proven to target a different Skill and it can be preserved
@@ -156,3 +159,4 @@ An In-Sync save, sync, or check SHALL perform no configuration or Materializatio
 #### Scenario: Repeated sync
 - **WHEN** a Target is fully In Sync and sync runs again
 - **THEN** Skillator reports In Sync and performs no filesystem or configuration writes
+

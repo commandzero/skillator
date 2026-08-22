@@ -16,15 +16,15 @@ A Target SHALL be selected from one existing directory within a Git worktree. Sk
 - **THEN** Skillator reports invalid Target input and performs no writes
 
 ### Requirement: Repository Configuration has one version 1 schema
-Each Target SHALL declare desired state in `.agents/skillator.yaml` using exactly these persisted values: numeric `version: 1`; required `skill_directories`; and required `enablements`. Each Skill Directory SHALL contain required `key` and `path` plus optional `label`. Each Enablement SHALL contain `directory`, `skill.source`, `skill.path`, and explicit `materialization` equal to `linked` or `copied`. Presence of an Enablement SHALL mean enabled; no `enabled` field exists in version 1.
+Each Target SHALL declare desired state in `.agents/skillator.yaml` using numeric `version: 1` followed by zero or more top-level Skill Directory mappings keyed by Skill Directory Key. Each directory mapping SHALL contain required `path`, optional `label`, and `skills`. `skills` SHALL map the materialized Skill name to an entry with required `source`, optional Source-relative `path`, and optional `type` equal to `linked` or `copied`. Omitted `path` defaults to the Skill mapping key; omitted `type` defaults to `linked`. Presence of a Skill entry SHALL mean enabled; no `enabled` field exists in version 1.
 
 #### Scenario: Minimal empty configuration
-- **WHEN** both required lists are present and empty in a version 1 document
+- **WHEN** a version 1 document contains no Skill Directory mappings
 - **THEN** Skillator treats the document as valid intentional configuration and does not restage defaults
 
-#### Scenario: Materialization is explicit
+#### Scenario: Default Linked materialization
 - **WHEN** the TUI creates a new Enablement without a prior mode choice
-- **THEN** it stages `linked` and persists that value explicitly on save
+- **THEN** it stages `linked` and omits `type` from canonical saved YAML
 
 ### Requirement: Repository Configuration validation is strict
 The Repository Configuration SHALL reject unknown fields, missing required fields, nulls, incorrect types, unsupported enum values, duplicate YAML mapping keys, anchors, aliases, tags, merge keys, and multiple YAML documents. Validation SHALL collect every independently detectable problem with stable field paths and line and column when available. Invalid configuration SHALL yield no trusted desired state and MUST prevent configuration and reconciliation writes.
@@ -63,7 +63,7 @@ Skill Directory Keys SHALL be unique case-insensitively. Each Enablement's `dire
 - **THEN** Skillator rejects the configuration as ambiguous
 
 ### Requirement: Skill Directory presets are creation-time suggestions
-The MVP SHALL offer exactly two built-in presets: `agents`, labeled `.agents`, at `.agents/skills`; and `claude`, labeled `Claude Code`, at `.claude/skills`. A preset SHALL prefill editable key, label, and path values but MUST NOT persist a preset identifier or built-in/custom flag. A saved preset-created directory SHALL behave identically to a custom directory.
+The MVP SHALL offer exactly two built-in presets: `agents`, labeled `.agents`, at `.agents/skills`; and `claude`, labeled `.claude`, at `.claude/skills`. A preset SHALL prefill editable key, label, and path values but MUST NOT persist a preset identifier or built-in/custom flag. A saved preset-created directory SHALL behave identically to a custom directory.
 
 #### Scenario: First-run Target default
 - **WHEN** Repository Configuration is absent and the Target TUI opens
@@ -88,7 +88,7 @@ A structurally valid Skill reference SHALL remain valid when its Source or Skill
 - **THEN** Skillator displays the Enablement as Unresolved, preserves it, and reconciles independent resolvable work where safe
 
 ### Requirement: Canonical Repository Configuration is deterministic
-Saving valid Repository Configuration SHALL emit one YAML document with top-level fields ordered `version`, `skill_directories`, `enablements`; two-space indentation; lowercase enum values; a final newline; Skill Directories sorted by key; and Enablements sorted by directory, Source Key, and Skill path. Derived or machine-local state MUST NOT be persisted.
+Saving valid Repository Configuration SHALL emit one YAML document with `version` first, then Skill Directory mappings sorted by key; two-space indentation; lowercase `type` values; and a final newline. Each directory SHALL emit `path`, optional `label`, then `skills`; Skill entries SHALL have deterministic directory, Source Key, and Skill-path ordering. Derived or machine-local state MUST NOT be persisted.
 
 #### Scenario: Semantically reordered input
 - **WHEN** a user saves valid configuration whose lists are in arbitrary order

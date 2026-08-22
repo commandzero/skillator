@@ -330,12 +330,12 @@ fn report_apply(
             if *directory.control_file() == crate::target::ControlFileState::Canonical
                 && !directory.control_tracked()
             {
-                let relative = display_path(root, directory.path());
+                let relative = display_path(root, directory.control_path());
                 diagnostics.push(ReportDiagnostic {
                     code: "control_file_untracked".to_owned(),
                     severity: "warning".to_owned(),
                     message: format!(
-                        "run `git add {}-- {relative}/.gitignore`",
+                        "run `git add {}-- {relative}`",
                         if directory.control_ignored() {
                             "-f "
                         } else {

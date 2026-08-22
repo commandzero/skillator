@@ -7,7 +7,7 @@ Agent Skills are commonly installed globally or copied into each repository, cre
 - Add a user-scoped Library that discovers local Skill Sources and explicitly registers the Sources and Skills available for activation.
 - Add a strict, tracked Repository Configuration that declares Skill Directories and portable per-directory Enablements without storing machine-local Source paths.
 - Add Linked and Copied Materializations, observed-state comparison, and guarded reconciliation with partial-apply and recovery guarantees.
-- Add first-run onboarding that initializes the Library, safely imports existing user-scoped Skills, preserves existing links, and creates User Scope desired state only after confirmation.
+- Add a first-run Library welcome that opens normal Library management with a staged local default, without importing or changing existing user-scoped Skills.
 - Add a manually invoked Target TUI whose first tab manages User Scope and whose remaining tabs manage repository Skill Directories, plus a Library TUI for curation; all edits remain staged until save.
 - Add a non-interactive `skillator sync` and check mode with concise text, JSON, or YAML reports and stable exit statuses.
 - Support Git Target Repositories on macOS, Linux, and WSL. Preserve unsupported configuration versions without rewriting them.
@@ -22,7 +22,7 @@ Agent Skills are commonly installed globally or copied into each repository, cre
 - `materialization-reconciliation`: Observe and reconcile Linked or Copied Materializations with bounded authorization, conflict isolation, Git exclusions, rollback, and recovery.
 - `cli-contract`: Invoke the Target TUI, Library TUI, synchronization, and check workflows with deterministic reports and stable process outcomes.
 - `tui-workflows`: Interactively curate the Library and stage per-Skill-Directory Target changes using the approved table layouts, navigation, confirmation, and save behavior.
-- `user-scope-onboarding`: Initialize a first Library, safely import existing user-scoped Skills, and manage machine-local User Scope Enablements inherited by repository views.
+- `user-scope-onboarding`: Manage machine-local User Scope Enablements inherited by repository views and keep existing user-scoped entries as observations until explicitly managed.
 
 ### Modified Capabilities
 
