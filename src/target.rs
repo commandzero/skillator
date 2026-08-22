@@ -761,8 +761,9 @@ fn escape_gitignore_literal(path: &Path) -> String {
     let value = path.to_string_lossy();
     let recovery_glob = value == ".skillator-*" || value.ends_with("/.skillator-*");
     let mut escaped = String::with_capacity(value.len());
-    for (index, character) in value.chars().enumerate() {
-        let is_recovery_wildcard = recovery_glob && character == '*' && index + 1 == value.len();
+    for (index, character) in value.char_indices() {
+        let is_recovery_wildcard =
+            recovery_glob && character == '*' && index + character.len_utf8() == value.len();
         if (matches!(character, '\\' | '*' | '?' | '[' | ']') && !is_recovery_wildcard)
             || (index == 0 && matches!(character, '#' | '!'))
         {
@@ -920,5 +921,9 @@ mod tests {
             r"skills/foo\*\?\[bar\]"
         );
         assert_eq!(escape_gitignore_literal(Path::new("#skills")), r"\#skills");
+        assert_eq!(
+            escape_gitignore_literal(Path::new("é/skills/.skillator-*")),
+            "é/skills/.skillator-*"
+        );
     }
 }

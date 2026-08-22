@@ -1126,6 +1126,16 @@ impl TargetStatePlanner {
             ));
         }
         let config_path = self.target.root().join(LOCAL_TARGET_CONFIG);
+        if let Err(error) = validate_target_config_path(&self.target, &config_path, "Repository") {
+            if source.is_some() {
+                return Ok(configuration_blocked_report(
+                    self.target.root(),
+                    "worktree_sync",
+                    error.to_string(),
+                ));
+            }
+            return Err(error);
+        }
         let config_facts = self
             .target
             .repository()
@@ -1176,6 +1186,11 @@ impl TargetStatePlanner {
 
         let root_ignore_changed =
             self.root_ignore.expected != Fingerprint::for_bytes(&self.root_ignore.desired);
+        let configuration_changed =
+            self.configuration_expected != Fingerprint::for_bytes(&self.configuration_bytes);
+        if root_ignore_changed || configuration_changed {
+            validate_target_config_path(&self.target, &config_path, "Repository")?;
+        }
         if root_ignore_changed {
             save_bytes(
                 &self.root_ignore.path,
@@ -1184,9 +1199,8 @@ impl TargetStatePlanner {
             )
             .map_err(save_error)?;
         }
-        let configuration_changed =
-            self.configuration_expected != Fingerprint::for_bytes(&self.configuration_bytes);
         if configuration_changed {
+            validate_target_config_path(&self.target, &config_path, "Repository")?;
             save_bytes(
                 &config_path,
                 &self.configuration_bytes,
@@ -1618,5 +1632,60 @@ mod tests {
             change.path == LOCAL_TARGET_CONFIG && change.outcome == ReportOutcome::Blocked
         }));
         assert!(!directory.path().join(LOCAL_TARGET_CONFIG).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_configuration_commit_rechecks_the_physical_parent() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let git = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(directory.path())
+            .output()
+            .unwrap();
+        assert!(git.status.success(), "git init failed: {git:?}");
+
+        let source_path = directory.path().join("primary-target.yaml");
+        let source_bytes = b"primary configuration";
+        std::fs::write(&source_path, source_bytes).unwrap();
+        let paths = AppPaths::new(directory.path().to_owned());
+        let target = Target::select(directory.path()).unwrap();
+        let desired = RepositoryConfig::empty();
+        let configuration_bytes = RepositoryConfigCodec::render(&desired)
+            .unwrap()
+            .into_bytes();
+        let planner = TargetStatePlanner::prepare_with_locks(
+            &paths,
+            TargetStateRequest {
+                target: target.clone(),
+                original: RepositoryConfig::empty(),
+                desired,
+                configuration_bytes,
+                configuration_expected: Fingerprint::Absent,
+                root_ignore_policy: RootIgnorePolicy::Ensure,
+                configuration_guard: None,
+            },
+            TargetLocks::acquire(&[&target]).unwrap(),
+        )
+        .unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), directory.path().join(".agents")).unwrap();
+
+        let result = planner.commit_with_source(
+            Authorization::SafeOnly,
+            &source_path,
+            &Fingerprint::for_bytes(source_bytes),
+        );
+
+        let report = result.expect("parent replacement should be reported as blocked");
+        assert_eq!(report.status, ReportStatus::NotConverged);
+        assert!(report.changes.iter().any(|change| {
+            change.path == LOCAL_TARGET_CONFIG && change.outcome == ReportOutcome::Blocked
+        }));
+        assert!(!outside.path().join("skillator.yaml").exists());
+        assert!(!directory.path().join(".gitignore").exists());
     }
 }
