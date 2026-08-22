@@ -35,6 +35,7 @@ const MODIFY: Color = Color::Indexed(45);
 const WARNING: Color = Color::Indexed(220);
 const ERROR: Color = Color::Indexed(196);
 const DIM_FOREGROUND: Color = Color::Indexed(240);
+const DARK_MAGENTA: Color = Color::Indexed(90);
 const SELECTED_BACKGROUND: Color = Color::Indexed(24);
 const TAB_TOP_BORDER: border::Set = border::Set {
     top_left: "▛",
@@ -1881,9 +1882,13 @@ fn render_skill_details(
         ));
     } else {
         let mut frontmatter = false;
-        for line in document.lines() {
-            if line == "---" {
-                frontmatter = !frontmatter;
+        let mut fenced_code = false;
+        for (index, line) in document.lines().enumerate() {
+            if index == 0 && line == "---" {
+                frontmatter = true;
+                lines.push(Line::raw(line.to_owned()));
+            } else if frontmatter && line == "---" {
+                frontmatter = false;
                 lines.push(Line::raw(line.to_owned()));
             } else if frontmatter {
                 if let Some((key, value)) = line.split_once(':') {
@@ -1896,7 +1901,7 @@ fn render_skill_details(
                     lines.push(Line::raw(line.to_owned()));
                 }
             } else {
-                lines.push(Line::raw(line.to_owned()));
+                lines.push(markdown_detail_line(line, &mut fenced_code));
             }
         }
     }
@@ -1912,6 +1917,171 @@ fn render_skill_details(
             )),
         area,
     );
+}
+
+fn markdown_detail_line(line: &str, fenced_code: &mut bool) -> Line<'static> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        *fenced_code = !*fenced_code;
+        return Line::from(Span::styled(line.to_owned(), Style::default().fg(ADD)));
+    }
+    if *fenced_code {
+        return Line::from(Span::styled(line.to_owned(), Style::default().fg(ADD)));
+    }
+    if let Some((prefix, content)) = markdown_heading(line) {
+        let mut spans = vec![Span::styled(prefix, Style::default().fg(MODIFY))];
+        spans.extend(markdown_inline_spans(
+            content,
+            Style::default().fg(BONE).add_modifier(Modifier::BOLD),
+        ));
+        return Line::from(spans);
+    }
+    if let Some((prefix, content)) = markdown_quote(line) {
+        let mut spans = vec![Span::styled(prefix, dim_style())];
+        spans.extend(markdown_inline_spans(content, Style::default()));
+        return Line::from(spans);
+    }
+    if let Some((prefix, content, numbered)) = markdown_bullet(line) {
+        let marker_style = if numbered {
+            Style::default().fg(DARK_MAGENTA)
+        } else {
+            dim_style()
+        };
+        let mut spans = vec![Span::styled(prefix, marker_style)];
+        spans.extend(markdown_inline_spans(content, Style::default()));
+        return Line::from(spans);
+    }
+    Line::from(markdown_inline_spans(line, Style::default()))
+}
+
+fn markdown_heading(line: &str) -> Option<(String, &str)> {
+    let indent = line.len() - line.trim_start().len();
+    let rest = &line[indent..];
+    let hashes = rest.bytes().take_while(|byte| *byte == b'#').count();
+    (hashes > 0 && rest.as_bytes().get(hashes) == Some(&b' ')).then(|| {
+        (
+            format!("{}{} ", &line[..indent], "#".repeat(hashes)),
+            &rest[hashes + 1..],
+        )
+    })
+}
+
+fn markdown_quote(line: &str) -> Option<(String, &str)> {
+    let indent = line.len() - line.trim_start().len();
+    let rest = &line[indent..];
+    rest.strip_prefix("> ")
+        .map(|content| (format!("{}> ", &line[..indent]), content))
+}
+
+fn markdown_bullet(line: &str) -> Option<(String, &str, bool)> {
+    let indent = line.len() - line.trim_start().len();
+    let rest = &line[indent..];
+    if let Some((marker, content)) = ["- ", "* ", "+ "]
+        .iter()
+        .find_map(|marker| rest.strip_prefix(marker).map(|content| (*marker, content)))
+    {
+        return Some((format!("{}{marker}", &line[..indent]), content, false));
+    }
+    let digits = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    let marker_end = digits + 1;
+    (digits > 0
+        && matches!(rest.as_bytes().get(digits), Some(b'.' | b')'))
+        && rest.as_bytes().get(marker_end) == Some(&b' '))
+    .then(|| {
+        (
+            format!("{}{}", &line[..indent], &rest[..=marker_end]),
+            &rest[marker_end + 1..],
+            true,
+        )
+    })
+}
+
+fn markdown_inline_spans(text: &str, normal: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut remainder = text;
+    while !remainder.is_empty() {
+        if let Some(after_tick) = remainder.strip_prefix('`')
+            && let Some(end) = after_tick.find('`')
+        {
+            let code = &after_tick[..end];
+            spans.push(Span::styled(
+                format!("`{code}`"),
+                Style::default().fg(PURPLE),
+            ));
+            remainder = &after_tick[end + 1..];
+            continue;
+        }
+        if let Some(after_open) = remainder.strip_prefix('[')
+            && let Some(label_end) = after_open.find("](")
+        {
+            let label = &after_open[..label_end];
+            let after_label = &after_open[label_end + 2..];
+            if let Some(url_end) = after_label.find(')') {
+                spans.push(Span::styled("[", dim_style()));
+                spans.push(Span::styled(label.to_owned(), Style::default().fg(BLUE)));
+                spans.push(Span::styled("](", dim_style()));
+                spans.push(Span::styled(after_label[..url_end].to_owned(), dim_style()));
+                spans.push(Span::styled(")", dim_style()));
+                remainder = &after_label[url_end + 1..];
+                continue;
+            }
+        }
+        if let Some(after_bold) = remainder
+            .strip_prefix("**")
+            .or_else(|| remainder.strip_prefix("__"))
+        {
+            let delimiter = if remainder.starts_with("**") {
+                "**"
+            } else {
+                "__"
+            };
+            if let Some(end) = after_bold.find(delimiter) {
+                spans.push(Span::styled(delimiter, dim_style()));
+                spans.push(Span::styled(
+                    after_bold[..end].to_owned(),
+                    Style::default()
+                        .fg(Color::Indexed(15))
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(delimiter, dim_style()));
+                remainder = &after_bold[end + delimiter.len()..];
+                continue;
+            }
+        }
+        if !remainder.starts_with("**")
+            && !remainder.starts_with("__")
+            && let Some(after_italic) = remainder
+                .strip_prefix('*')
+                .or_else(|| remainder.strip_prefix('_'))
+        {
+            let delimiter = if remainder.starts_with('*') { "*" } else { "_" };
+            if let Some(end) = after_italic.find(delimiter) {
+                spans.push(Span::styled(delimiter, dim_style()));
+                spans.push(Span::styled(
+                    after_italic[..end].to_owned(),
+                    Style::default()
+                        .fg(DIM_FOREGROUND)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+                spans.push(Span::styled(delimiter, dim_style()));
+                remainder = &after_italic[end + delimiter.len()..];
+                continue;
+            }
+        }
+        let next = remainder
+            .char_indices()
+            .find_map(|(index, character)| {
+                matches!(character, '`' | '[' | '*' | '_').then_some(index)
+            })
+            .filter(|index| *index > 0)
+            .unwrap_or(remainder.len());
+        spans.push(Span::styled(remainder[..next].to_owned(), normal));
+        remainder = &remainder[next..];
+    }
+    spans
 }
 
 fn save_warning_modal(message: &str) -> (String, String, Option<String>, bool) {
@@ -3696,6 +3866,55 @@ mod internal_tests {
             user_relative_path(Path::new("/opt/work/skillator"), Path::new("/Users/ada")),
             "/opt/work/skillator"
         );
+    }
+
+    #[test]
+    fn skill_detail_markdown_uses_lightweight_structural_highlighting() {
+        let inline = markdown_inline_spans(
+            "Run `skillator sync` with [the guide](https://example.test).",
+            Style::default(),
+        );
+        assert!(
+            inline.iter().any(|span| {
+                span.content == "`skillator sync`" && span.style.fg == Some(PURPLE)
+            })
+        );
+        assert!(
+            inline
+                .iter()
+                .any(|span| span.content == "the guide" && span.style.fg == Some(BLUE))
+        );
+        assert!(inline.iter().any(|span| {
+            span.content == "https://example.test" && span.style.fg == Some(DIM_FOREGROUND)
+        }));
+        let emphasis = markdown_inline_spans("**important** and *optional*", Style::default());
+        assert!(emphasis.iter().any(|span| {
+            span.content == "important"
+                && span.style.fg == Some(Color::Indexed(15))
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(emphasis.iter().any(|span| {
+            span.content == "optional"
+                && span.style.fg == Some(DIM_FOREGROUND)
+                && span.style.add_modifier.contains(Modifier::ITALIC)
+        }));
+        let mut un_fenced = false;
+        let numbered = markdown_detail_line("12. Prepare release", &mut un_fenced);
+        assert_eq!(numbered.spans[0].content, "12. ");
+        assert_eq!(numbered.spans[0].style.fg, Some(DARK_MAGENTA));
+
+        let mut fenced = false;
+        let fence = markdown_detail_line("```sh", &mut fenced);
+        assert!(fenced);
+        assert_eq!(fence.spans[0].style.fg, Some(ADD));
+        let code = markdown_detail_line("skillator sync", &mut fenced);
+        assert_eq!(code.spans[0].style.fg, Some(ADD));
+        let heading = markdown_detail_line("## Setup", &mut fenced);
+        assert_eq!(heading.spans[0].style.fg, Some(ADD));
+        markdown_detail_line("```", &mut fenced);
+        let heading = markdown_detail_line("## Setup", &mut fenced);
+        assert_eq!(heading.spans[0].style.fg, Some(MODIFY));
+        assert!(heading.spans[1].style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
