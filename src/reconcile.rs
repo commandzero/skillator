@@ -176,6 +176,18 @@ pub fn plan(
                             Action::WriteControlFile,
                             "local Skillator control file has Git index protection",
                         ));
+                    } else if !directory.control_ignored() {
+                        items.push(blocked(
+                            control,
+                            Action::WriteControlFile,
+                            "local Skillator control file is not effectively Git-ignored",
+                        ));
+                    } else if !directory.generated_ignored() {
+                        items.push(blocked(
+                            control,
+                            Action::WriteControlFile,
+                            "generated Skill Entries are not effectively Git-ignored",
+                        ));
                     }
                 }
                 ControlFileState::Modified | ControlFileState::WrongKind => {

@@ -9,6 +9,7 @@ use skillator::library::scan_library;
 use skillator::reconcile::{Action, Authorization, Safety, prepare_check};
 use skillator::target::{Target, observe};
 use std::collections::BTreeMap;
+use std::io::Write;
 
 #[test]
 fn check_reports_safe_work_without_writing_any_target_entry() {
@@ -490,6 +491,23 @@ fn worktree_sync_check_does_not_create_destination_configuration() {
 }
 
 #[test]
+fn worktree_sync_requires_effective_root_ignore_rules() {
+    let fixture = WorktreeFixture::new();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.linked.join(".gitignore"))
+        .unwrap()
+        .write_all(b"!/.agents/skillator.yaml\n")
+        .unwrap();
+
+    let error =
+        WorktreeSyncWorkflow::run(&fixture.paths, &fixture.linked, SyncMode::Check).unwrap_err();
+
+    assert!(error.to_string().contains("root .gitignore must contain"));
+    assert!(!fixture.linked.join(".agents/skillator.yaml").exists());
+}
+
+#[test]
 fn worktree_sync_requires_force_for_differing_untracked_configuration() {
     let fixture = WorktreeFixture::new();
     std::fs::create_dir_all(fixture.linked.join(".agents")).unwrap();
@@ -526,6 +544,11 @@ fn worktree_sync_requires_force_for_differing_untracked_configuration() {
     .unwrap();
     assert_eq!(forced.mode, "worktree_sync_force");
     assert_eq!(forced.status, ReportStatus::InSync, "{forced:#?}");
+    assert!(
+        forced.changes.iter().any(|change| {
+            change.path == ".agents/skillator.yaml" && change.safety == "guarded"
+        })
+    );
     assert_eq!(
         std::fs::read(fixture.linked.join(".agents/skillator.yaml")).unwrap(),
         std::fs::read(fixture.primary.join(".agents/skillator.yaml")).unwrap()

@@ -1151,6 +1151,14 @@ fn validate_repository(config: &RepositoryConfig) -> Vec<ConfigIssue> {
             });
         }
         let path = directory.path.as_str();
+        if !path.contains('/') {
+            issues.push(ConfigIssue {
+                path: format!("skill_directories.{}", directory.key),
+                message:
+                    "Skill Directory must be nested so its generated control file does not replace the repository root .gitignore"
+                        .to_owned(),
+            });
+        }
         if path == ".git"
             || path.starts_with(".git/")
             || path == ".agents/skillator.yaml"

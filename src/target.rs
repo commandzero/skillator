@@ -751,10 +751,26 @@ fn inspect_control_file(
 fn control_file_content(entries: &BTreeSet<PathBuf>) -> String {
     let mut content = CONTROL_FILE_CONTENT.to_owned();
     for entry in entries {
-        content.push_str(&entry.to_string_lossy());
+        content.push_str(&escape_gitignore_literal(entry));
         content.push('\n');
     }
     content
+}
+
+fn escape_gitignore_literal(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    let recovery_glob = value == ".skillator-*" || value.ends_with("/.skillator-*");
+    let mut escaped = String::with_capacity(value.len());
+    for (index, character) in value.chars().enumerate() {
+        let is_recovery_wildcard = recovery_glob && character == '*' && index + 1 == value.len();
+        if (matches!(character, '\\' | '*' | '?' | '[' | ']') && !is_recovery_wildcard)
+            || (index == 0 && matches!(character, '#' | '!'))
+        {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 fn inspect_materialization(
@@ -895,5 +911,14 @@ mod tests {
             aggregate_directory_comparison(RootState::Directory, true, false),
             Comparison::Unverifiable
         );
+    }
+
+    #[test]
+    fn control_file_escapes_gitignore_metacharacters() {
+        assert_eq!(
+            escape_gitignore_literal(Path::new("skills/foo*?[bar]")),
+            r"skills/foo\*\?\[bar\]"
+        );
+        assert_eq!(escape_gitignore_literal(Path::new("#skills")), r"\#skills");
     }
 }

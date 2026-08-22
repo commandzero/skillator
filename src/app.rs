@@ -232,6 +232,7 @@ impl WorktreeSyncWorkflow {
             Target::select(pair.primary_root()).map_err(|error| WorkflowError::InvalidInput {
                 message: format!("cannot open primary worktree: {error}"),
             })?;
+        let locks = TargetLocks::acquire(&[&primary, &destination])?;
         let (desired, configuration_bytes, source_fingerprint) =
             load_primary_target_configuration(&primary)?;
         let destination_state =
@@ -278,7 +279,6 @@ impl WorktreeSyncWorkflow {
             ));
         }
 
-        let locks = TargetLocks::acquire(&[&primary, &destination])?;
         if source_configuration_changed(
             &primary.root().join(LOCAL_TARGET_CONFIG),
             &source_fingerprint,
@@ -301,6 +301,7 @@ impl WorktreeSyncWorkflow {
                 configuration_bytes,
                 configuration_expected,
                 root_ignore_policy: RootIgnorePolicy::Require,
+                configuration_guard: configuration_guard.clone(),
             },
             locks,
         )?;
@@ -1005,6 +1006,7 @@ struct TargetStateRequest {
     configuration_bytes: Vec<u8>,
     configuration_expected: Fingerprint,
     root_ignore_policy: RootIgnorePolicy,
+    configuration_guard: Option<ConfigurationGuard>,
 }
 
 struct TargetStatePlanner {
@@ -1012,6 +1014,7 @@ struct TargetStatePlanner {
     desired: RepositoryConfig,
     configuration_bytes: Vec<u8>,
     configuration_expected: Fingerprint,
+    configuration_guard: Option<ConfigurationGuard>,
     root_ignore: RootIgnorePublication,
     library: LibrarySnapshot,
     prepared: PreparedPlan,
@@ -1048,6 +1051,7 @@ impl TargetStatePlanner {
                 configuration_bytes: configuration_bytes.into_bytes(),
                 configuration_expected: session.fingerprint.clone(),
                 root_ignore_policy: RootIgnorePolicy::Ensure,
+                configuration_guard: None,
             },
             locks,
         )
@@ -1065,6 +1069,7 @@ impl TargetStatePlanner {
             configuration_bytes,
             configuration_expected,
             root_ignore_policy,
+            configuration_guard,
         } = request;
         validate_target_config_path(
             &target,
@@ -1080,6 +1085,7 @@ impl TargetStatePlanner {
             desired,
             configuration_bytes,
             configuration_expected,
+            configuration_guard,
             root_ignore,
             library,
             prepared,
@@ -1126,15 +1132,41 @@ impl TargetStatePlanner {
             .facts_for(Path::new(LOCAL_TARGET_CONFIG))
             .map_err(fatal)?;
         if config_facts.tracked || config_facts.staged || config_facts.unmerged {
-            return Err(WorkflowError::InvalidInput {
-                message: format!(
-                    "local Target configuration is still tracked; run `git rm --cached -- {LOCAL_TARGET_CONFIG}` before saving (Skillator never changes the Git index)"
-                ),
-            });
+            let message = format!(
+                "local Target configuration is still tracked; run `git rm --cached -- {LOCAL_TARGET_CONFIG}` before saving (Skillator never changes the Git index)"
+            );
+            if source.is_some() {
+                return Ok(configuration_blocked_report(
+                    self.target.root(),
+                    "worktree_sync",
+                    message,
+                ));
+            }
+            return Err(WorkflowError::InvalidInput { message });
         }
 
+        if source.is_some()
+            && let Err(message) = validate_destination_configuration_at_commit(
+                &config_path,
+                &self.configuration_expected,
+            )
+        {
+            return Ok(configuration_blocked_report(
+                self.target.root(),
+                "worktree_sync",
+                message,
+            ));
+        }
         let current_config = fingerprint_path(&config_path).map_err(fatal)?;
         if current_config != self.configuration_expected {
+            if source.is_some() {
+                return Ok(configuration_blocked_report(
+                    self.target.root(),
+                    "worktree_sync",
+                    "destination Target configuration changed while worktree sync was being prepared"
+                        .to_owned(),
+                ));
+            }
             return Err(save_error(SaveError::Stale));
         }
         let current_root_ignore = fingerprint_path(&self.root_ignore.path).map_err(fatal)?;
@@ -1189,7 +1221,12 @@ impl TargetStatePlanner {
             report.changes.push(ReportChange {
                 path: LOCAL_TARGET_CONFIG.to_owned(),
                 action: "write_target_configuration".to_owned(),
-                safety: "safe".to_owned(),
+                safety: if self.configuration_guard.is_some() {
+                    "guarded"
+                } else {
+                    "safe"
+                }
+                .to_owned(),
                 outcome: ReportOutcome::Applied,
             });
         }
@@ -1252,6 +1289,9 @@ impl TargetWorkflow {
                 ),
             });
         }
+        if fingerprint_path(&path).map_err(fatal)? != session.fingerprint {
+            return Err(save_error(SaveError::Stale));
+        }
         if root_ignore.expected != Fingerprint::for_bytes(&root_ignore.desired) {
             save_bytes(
                 &root_ignore.path,
@@ -1297,14 +1337,17 @@ fn plan_root_ignore(
         Err(error) => return Err(fatal(error)),
     };
     let mut desired = current.clone();
-    for rule in [
-        format!("/{LOCAL_TARGET_CONFIG}"),
-        format!("/{LOCAL_TARGET_CONTROL}"),
-    ] {
-        if !current
+    for relative in [LOCAL_TARGET_CONFIG, LOCAL_TARGET_CONTROL] {
+        let rule = format!("/{relative}");
+        let has_exact_rule = current
             .split(|byte| *byte == b'\n')
-            .any(|line| line == rule.as_bytes())
-        {
+            .any(|line| line == rule.as_bytes());
+        let effective = target
+            .repository()
+            .facts_for(Path::new(relative))
+            .map_err(fatal)?
+            .ignored;
+        if !has_exact_rule || !effective {
             if !desired.is_empty() && !desired.ends_with(b"\n") {
                 desired.push(b'\n');
             }
@@ -1324,6 +1367,40 @@ fn plan_root_ignore(
         expected,
         desired,
     })
+}
+
+fn validate_destination_configuration_at_commit(
+    path: &Path,
+    expected: &Fingerprint,
+) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return if expected == &Fingerprint::Absent {
+                Ok(())
+            } else {
+                Err("destination Target configuration became unavailable after planning".to_owned())
+            };
+        }
+        Err(error) => {
+            return Err(format!(
+                "destination Target configuration cannot be inspected after planning: {error}"
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(
+            "destination Target configuration changed to a non-regular file after planning"
+                .to_owned(),
+        );
+    }
+    let bytes = fs::read(path).map_err(|error| {
+        format!("destination Target configuration is unreadable after planning: {error}")
+    })?;
+    if &Fingerprint::for_bytes(&bytes) != expected {
+        return Err("destination Target configuration changed after planning".to_owned());
+    }
+    Ok(())
 }
 
 fn fingerprint_path(path: &Path) -> Result<Fingerprint, std::io::Error> {
@@ -1525,6 +1602,7 @@ mod tests {
                 configuration_bytes,
                 configuration_expected: Fingerprint::Absent,
                 root_ignore_policy: RootIgnorePolicy::Ensure,
+                configuration_guard: None,
             },
             TargetLocks::acquire(&[&target]).unwrap(),
         )
