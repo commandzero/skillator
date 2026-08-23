@@ -3712,7 +3712,7 @@ fn library_rows_after_location_add(
 
 fn library_skill_checks(rows: &[Row]) -> BTreeMap<(String, String), (CheckState, CheckState)> {
     rows.iter()
-        .filter(|row| row.kind == RowKind::Skill)
+        .filter(|row| row.kind == RowKind::Skill && row.valid)
         .filter_map(|row| {
             Some((
                 (row.inventory_id.clone()?, row.skill_path.clone()?),
@@ -3920,7 +3920,9 @@ mod internal_tests {
         let mut staged_checked = inventory_skill("0:existing", "checked", CheckState::Checked);
         staged_checked.initial_check = Some(CheckState::Unchecked);
         let staged_unchecked = inventory_skill("0:existing", "unchecked", CheckState::Unchecked);
-        let previous = vec![staged_checked, staged_unchecked];
+        let mut staged_invalid = inventory_skill("1:added", "repaired", CheckState::Invalid);
+        staged_invalid.valid = false;
+        let previous = vec![staged_checked, staged_unchecked, staged_invalid];
         let previous_checks = library_skill_checks(&previous);
         let source = Row::source_inventory(
             "acme/skills".to_owned(),
@@ -3938,6 +3940,7 @@ mod internal_tests {
             inventory_skill("0:existing", "checked", CheckState::Checked),
             inventory_skill("0:existing", "unchecked", CheckState::Checked),
             inventory_skill("1:added", "new", CheckState::Checked),
+            inventory_skill("1:added", "repaired", CheckState::Checked),
             invalid,
         ];
 
@@ -3953,8 +3956,10 @@ mod internal_tests {
         assert_eq!(skills[1].initial_check, Some(CheckState::Unchecked));
         assert_eq!(skills[2].check, Some(CheckState::Unchecked));
         assert_eq!(skills[2].initial_check, Some(CheckState::Unchecked));
-        assert_eq!(skills[3].check, Some(CheckState::Invalid));
-        assert_eq!(skills[3].initial_check, Some(CheckState::Invalid));
+        assert_eq!(skills[3].check, Some(CheckState::Unchecked));
+        assert_eq!(skills[3].initial_check, Some(CheckState::Unchecked));
+        assert_eq!(skills[4].check, Some(CheckState::Invalid));
+        assert_eq!(skills[4].initial_check, Some(CheckState::Invalid));
     }
 
     #[test]
