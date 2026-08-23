@@ -50,6 +50,23 @@ agents:
 }
 
 #[test]
+fn repository_validation_rejects_root_level_skill_directories() {
+    let input = br#"version: 1
+skill_directories:
+  - key: skills
+    path: "skills"
+enablements: []
+"#;
+
+    let LoadResult::Invalid { issues } = RepositoryConfigCodec::parse(input) else {
+        panic!("expected root-level Skill Directory to be rejected");
+    };
+    assert!(issues.iter().any(|issue| {
+        issue.message.contains("must be nested") && issue.path == "skill_directories.skills"
+    }));
+}
+
+#[test]
 fn strict_yaml_constructs_and_unknown_fields_are_rejected() {
     for input in [
         "version: 1\nversion: 1\nskill_directories: []\nenablements: []\n",

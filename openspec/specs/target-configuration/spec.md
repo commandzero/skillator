@@ -15,7 +15,9 @@ A Target SHALL be selected from one existing directory within a Git worktree. Sk
 - **THEN** Skillator reports invalid Target input and performs no writes
 
 ### Requirement: Repository Configuration has one version 1 schema
-Each Target SHALL declare desired state in `.agents/skillator.yaml` using numeric `version: 1` followed by zero or more top-level Skill Directory mappings keyed by Skill Directory Key. Each directory mapping SHALL contain required `path`, optional `label`, and `skills`. `skills` SHALL map the materialized Skill name to an entry with required `source`, optional Source-relative `path`, and optional `type` equal to `linked` or `copied`. Omitted `path` defaults to the Skill mapping key; omitted `type` defaults to `linked`. Presence of a Skill entry SHALL mean enabled; no `enabled` field exists in version 1.
+Each Git worktree SHALL keep its clone-local Target desired state in `.agents/skillator.yaml`. The document SHALL use numeric `version: 1` followed by zero or more top-level Skill Directory mappings keyed by Skill Directory Key. Each directory mapping SHALL contain required `path`, optional `label`, and `skills`. `skills` SHALL map the materialized Skill name to an entry with required `source`, optional Source-relative `path`, and optional `type` equal to `linked` or `copied`. Omitted `path` defaults to the Skill mapping key; omitted `type` defaults to `linked`. Presence of a Skill entry SHALL mean enabled; no `enabled` field exists in version 1.
+
+The configuration is local to the checkout and MUST NOT be tracked by Git. A repository that uses Skillator SHALL have root `.gitignore` rules for `/.agents/skillator.yaml` and `/.agents/.gitignore`. Skillator MAY add the missing exact rules without changing unrelated root ignore content, but MUST NOT change the Git index. If the local configuration is already tracked, Skillator SHALL preserve its contents, block configuration writes, and report the exact `git rm --cached -- .agents/skillator.yaml` remediation.
 
 #### Scenario: Minimal empty configuration
 - **WHEN** a version 1 document contains no Skill Directory mappings
@@ -24,6 +26,14 @@ Each Target SHALL declare desired state in `.agents/skillator.yaml` using numeri
 #### Scenario: Default Linked materialization
 - **WHEN** the TUI creates a new Enablement without a prior mode choice
 - **THEN** it stages `linked` and omits `type` from canonical saved YAML
+
+#### Scenario: Clone-local configuration is ignored
+- **WHEN** a repository has the required root ignore rules and a worktree saves `.agents/skillator.yaml`
+- **THEN** Git leaves the local configuration untracked and available only in that checkout
+
+#### Scenario: Legacy tracked configuration
+- **WHEN** `.agents/skillator.yaml` is already tracked
+- **THEN** Skillator preserves the file, performs no configuration write, and reports the required index-only removal command
 
 ### Requirement: Repository Configuration validation is strict
 The Repository Configuration SHALL reject unknown fields, missing required fields, nulls, incorrect types, unsupported enum values, duplicate YAML mapping keys, anchors, aliases, tags, merge keys, and multiple YAML documents. Validation SHALL collect every independently detectable problem with stable field paths and line and column when available. Invalid configuration SHALL yield no trusted desired state and MUST prevent configuration and reconciliation writes.
@@ -99,4 +109,3 @@ The MVP SHALL read and write only numeric `version: 1`. Any other version SHALL 
 #### Scenario: Future version encountered
 - **WHEN** `.agents/skillator.yaml` declares an unsupported version
 - **THEN** Skillator may show a diagnostic-only interface but performs no configuration or reconciliation writes
-

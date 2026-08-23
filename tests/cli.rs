@@ -11,7 +11,9 @@ fn help_and_version_are_successful_text_on_stdout() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("skillator sync"))
+        .stdout(
+            predicate::str::contains("skillator sync").and(predicate::str::contains("worktree")),
+        )
         .stderr(predicate::str::is_empty());
     Command::cargo_bin("skillator")
         .unwrap()
@@ -19,6 +21,39 @@ fn help_and_version_are_successful_text_on_stdout() {
         .assert()
         .success()
         .stdout(predicate::str::contains("skillator 0.1.0"));
+}
+
+#[test]
+fn worktree_sync_rejects_the_primary_worktree_without_writes() {
+    let home = support::TestHome::new();
+    let primary = home.git_repo("primary");
+
+    Command::cargo_bin("skillator")
+        .unwrap()
+        .args(["worktree", "sync", "--check"])
+        .current_dir(&primary)
+        .env("HOME", home.path())
+        .assert()
+        .code(3)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("primary worktree"));
+    assert!(!primary.join(".agents").exists());
+}
+
+#[test]
+fn worktree_sync_rejects_a_non_git_directory_without_writes() {
+    let home = support::TestHome::new();
+
+    Command::cargo_bin("skillator")
+        .unwrap()
+        .args(["worktree", "sync", "--check"])
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .assert()
+        .code(3)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("not in a Git worktree"));
+    assert!(!home.path().join(".agents").exists());
 }
 
 #[test]

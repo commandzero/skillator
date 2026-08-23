@@ -1,6 +1,8 @@
 //! Command-line parsing, dispatch, and report rendering.
 
-use crate::app::{AppPaths, CommandReport, ReportStatus, SyncMode, SyncWorkflow};
+use crate::app::{
+    AppPaths, CommandReport, ReportStatus, SyncMode, SyncWorkflow, WorktreeSyncWorkflow,
+};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use crossterm::style::Stylize;
 use serde_json::Value;
@@ -27,6 +29,17 @@ enum Commands {
     /// Curate Sources and Skills in the user Library.
     Library,
     /// Reconcile a Target Repository without opening the TUI.
+    Sync(SyncArgs),
+    /// Project the primary worktree's local Target state into a linked worktree.
+    Worktree {
+        #[command(subcommand)]
+        command: WorktreeCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorktreeCommand {
+    /// Synchronize the primary worktree's local Target configuration.
     Sync(SyncArgs),
 }
 
@@ -80,6 +93,9 @@ pub fn run() -> ExitCode {
     let paths = AppPaths::new(home);
     match cli.command {
         Some(Commands::Sync(arguments)) => run_sync(&paths, arguments),
+        Some(Commands::Worktree {
+            command: WorktreeCommand::Sync(arguments),
+        }) => run_worktree_sync(&paths, arguments),
         Some(Commands::Library) => {
             if !interactive_terminal() {
                 return diagnostic(3, "skillator library requires an interactive terminal");
@@ -115,7 +131,10 @@ fn run_sync(paths: &AppPaths, arguments: SyncArgs) -> ExitCode {
         let _ = error.print();
         return ExitCode::from(2);
     }
-    let directory = arguments.directory.unwrap_or_else(|| PathBuf::from("."));
+    let directory = arguments
+        .directory
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."));
     let mode = if arguments.check {
         SyncMode::Check
     } else {
@@ -127,6 +146,38 @@ fn run_sync(paths: &AppPaths, arguments: SyncArgs) -> ExitCode {
         Ok(report) => report,
         Err(error) => return diagnostic(error.exit_status(), &error.to_string()),
     };
+    render_report(arguments, report)
+}
+
+fn run_worktree_sync(paths: &AppPaths, arguments: SyncArgs) -> ExitCode {
+    if arguments.format != OutputFormat::Text && arguments.color.is_some() {
+        let mut command = Cli::command();
+        let error = command.error(
+            ErrorKind::ArgumentConflict,
+            "--color cannot be used with --format=json or --format=yaml",
+        );
+        let _ = error.print();
+        return ExitCode::from(2);
+    }
+    let directory = arguments
+        .directory
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mode = if arguments.check {
+        SyncMode::Check
+    } else {
+        SyncMode::Apply {
+            force: arguments.force,
+        }
+    };
+    let report = match WorktreeSyncWorkflow::run(paths, &directory, mode) {
+        Ok(report) => report,
+        Err(error) => return diagnostic(error.exit_status(), &error.to_string()),
+    };
+    render_report(arguments, report)
+}
+
+fn render_report(arguments: SyncArgs, report: CommandReport) -> ExitCode {
     let rendered = match arguments.format {
         OutputFormat::Text => Ok(render_text(
             &report,

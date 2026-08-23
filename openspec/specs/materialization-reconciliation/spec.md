@@ -66,26 +66,34 @@ A copy SHALL be Equivalent only when relative filename bytes and case, entry kin
 - **THEN** Skillator reports a Diverged Copy and requires authorization before replacement
 
 ### Requirement: Unmanaged and duplicate content is reported conservatively
-An immediate child not reserved by Skillator and not claimed by an Expected Entry SHALL be Unmanaged and SHALL contribute directory Drift. Skillator MAY associate it with current known Skills but MUST NOT infer that Skillator created it. Multiple entries associated with one Skill in the same directory SHALL be reported as Duplicate or Possible Duplicate; repetition across different directories SHALL not.
+An immediate child not reserved by Skillator and not claimed by an Expected Entry SHALL be Unmanaged and diagnostic-only. It SHALL remain Git-trackable, SHALL not contribute removal work, and SHALL not be removed by ordinary reconciliation. Skillator MAY associate it with current known Skills but MUST NOT infer that Skillator created it. Multiple entries associated with one Skill in the same directory SHALL be reported as Duplicate or Possible Duplicate; repetition across different directories SHALL not.
 
 #### Scenario: Enablement removed by hand
 - **WHEN** Repository Configuration no longer declares a previously materialized entry
 - **THEN** ordinary sync treats the occupant as Unmanaged and preserves it
 
+#### Scenario: Repository-owned skill remains trackable
+- **WHEN** an unlisted repository-owned Skill is present beside managed entries
+- **THEN** Skillator leaves it unignored and performs no reconciliation action for it
+
 ### Requirement: Repository controls live beside, not inside, Skill Directories
-Every configured Repository Skill Directory SHALL use an exact UTF-8 control file named `.gitignore` in the directory's parent (for example, `.agents/.gitignore` for `.agents/skills`), ending in a newline. Its generated content SHALL begin with `# Managed by skillator.`, `*`, and `!.gitignore` on separate lines; it SHALL additionally allow-list `.agents/skillator.yaml` when applicable and every pre-existing unmanaged entry beneath the Skill Directory. Skillator MUST NOT merge user content into this file or modify the Git index. The final directory SHALL not be In Sync until the control file is canonical, eligible for tracking, tracked, and its rules effectively ignore managed materializations without hiding allow-listed repository-owned entries. User Scope Skill Directories SHALL have no Skillator-managed `.gitignore` and no Git tracking requirement.
+Every configured Repository Skill Directory SHALL use an exact UTF-8 generated `.gitignore` in the directory's parent (for example, `.agents/.gitignore` for `.agents/skills`), ending in a newline. Its generated content SHALL ignore only configured Skillator materializations and `.skillator-*` recovery artifacts. It MUST NOT use a catch-all rule, ignore an unlisted repository-owned Skill, merge user content, or modify the Git index. The parent control file SHALL be clone-local and hidden by the repository root rule `/.agents/.gitignore`. User Scope Skill Directories SHALL have no Skillator-managed `.gitignore` and no Git tracking requirement.
 
 #### Scenario: Control file created
-- **WHEN** the control file is absent and repository ignore policy permits it
-- **THEN** Skillator creates it as a Safe Change, verifies generated entries are ignored, and reports the remaining tracking action
+- **WHEN** the control file is absent and the repository has the required root ignore rule
+- **THEN** Skillator creates it as a Safe Change and verifies configured materializations are ignored
 
-#### Scenario: Control file needs tracking
-- **WHEN** the canonical file is untracked
-- **THEN** Skillator reports Git exclusion Drift and the exact remediation `git add -- <control-file>` without staging it
+#### Scenario: Managed skill is ignored locally
+- **WHEN** local Target configuration enables `release-checklist` in `.agents/skills`
+- **THEN** the generated `.agents/.gitignore` ignores `skills/release-checklist` without ignoring other entries in `skills`
+
+#### Scenario: Control file is local
+- **WHEN** the generated control file exists
+- **THEN** the root ignore rule hides it from Git status and Skillator never asks the user to stage it
 
 #### Scenario: Tracked repository-owned entry
 - **WHEN** an Unmanaged Entry is Git-tracked
-- **THEN** Skillator preserves it, allow-lists it in the control file, and leaves unrelated Git worktree changes untouched
+- **THEN** Skillator preserves it, leaves it unignored, and leaves unrelated Git worktree changes untouched
 
 #### Scenario: Tracked expected entry
 - **WHEN** an Expected Entry is Git-tracked
@@ -114,7 +122,7 @@ Missing roots and Materializations, canonicalization of a correct link, replacem
 - **THEN** Skillator classifies the operation as Blocked regardless of confirmation or force
 
 ### Requirement: Mutation is coordinated and preconditions are revalidated
-Save and sync SHALL acquire one exclusive Target mutation lock before planning and retain it through final observation. An active owner SHALL produce Target Busy without writes. Check mode SHALL also return Target Busy rather than inspect transitional state. Immediately before every mutation, Skillator SHALL revalidate relevant Source and destination facts; changed facts SHALL block only the affected operation and MUST NOT trigger silent replanning.
+Save and sync SHALL acquire one exclusive Target mutation lock before planning and retain it through final observation. Worktree sync SHALL acquire the primary and destination locks in stable canonical-path order. An active owner SHALL produce Target Busy without writes. Check mode SHALL also return Target Busy rather than inspect transitional state. Immediately before every mutation, Skillator SHALL revalidate relevant Source and destination facts; changed facts SHALL block only the affected operation and MUST NOT trigger silent replanning.
 
 #### Scenario: Concurrent mutation
 - **WHEN** another process actively owns the Target mutation lock
@@ -159,4 +167,3 @@ An In-Sync save, sync, or check SHALL perform no configuration or Materializatio
 #### Scenario: Repeated sync
 - **WHEN** a Target is fully In Sync and sync runs again
 - **THEN** Skillator reports In Sync and performs no filesystem or configuration writes
-

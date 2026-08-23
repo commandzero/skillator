@@ -115,6 +115,7 @@ pub fn plan(
 ) -> Plan {
     let mut items = Vec::new();
     let mut blocked_directories = std::collections::BTreeSet::new();
+    let mut planned_control_paths = std::collections::BTreeSet::new();
     for directory in observed.directories() {
         match directory.root_state() {
             RootState::Absent => items.push(PlanItem {
@@ -145,85 +146,81 @@ pub fn plan(
             }
         }
         let control = directory.control_path();
-        match directory.control_file() {
-            ControlFileState::NotRequired => {}
-            ControlFileState::Missing => {
-                if directory.control_protected() {
-                    items.push(blocked(
-                        control,
-                        Action::WriteControlFile,
-                        "Skill Directory Control File has Git index protection",
-                    ));
-                } else {
+        if planned_control_paths.insert(control.to_owned()) {
+            match directory.control_file() {
+                ControlFileState::NotRequired => {}
+                ControlFileState::Missing => {
+                    if directory.control_protected() {
+                        items.push(blocked(
+                            control,
+                            Action::WriteControlFile,
+                            "Skill Directory Control File has Git index protection",
+                        ));
+                    } else {
+                        items.push(PlanItem {
+                            path: control.to_owned(),
+                            action: Action::WriteControlFile,
+                            safety: Safety::Safe,
+                            reason: "Skill Directory Control File is missing".to_owned(),
+                            operation: Operation::WriteFile {
+                                bytes: directory.control_content().to_vec(),
+                                expected: EntryFingerprint::Missing,
+                            },
+                        });
+                    }
+                }
+                ControlFileState::Canonical => {
+                    if directory.control_protected() {
+                        items.push(blocked(
+                            control,
+                            Action::WriteControlFile,
+                            "local Skillator control file has Git index protection",
+                        ));
+                    } else if !directory.control_ignored() {
+                        items.push(blocked(
+                            control,
+                            Action::WriteControlFile,
+                            "local Skillator control file is not effectively Git-ignored",
+                        ));
+                    } else if !directory.generated_ignored() {
+                        items.push(blocked(
+                            control,
+                            Action::WriteControlFile,
+                            "generated Skill Entries are not effectively Git-ignored",
+                        ));
+                    }
+                }
+                ControlFileState::Modified | ControlFileState::WrongKind => {
+                    let expected = fingerprint(control);
+                    let safety = if expected == EntryFingerprint::Uninspectable
+                        || directory.control_protected()
+                    {
+                        Safety::Blocked
+                    } else {
+                        Safety::Guarded
+                    };
                     items.push(PlanItem {
                         path: control.to_owned(),
                         action: Action::WriteControlFile,
-                        safety: Safety::Safe,
-                        reason: "Skill Directory Control File is missing".to_owned(),
-                        operation: Operation::WriteFile {
-                            bytes: directory.control_content().to_vec(),
-                            expected: EntryFingerprint::Missing,
+                        safety,
+                        reason: "Skill Directory Control File differs from canonical content"
+                            .to_owned(),
+                        operation: if safety == Safety::Blocked {
+                            Operation::None
+                        } else {
+                            Operation::WriteFile {
+                                bytes: directory.control_content().to_vec(),
+                                expected,
+                            }
                         },
                     });
                 }
+                ControlFileState::Uninspectable => items.push(blocked(
+                    control,
+                    Action::WriteControlFile,
+                    "control file cannot be inspected",
+                )),
             }
-            ControlFileState::Canonical => {
-                if !directory.control_tracked() {
-                    items.push(blocked(
-                        control,
-                        Action::TrackControlFile,
-                        &format!(
-                            "run `git add {}-- {}/.gitignore`",
-                            if directory.control_ignored() {
-                                "-f "
-                            } else {
-                                ""
-                            },
-                            control
-                                .parent()
-                                .and_then(|parent| parent.strip_prefix(observed.target_root()).ok())
-                                .unwrap_or(Path::new("."))
-                                .display()
-                        ),
-                    ));
-                } else if directory.control_ignored() {
-                    items.push(blocked(
-                        control,
-                        Action::TrackControlFile,
-                        "control file is excluded by an effective Git ignore rule",
-                    ));
-                }
-            }
-            ControlFileState::Modified | ControlFileState::WrongKind => {
-                let expected = fingerprint(control);
-                let safety = if expected == EntryFingerprint::Uninspectable
-                    || directory.control_protected()
-                {
-                    Safety::Blocked
-                } else {
-                    Safety::Guarded
-                };
-                items.push(PlanItem {
-                    path: control.to_owned(),
-                    action: Action::WriteControlFile,
-                    safety,
-                    reason: "Skill Directory Control File differs from canonical content"
-                        .to_owned(),
-                    operation: if safety == Safety::Blocked {
-                        Operation::None
-                    } else {
-                        Operation::WriteFile {
-                            bytes: directory.control_content().to_vec(),
-                            expected,
-                        }
-                    },
-                });
-            }
-            ControlFileState::Uninspectable => items.push(blocked(
-                control,
-                Action::WriteControlFile,
-                "control file cannot be inspected",
-            )),
         }
         for recovery in directory.recovery_artifacts() {
             items.push(blocked(
@@ -349,10 +346,42 @@ pub enum Authorization {
 #[error("Target Busy")]
 pub struct TargetBusy;
 
+/// Locks one or more Targets in canonical root-path order.
+pub struct TargetLocks {
+    locks: Vec<File>,
+}
+
+impl TargetLocks {
+    pub fn acquire(targets: &[&Target]) -> Result<Self, TargetBusy> {
+        let mut paths = targets
+            .iter()
+            .map(|target| (target.root().to_owned(), target.lock_path().to_owned()))
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup_by(|left, right| left.1 == right.1);
+
+        let mut locks = Vec::with_capacity(paths.len());
+        for (_, path) in paths {
+            let file = File::open(path).map_err(|_| TargetBusy)?;
+            file.try_lock().map_err(|_| TargetBusy)?;
+            locks.push(file);
+        }
+        Ok(Self { locks })
+    }
+}
+
+impl Drop for TargetLocks {
+    fn drop(&mut self) {
+        for lock in &self.locks {
+            let _ = lock.unlock();
+        }
+    }
+}
+
 pub struct PreparedPlan {
     plan: Plan,
     git_facts: std::collections::BTreeMap<PathBuf, Result<PathFacts, String>>,
-    _lock: File,
+    _locks: TargetLocks,
 }
 
 impl std::fmt::Debug for PreparedPlan {
@@ -371,9 +400,7 @@ impl PreparedPlan {
 }
 
 impl Drop for PreparedPlan {
-    fn drop(&mut self) {
-        let _ = self._lock.unlock();
-    }
+    fn drop(&mut self) {}
 }
 
 pub fn prepare_check(
@@ -381,15 +408,22 @@ pub fn prepare_check(
     config: &RepositoryConfig,
     library: &LibrarySnapshot,
 ) -> Result<PreparedPlan, TargetBusy> {
-    let lock = File::open(target.lock_path()).map_err(|_| TargetBusy)?;
-    lock.try_lock().map_err(|_| TargetBusy)?;
+    prepare_check_with_locks(target, config, library, TargetLocks::acquire(&[target])?)
+}
+
+pub fn prepare_check_with_locks(
+    target: &Target,
+    config: &RepositoryConfig,
+    library: &LibrarySnapshot,
+    locks: TargetLocks,
+) -> Result<PreparedPlan, TargetBusy> {
     let observed = observe(target, config, library);
     let mut plan = plan(config, library, &observed);
     plan_recovery(&mut plan, target, config);
     Ok(PreparedPlan {
         git_facts: capture_git_facts(target, &plan),
         plan,
-        _lock: lock,
+        _locks: locks,
     })
 }
 
@@ -399,8 +433,22 @@ pub fn prepare_transition(
     staged: &RepositoryConfig,
     library: &LibrarySnapshot,
 ) -> Result<PreparedPlan, TargetBusy> {
-    let lock = File::open(target.lock_path()).map_err(|_| TargetBusy)?;
-    lock.try_lock().map_err(|_| TargetBusy)?;
+    prepare_transition_with_locks(
+        target,
+        original,
+        staged,
+        library,
+        TargetLocks::acquire(&[target])?,
+    )
+}
+
+pub fn prepare_transition_with_locks(
+    target: &Target,
+    original: &RepositoryConfig,
+    staged: &RepositoryConfig,
+    library: &LibrarySnapshot,
+    locks: TargetLocks,
+) -> Result<PreparedPlan, TargetBusy> {
     let original_observed = observe(target, original, library);
     let staged_observed = observe(target, staged, library);
     let mut plan = plan(staged, library, &staged_observed);
@@ -457,7 +505,7 @@ pub fn prepare_transition(
     Ok(PreparedPlan {
         git_facts: capture_git_facts(target, &plan),
         plan,
-        _lock: lock,
+        _locks: locks,
     })
 }
 
@@ -466,15 +514,22 @@ pub fn prepare_apply(
     config: &RepositoryConfig,
     library: &LibrarySnapshot,
 ) -> Result<PreparedPlan, TargetBusy> {
-    let lock = File::open(target.lock_path()).map_err(|_| TargetBusy)?;
-    lock.try_lock().map_err(|_| TargetBusy)?;
+    prepare_apply_with_locks(target, config, library, TargetLocks::acquire(&[target])?)
+}
+
+pub fn prepare_apply_with_locks(
+    target: &Target,
+    config: &RepositoryConfig,
+    library: &LibrarySnapshot,
+    locks: TargetLocks,
+) -> Result<PreparedPlan, TargetBusy> {
     let observed = observe(target, config, library);
     let mut plan = plan(config, library, &observed);
     plan_recovery(&mut plan, target, config);
     Ok(PreparedPlan {
         git_facts: capture_git_facts(target, &plan),
         plan,
-        _lock: lock,
+        _locks: locks,
     })
 }
 

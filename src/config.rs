@@ -24,7 +24,7 @@ pub enum Fingerprint {
 }
 
 impl Fingerprint {
-    fn for_bytes(bytes: &[u8]) -> Self {
+    pub(crate) fn for_bytes(bytes: &[u8]) -> Self {
         Self::Sha256(Sha256::digest(bytes).into())
     }
 }
@@ -1151,6 +1151,14 @@ fn validate_repository(config: &RepositoryConfig) -> Vec<ConfigIssue> {
             });
         }
         let path = directory.path.as_str();
+        if !path.contains('/') {
+            issues.push(ConfigIssue {
+                path: format!("skill_directories.{}", directory.key),
+                message:
+                    "Skill Directory must be nested so its generated control file does not replace the repository root .gitignore"
+                        .to_owned(),
+            });
+        }
         if path == ".git"
             || path.starts_with(".git/")
             || path == ".agents/skillator.yaml"
@@ -1295,6 +1303,16 @@ pub fn save_repository(
         RepositoryConfigCodec::render(config)?.as_bytes(),
         expected,
     )
+}
+
+/// Conditionally publish opaque configuration-adjacent bytes with the same
+/// sibling staging and stale-write protection as the YAML codecs.
+pub(crate) fn save_bytes(
+    path: &Path,
+    bytes: &[u8],
+    expected: &Fingerprint,
+) -> Result<Fingerprint, SaveError> {
+    conditional_save(path, bytes, expected)
 }
 
 pub fn save_library(

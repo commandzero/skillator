@@ -3,8 +3,8 @@
 ## Purpose
 Defines Skillator's small public command surface, non-interactive synchronization behavior, compact machine-readable output, and stable process outcomes for scripts.
 ## Requirements
-### Requirement: The CLI exposes three entry points
-The MVP SHALL expose `skillator [OPTIONS] [DIRECTORY]`, `skillator library [OPTIONS]`, and `skillator sync [OPTIONS] [DIRECTORY]`. The root command SHALL launch the Target TUI, `library` SHALL launch the user-scoped Library TUI from any directory, and `sync` SHALL be the only non-interactive workflow. The MVP MUST NOT expose aliases or command-line registration CRUD.
+### Requirement: The CLI exposes four entry points
+The MVP SHALL expose `skillator [OPTIONS] [DIRECTORY]`, `skillator library [OPTIONS]`, `skillator sync [OPTIONS] [DIRECTORY]`, and `skillator worktree sync [OPTIONS] [DIRECTORY]`. The root command SHALL launch the Target TUI, `library` SHALL launch the user-scoped Library TUI from any directory, `sync` SHALL reconcile one existing local Target configuration, and `worktree sync` SHALL project the primary worktree's local Target configuration into the current linked worktree. The MVP MUST NOT expose aliases or command-line registration CRUD.
 
 #### Scenario: Default root invocation
 - **WHEN** the user runs `skillator` in a Git worktree with interactive input and output
@@ -14,6 +14,10 @@ The MVP SHALL expose `skillator [OPTIONS] [DIRECTORY]`, `skillator library [OPTI
 - **WHEN** the user runs `skillator library` from a non-Git directory with interactive input and output
 - **THEN** Skillator launches the Library workspace without requiring a Target
 
+#### Scenario: Worktree synchronization
+- **WHEN** the user runs `skillator worktree sync` from a registered linked worktree
+- **THEN** Skillator projects the primary worktree's local Target state and emits the selected report format
+
 ### Requirement: Interactive commands require terminals
 The Target and Library TUI commands SHALL require both interactive input and output terminals. A non-TTY invocation SHALL fail with guidance and MUST NOT silently run synchronization. `-h`, `--help`, and root `-V` or `--version` SHALL render text to stdout and exit successfully.
 
@@ -22,7 +26,7 @@ The Target and Library TUI commands SHALL require both interactive input and out
 - **THEN** Skillator reports the requirement and performs no writes
 
 ### Requirement: Sync has a bounded option set
-`skillator sync` SHALL support only `--check`, `--force`, `--format <text|json|yaml>`, and `--color <auto|always|never>` in addition to one optional Target directory. Format SHALL default to `text`. `--check --force` SHALL be invalid, and explicit color SHALL conflict with JSON or YAML.
+`skillator sync` and `skillator worktree sync` SHALL support only `--check`, `--force`, `--format <text|json|yaml>`, and `--color <auto|always|never>` in addition to one optional Target directory. Format SHALL default to `text`. `--check --force` SHALL be invalid, and explicit color SHALL conflict with JSON or YAML.
 
 #### Scenario: Equals and separated format syntax
 - **WHEN** the user supplies either `--format=json` or `--format json`
@@ -40,7 +44,7 @@ Check mode SHALL run the same loading, discovery, observation, validation, and p
 - **THEN** it reports Would Apply and leaves the filesystem unchanged
 
 ### Requirement: Sync does not create or edit desired state
-Sync SHALL load current configuration and reconcile only filesystem state. It MUST NOT create missing Repository Configuration, change Repository Configuration, or register Sources or Skills. Missing Repository Configuration SHALL direct the user to the TUI. Missing Library configuration SHALL behave as an empty Library, leaving existing Source references Unresolved while permitting independent work that does not require Source content.
+Sync SHALL load current local Target configuration and reconcile only filesystem state. It MUST NOT create missing Repository Configuration, change Repository Configuration, or register Sources or Skills. `worktree sync` is the sole exception: it MAY replace the current linked worktree's local Target configuration with the validated primary worktree configuration. Missing Repository Configuration for ordinary sync SHALL direct the user to the TUI. Missing Library configuration SHALL behave as an empty Library, leaving existing Source references Unresolved while permitting independent work that does not require Source content.
 
 #### Scenario: Missing Repository Configuration
 - **WHEN** sync targets a repository without `.agents/skillator.yaml`
@@ -49,6 +53,10 @@ Sync SHALL load current configuration and reconcile only filesystem state. It MU
 #### Scenario: Missing Library configuration
 - **WHEN** valid Repository Configuration exists but Library configuration is absent
 - **THEN** sync treats the Library as empty, preserves desired state, and reports unresolved references rather than malformed input
+
+#### Scenario: Worktree command is not ordinary sync
+- **WHEN** `skillator worktree sync` has a valid primary worktree configuration and the current linked worktree has none
+- **THEN** it copies the primary configuration before reconciling the current worktree
 
 ### Requirement: Completed reports use stdout and diagnostics use stderr
 A completed trustworthy sync or check report SHALL be written entirely to stdout, including a non-converged report returning `1`. Parser errors and fatal pre-report failures SHALL be written entirely to stderr with stdout empty. Help and version SHALL always use text stdout.
@@ -99,4 +107,3 @@ The MVP SHALL support macOS, Linux, and WSL running against its Linux filesystem
 #### Scenario: Unsupported mounted-filesystem operation
 - **WHEN** a required filesystem capability is unavailable on a WSL-mounted path
 - **THEN** Skillator preserves desired and existing state and reports the blocked capability without switching Materialization kind
-
