@@ -2528,7 +2528,8 @@ fn run_library_once(
                 model.overlay = Overlay::Notice("Location path cannot be empty.".to_owned());
                 return Ok(None);
             }
-            working_config = library_config_from_rows(&working_config, &model.rows)?;
+            let previous_rows = model.rows.clone();
+            working_config = library_config_from_rows(&working_config, &previous_rows)?;
             let mut locations = working_config.locations().to_vec();
             if edit {
                 let Some(index) = model.selected_row().and_then(|row| row.location_index) else {
@@ -2551,7 +2552,11 @@ fn run_library_once(
             }
             working_config = LibraryConfig::new(locations).map_err(config_issues)?;
             let snapshot = LibraryWorkflow::snapshot(paths, &working_config);
-            model.rows = library_rows(&working_config, &snapshot);
+            model.rows = if edit {
+                library_rows(&working_config, &snapshot)
+            } else {
+                library_rows_after_location_add(&working_config, &snapshot, &previous_rows)
+            };
             model.selected = model.selected.min(model.rows.len().saturating_sub(1));
             model.dirty = true;
             Ok(None)
@@ -3694,6 +3699,56 @@ fn library_rows(config: &LibraryConfig, snapshot: &LibrarySnapshot) -> Vec<Row> 
     rows
 }
 
+fn library_rows_after_location_add(
+    config: &LibraryConfig,
+    snapshot: &LibrarySnapshot,
+    previous_rows: &[Row],
+) -> Vec<Row> {
+    let mut rows = library_rows(config, snapshot);
+    preserve_library_checks_after_location_add(&mut rows, previous_rows);
+    rows
+}
+
+fn preserve_library_checks_after_location_add(rows: &mut Vec<Row>, previous_rows: &[Row]) {
+    let previous_checks = previous_rows
+        .iter()
+        .filter(|row| row.kind == RowKind::Skill)
+        .filter_map(|row| {
+            Some((
+                (row.inventory_id.clone()?, row.skill_path.clone()?),
+                (row.check?, row.initial_check?),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for row in rows.iter_mut().filter(|row| row.kind == RowKind::Skill) {
+        let key = row.inventory_id.clone().zip(row.skill_path.clone());
+        let (check, initial_check) = key
+            .and_then(|key| previous_checks.get(&key).copied())
+            .unwrap_or((CheckState::Unchecked, CheckState::Unchecked));
+        row.check = Some(check);
+        row.initial_check = Some(initial_check);
+        refresh_library_visibility(row);
+    }
+    let groups = rows
+        .iter()
+        .filter(|row| row.kind == RowKind::Source)
+        .filter_map(row_identity)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut model = Model::new(Workspace::Library, std::mem::take(rows));
+    for group in groups {
+        model.recompute_group(&group);
+    }
+    for row in model
+        .rows
+        .iter_mut()
+        .filter(|row| row.kind == RowKind::Source)
+    {
+        row.initial_check = row.check;
+    }
+    *rows = model.rows;
+}
+
 fn library_config_from_rows(
     original: &LibraryConfig,
     rows: &[Row],
@@ -3833,6 +3888,59 @@ fn fatal(error: impl std::fmt::Display) -> WorkflowError {
 #[cfg(test)]
 mod internal_tests {
     use super::*;
+
+    fn inventory_skill(inventory_id: &str, path: &str, check: CheckState) -> Row {
+        Row::skill_inventory(SkillInventoryRow {
+            group: "acme/skills".to_owned(),
+            inventory_id: Some(inventory_id.to_owned()),
+            path: path.to_owned(),
+            name: path.to_owned(),
+            description: String::new(),
+            check,
+            available: true,
+            valid: true,
+            mode: None,
+            state: String::new(),
+            details: String::new(),
+            location_index: Some(0),
+        })
+    }
+
+    #[test]
+    fn adding_a_library_location_preserves_checks_and_leaves_new_skills_unchecked() {
+        let mut staged_checked = inventory_skill("0:existing", "checked", CheckState::Checked);
+        staged_checked.initial_check = Some(CheckState::Unchecked);
+        let staged_unchecked = inventory_skill("0:existing", "unchecked", CheckState::Unchecked);
+        let previous = vec![staged_checked, staged_unchecked];
+        let source = Row::source_inventory(
+            "acme/skills".to_owned(),
+            CheckState::Checked,
+            true,
+            0,
+            "existing".to_owned(),
+            true,
+            false,
+        );
+        let mut rows = vec![
+            source,
+            inventory_skill("0:existing", "checked", CheckState::Checked),
+            inventory_skill("0:existing", "unchecked", CheckState::Checked),
+            inventory_skill("1:added", "new", CheckState::Checked),
+        ];
+
+        preserve_library_checks_after_location_add(&mut rows, &previous);
+
+        let skills = rows
+            .iter()
+            .filter(|row| row.kind == RowKind::Skill)
+            .collect::<Vec<_>>();
+        assert_eq!(skills[0].check, Some(CheckState::Checked));
+        assert_eq!(skills[0].initial_check, Some(CheckState::Unchecked));
+        assert_eq!(skills[1].check, Some(CheckState::Unchecked));
+        assert_eq!(skills[1].initial_check, Some(CheckState::Unchecked));
+        assert_eq!(skills[2].check, Some(CheckState::Unchecked));
+        assert_eq!(skills[2].initial_check, Some(CheckState::Unchecked));
+    }
 
     #[test]
     fn initial_target_tab_prefers_the_first_repository_tab() {
