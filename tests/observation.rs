@@ -167,7 +167,7 @@ fn case_variants_and_links_to_known_skills_remain_unmanaged_duplicates() {
         directory
             .diagnostics()
             .iter()
-            .any(|message| message.contains("differs from Skillator's required content"))
+            .any(|message| message.contains("needs Skillator's generated prefix"))
     );
 }
 
