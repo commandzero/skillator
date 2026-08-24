@@ -537,6 +537,104 @@ impl LibraryConfigCodec {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TargetRegistry {
+    targets: Vec<PathBuf>,
+}
+
+impl TargetRegistry {
+    pub fn new(mut targets: Vec<PathBuf>) -> Result<Self, Vec<ConfigIssue>> {
+        let mut issues = Vec::new();
+        if targets.iter().any(|path| !path.is_absolute()) {
+            issues.push(ConfigIssue {
+                path: "targets".to_owned(),
+                message: "registered Target paths must be absolute".to_owned(),
+            });
+        }
+        targets.sort();
+        if targets.windows(2).any(|pair| pair[0] == pair[1]) {
+            issues.push(ConfigIssue {
+                path: "targets".to_owned(),
+                message: "duplicate registered Target path".to_owned(),
+            });
+        }
+        if issues.is_empty() {
+            Ok(Self { targets })
+        } else {
+            Err(issues)
+        }
+    }
+
+    pub fn targets(&self) -> &[PathBuf] {
+        &self.targets
+    }
+
+    pub fn with_target(&self, target: PathBuf) -> Result<Self, Vec<ConfigIssue>> {
+        let mut targets = self.targets.clone();
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+        Self::new(targets)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTargetRegistry {
+    version: u64,
+    targets: Vec<String>,
+}
+
+pub struct TargetRegistryCodec;
+
+impl TargetRegistryCodec {
+    pub fn parse(bytes: &[u8]) -> LoadResult<TargetRegistry> {
+        parse_document(bytes, |text| {
+            let raw: RawTargetRegistry = parse_yaml(text)?;
+            if raw.version != VERSION {
+                return Err(vec![ConfigIssue {
+                    path: "version".to_owned(),
+                    message: "only version 1 is supported".to_owned(),
+                }]);
+            }
+            TargetRegistry::new(raw.targets.into_iter().map(PathBuf::from).collect())
+        })
+    }
+
+    pub fn render(registry: &TargetRegistry) -> Result<String, RenderError> {
+        let mut output = String::from("version: 1\ntargets:");
+        if registry.targets.is_empty() {
+            output.push_str(" []\n");
+        } else {
+            output.push('\n');
+            for target in &registry.targets {
+                output.push_str(&format!("  - {}\n", quote(&target.to_string_lossy())?));
+            }
+        }
+        Ok(output)
+    }
+}
+
+pub fn load_target_registry(path: &Path) -> Result<LoadResult<TargetRegistry>, LoadError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(TargetRegistryCodec::parse(&bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(LoadResult::Missing),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn save_target_registry(
+    path: &Path,
+    registry: &TargetRegistry,
+    expected: &Fingerprint,
+) -> Result<Fingerprint, SaveError> {
+    conditional_save(
+        path,
+        TargetRegistryCodec::render(registry)?.as_bytes(),
+        expected,
+    )
+}
+
 fn quote(value: &str) -> Result<String, serde_json::Error> {
     serde_json::to_string(value)
 }
@@ -1489,5 +1587,25 @@ enablements:
         });
         std::assert_matches!(result, Err(SaveError::Stale));
         assert_eq!(fs::read(&path).unwrap(), b"external");
+    }
+
+    #[test]
+    fn target_registry_is_strict_sorted_and_duplicate_free() {
+        let registry = TargetRegistry::new(vec![
+            PathBuf::from("/work/zeta"),
+            PathBuf::from("/work/alpha"),
+        ])
+        .unwrap();
+        let rendered = TargetRegistryCodec::render(&registry).unwrap();
+        assert!(rendered.find("/work/alpha").unwrap() < rendered.find("/work/zeta").unwrap());
+        assert!(matches!(
+            TargetRegistryCodec::parse(b"version: 1\ntargets: [/work/a, /work/a]\n"),
+            LoadResult::Invalid { .. }
+        ));
+        assert!(matches!(
+            TargetRegistryCodec::parse(b"version: 1\ntargets: []\nextra: true\n"),
+            LoadResult::Invalid { .. }
+        ));
+        assert!(TargetRegistry::new(vec![PathBuf::from("relative")]).is_err());
     }
 }

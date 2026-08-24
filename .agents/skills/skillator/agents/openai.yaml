@@ -1,0 +1,3 @@
+interface:
+  display_name: "Skillator"
+  short_description: "Manage local agent skills with Skillator"

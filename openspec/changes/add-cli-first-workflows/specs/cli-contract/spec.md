@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: The CLI exposes interactive defaults and explicit command groups
-Skillator SHALL expose `library`, `target`, `user`, `sync`, and `worktree` command groups. Unqualified `skillator [DIRECTORY]` SHALL launch the Target TUI, and unqualified `skillator library` SHALL launch the Library TUI. `library add`, `library remove`, `library locations`, `library list`, `target init`, `target link`, `target copy`, `target remove`, `user link`, `user copy`, and `user remove` SHALL run without an interactive terminal. Existing `sync` and `worktree sync` behavior SHALL remain available.
+Skillator SHALL expose top-level `init`, `library`, `target`, `user`, and `sync` commands. It SHALL NOT expose a top-level `worktree` command. Unqualified `skillator [DIRECTORY]` SHALL launch the Target TUI, and unqualified `skillator library` SHALL launch the Library TUI. `init`, `library add`, `library remove`, `library locations`, `library list`, `target link`, `target copy`, `target remove`, `user link`, `user copy`, and `user remove` SHALL run without an interactive terminal. `skillator sync target [directory]` SHALL run ordinary Target reconciliation. `skillator sync worktree [directory]` SHALL project primary-worktree Target state into a linked worktree. Both explicit sync forms SHALL default the directory to `.`.
 
 #### Scenario: Default root invocation
 - **WHEN** the user runs `skillator` in a Git worktree with interactive input and output
@@ -15,9 +15,17 @@ Skillator SHALL expose `library`, `target`, `user`, `sync`, and `worktree` comma
 - **WHEN** the user runs `skillator library list elastic` without interactive input or output
 - **THEN** Skillator lists matching live Library inventory without opening the TUI
 
-#### Scenario: Existing synchronization command
-- **WHEN** the user runs `skillator worktree sync` from a registered linked worktree
-- **THEN** Skillator projects the primary worktree's local Target state and emits the selected report format
+#### Scenario: Explicit synchronization commands
+- **WHEN** the user runs `skillator sync target` or `skillator sync worktree`
+- **THEN** Skillator runs only the requested workflow against `.` and emits the selected report format
+
+#### Scenario: Bare sync discovers a linked worktree
+- **WHEN** the user runs `skillator sync` from a registered linked worktree
+- **THEN** Skillator runs worktree synchronization
+
+#### Scenario: Bare sync discovers a Target
+- **WHEN** the user runs `skillator sync` from a primary worktree or ordinary Git checkout
+- **THEN** Skillator runs Target synchronization
 
 ## ADDED Requirements
 
@@ -46,4 +54,3 @@ Every CLI-first mutation SHALL support `--check` and `--format <text|json|yaml>`
 #### Scenario: Guarded mutation without authorization
 - **WHEN** a CLI-first mutation plans a Guarded Change and the user did not pass `--force`
 - **THEN** Skillator reports that the change requires force and leaves the guarded state unchanged
-

@@ -12,8 +12,8 @@
 - **THEN** Skillator reports `unchanged` without adding a duplicate
 
 #### Scenario: Remove a Location with dependent Enablements
-- **WHEN** the user removes a Location that supplies Skills named by saved Enablements
-- **THEN** Skillator unregisters the Location, preserves those Enablements, and reports that they are unresolved
+- **WHEN** the user removes a Location that supplies Skills named by User Scope or available registered Target Enablements
+- **THEN** Skillator unregisters the Location, preserves those Enablements, and reports their scope and canonical Skill identity as unresolved
 
 #### Scenario: Remove does not delete content
 - **WHEN** a Library Location is removed successfully
@@ -37,4 +37,3 @@
 #### Scenario: Invalid discovered Skill
 - **WHEN** a matching Source contains an Invalid Skill
 - **THEN** the listing includes the Skill with its invalid state and diagnostics
-

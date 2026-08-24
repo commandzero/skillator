@@ -57,6 +57,14 @@ Target mutations use `--directory <key>` when supplied. Without it, they select 
 
 Guessing from compatible agent paths was considered but rejected because compatibility is advisory and directory keys are the saved identity.
 
+### Store Target registration separately from Library configuration
+
+Configured Target worktrees will be recorded in `~/.skillator/targets.yaml` as canonical absolute paths. Each worktree is a separate entry because Repository Configuration is clone-local. Successful Target initialization, Target CLI mutation, and Target TUI save will register the selected worktree. Missing paths remain as unavailable entries so the user can see stale registrations later.
+
+`library remove` will load valid Repository Configuration from every available registered Target plus User Scope and report Enablements whose Skills disappear from the resulting Library Snapshot. It will preserve those declarations. Invalid or unavailable registered Targets produce diagnostics and do not block removal unless registry state itself is invalid.
+
+Adding Targets to `library.yaml` was considered but rejected. Library Locations and Target history have different lifecycles, and a separate strict file lets a future Target switcher evolve without changing Library Configuration.
+
 ### Extend reports with operation-specific payloads under common rules
 
 Each command family will return a typed compact report with `format_version`, status, exit status, mode, affected scope, outcomes, and diagnostics. Library inventory reports will contain Sources and Skills. Mutation reports will contain configuration and Materialization outcomes. JSON and YAML will encode the same logical value and preserve deterministic ordering.
@@ -65,9 +73,29 @@ One universal report struct was considered. Optional fields for unrelated comman
 
 ### Package one project-owned workflow skill
 
-The implementation will add a Skill under `.agents/skills` using the repository's skill-writing guidance. Its main file will contain the ordered resolve, inspect, preview, apply, and verify process. It will point to executable help for syntax and keep only decisions that help an agent choose link, copy, removal, or escalation. Each step will end in an observable result.
+The implementation will add a Skill under `.agents/skills/skillator` using the repository's skill-writing guidance. The generated `.agents/.gitignore` will ignore local state and all `.agents/skills` entries while its repository-owned exception section allow-lists this directory for tracking. Skillator will preserve that exception section and will not edit the repository root `.gitignore`. The Skill's main file will contain the ordered resolve, inspect, preview, apply, and verify process. It will point to executable help for syntax and keep only decisions that help an agent choose link, copy, removal, or escalation. Each step will end in an observable result.
 
 Copying the full CLI reference into the skill was considered and rejected because `--help` is cheaper to inspect and cannot drift from the installed binary.
+
+### Keep repository ownership outside Repository Configuration
+
+The Target TUI will discover physical Skills that are not declared as Enablements and show them as repository candidates. It places the `Repository` group before every Library Source so project-owned Skills stay distinct and visible. Pressing `m` stages `repo` mode. A saved repository Skill displays `[r] repo` and Space cannot uncheck it, matching the read-only behavior of `[u] user` rows. Save adds an exact exception such as `!skills/skillator/` to the parent control file.
+
+Repository rows never become Enablements and never resolve against the Library. This keeps Library reconciliation limited to `link` and `copy`. Existing exception lines remain the source of truth for repository ownership, so no second repository-skill list is added to `.agents/skillator.yaml`.
+
+### Keep the persistent legend compact
+
+The main-window legend names non-obvious actions without spelling out navigation or every mode. It labels `m` as `mode`, includes `/ filter`, and leaves the complete Target and Library mode cycles in a scrollable Help modal. The Help modal is also the sole place that advertises `q` as an `Esc` equivalent for overlays; editable text fields continue to accept a literal `q`.
+
+### Make the Target header follow the active tab
+
+Repository tabs keep the repository root in the `Target:` header. User tabs show their home-relative Skill Directory instead. The primary User tab therefore shows `~/.agents/skills`, which makes the header describe the files currently being managed.
+
+### Put reconciliation workflows under sync
+
+`skillator sync target [directory]` and `skillator sync worktree [directory]` select a workflow explicitly. Bare `skillator sync` inspects `.` with Git. A registered linked worktree selects worktree synchronization; a primary worktree or ordinary checkout selects Target synchronization. Invalid directories then fail through the selected workflow's existing diagnostics. The old top-level `worktree` command is removed.
+
+Initialization moves to `skillator init [directory]`. Target Enablement mutations remain under `skillator target`, so the rename does not disturb canonical link, copy, and remove commands.
 
 ## Risks / Trade-offs
 
@@ -76,6 +104,7 @@ Copying the full CLI reference into the skill was considered and rejected becaus
 - [First-mutation User Scope initialization can surprise callers] -> Include the new configuration in check output and create only the documented default directory with the requested Enablement.
 - [Machine report variants expand the public compatibility contract] -> Keep each report compact, version it, and test JSON and YAML logical equivalence plus deterministic order.
 - [Removing a Location can break resolution for many Enablements] -> Preserve every declaration and include affected unresolved identities in diagnostics.
+- [Registered paths become stale when checkouts move] -> Preserve missing entries as unavailable and report them; removal from the registry can follow with the Target switcher command set.
 
 ## Migration Plan
 

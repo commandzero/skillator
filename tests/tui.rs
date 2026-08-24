@@ -491,6 +491,10 @@ fn library_footer_explains_how_to_apply_pending_changes() {
 
     assert!(screen.contains("s save"));
     assert!(screen.contains("Ctrl+S save & exit"));
+    assert!(screen.contains("m mode"));
+    assert!(screen.contains("/ filter"));
+    assert!(!screen.contains("PgUp/PgDn"));
+    assert!(!screen.contains("move/copy/link"));
     assert!(screen.contains("Location"));
     assert!(!screen.contains("Name"));
     let action_line = lines
@@ -512,6 +516,57 @@ fn library_footer_explains_how_to_apply_pending_changes() {
             .iter()
             .any(|cell| { cell.symbol() == "▄" && cell.fg == Color::Indexed(33) })
     );
+}
+
+#[test]
+fn target_footer_keeps_modes_and_navigation_in_help() {
+    let model = Model::new(
+        Workspace::Target,
+        vec![Row::source("local/library", CheckState::Unchecked)],
+    );
+    let backend = TestBackend::new(140, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(140)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(screen.contains("m mode"));
+    assert!(screen.contains("/ filter"));
+    assert!(!screen.contains("PgUp/PgDn"));
+    assert!(!screen.contains("link/copy/repo"));
+}
+
+#[test]
+fn help_scrolls_to_the_full_mode_reference_and_q_closes_it() {
+    let mut model = Model::new(Workspace::Target, Vec::new());
+    reduce(&mut model, Action::Help);
+    for _ in 0..6 {
+        reduce(&mut model, Action::MoveDown);
+    }
+
+    let backend = TestBackend::new(100, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(100)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(screen.contains("Cycle modes: link / copy / repo"));
+    assert!(screen.contains("q/Esc close"));
+
+    reduce(&mut model, Action::Quit);
+    assert_eq!(model.overlay(), &Overlay::None);
 }
 
 #[test]

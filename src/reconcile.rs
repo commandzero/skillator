@@ -7,7 +7,8 @@ use crate::git::PathFacts;
 use crate::library::LibrarySnapshot;
 use crate::materialization::{EntryFingerprint, TreeSnapshot, copy_tree, fingerprint};
 use crate::target::{
-    Comparison, ControlFileState, MaterializationState, ObservedState, RootState, Target, observe,
+    Comparison, ControlFileState, MaterializationState, ObservedState, RepositorySkillExceptions,
+    RootState, Target, observe, observe_with_repository_skills,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -188,6 +189,29 @@ pub fn plan(
                             Action::WriteControlFile,
                             "generated Skill Entries are not effectively Git-ignored",
                         ));
+                    }
+                }
+                ControlFileState::PrefixRequired => {
+                    let expected = fingerprint(control);
+                    if expected == EntryFingerprint::Uninspectable || directory.control_protected()
+                    {
+                        items.push(blocked(
+                            control,
+                            Action::WriteControlFile,
+                            "Skill Directory Control File cannot be safely prefixed",
+                        ));
+                    } else {
+                        items.push(PlanItem {
+                            path: control.to_owned(),
+                            action: Action::WriteControlFile,
+                            safety: Safety::Safe,
+                            reason: "prefix the existing control file without replacing its rules"
+                                .to_owned(),
+                            operation: Operation::WriteFile {
+                                bytes: directory.control_content().to_vec(),
+                                expected,
+                            },
+                        });
                     }
                 }
                 ControlFileState::Modified | ControlFileState::WrongKind => {
@@ -449,8 +473,27 @@ pub fn prepare_transition_with_locks(
     library: &LibrarySnapshot,
     locks: TargetLocks,
 ) -> Result<PreparedPlan, TargetBusy> {
+    prepare_transition_with_locks_and_repository_skills(
+        target,
+        original,
+        staged,
+        library,
+        &RepositorySkillExceptions::new(),
+        locks,
+    )
+}
+
+pub fn prepare_transition_with_locks_and_repository_skills(
+    target: &Target,
+    original: &RepositoryConfig,
+    staged: &RepositoryConfig,
+    library: &LibrarySnapshot,
+    repository_skills: &RepositorySkillExceptions,
+    locks: TargetLocks,
+) -> Result<PreparedPlan, TargetBusy> {
     let original_observed = observe(target, original, library);
-    let staged_observed = observe(target, staged, library);
+    let staged_observed =
+        observe_with_repository_skills(target, staged, library, repository_skills);
     let mut plan = plan(staged, library, &staged_observed);
     let disabled = original_observed
         .enablements()
