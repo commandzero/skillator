@@ -431,16 +431,7 @@ impl WorktreeSyncWorkflow {
                 } else {
                     "worktree_sync".to_owned()
                 };
-                if report.changes.iter().all(|change| {
-                    !matches!(
-                        change.outcome,
-                        ReportOutcome::NotAuthorized
-                            | ReportOutcome::Blocked
-                            | ReportOutcome::Failed
-                            | ReportOutcome::RolledBack
-                            | ReportOutcome::RecoveryRequired
-                    )
-                }) {
+                if report_permits_target_registration(&report) {
                     register_target(paths, &destination)?;
                 }
                 Ok(report)
@@ -768,6 +759,19 @@ fn register_target(paths: &AppPaths, target: &Target) -> Result<(), WorkflowErro
         })?;
     save_target_registry(&paths.target_registry(), &staged, &expected).map_err(save_error)?;
     Ok(())
+}
+
+fn report_permits_target_registration(report: &CommandReport) -> bool {
+    report.changes.iter().all(|change| {
+        !matches!(
+            change.outcome,
+            ReportOutcome::NotAuthorized
+                | ReportOutcome::Blocked
+                | ReportOutcome::Failed
+                | ReportOutcome::RolledBack
+                | ReportOutcome::RecoveryRequired
+        )
+    })
 }
 
 fn append_registration_preview(
@@ -2340,7 +2344,9 @@ impl TargetWorkflow {
     ) -> Result<CommandReport, WorkflowError> {
         let target = prepared.planner.target.clone();
         let report = Self::commit_save(prepared, authorization)?;
-        register_target(paths, &target)?;
+        if report_permits_target_registration(&report) {
+            register_target(paths, &target)?;
+        }
         Ok(report)
     }
 
@@ -2873,6 +2879,37 @@ mod tests {
         assert!(SkillSelector::parse("esdiag").is_err());
         assert!(SkillSelector::parse("Elastic/agent-skills:skills/esdiag").is_err());
         assert!(SkillSelector::parse("elastic/agent-skills:../esdiag").is_err());
+    }
+
+    #[test]
+    fn failed_target_reports_do_not_permit_registration() {
+        let report_with = |outcome| CommandReport {
+            format_version: 1,
+            status: ReportStatus::NotConverged,
+            exit_status: 1,
+            mode: "apply".to_owned(),
+            target: "/target".to_owned(),
+            changes: vec![ReportChange {
+                path: ".agents/skillator.yaml".to_owned(),
+                action: "write_target_configuration".to_owned(),
+                safety: "safe".to_owned(),
+                outcome,
+            }],
+            diagnostics: Vec::new(),
+        };
+
+        for outcome in [
+            ReportOutcome::NotAuthorized,
+            ReportOutcome::Blocked,
+            ReportOutcome::Failed,
+            ReportOutcome::RolledBack,
+            ReportOutcome::RecoveryRequired,
+        ] {
+            assert!(!report_permits_target_registration(&report_with(outcome)));
+        }
+        assert!(report_permits_target_registration(&report_with(
+            ReportOutcome::Applied
+        )));
     }
 
     #[test]
