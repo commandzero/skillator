@@ -18,7 +18,7 @@ use std::process::ExitCode;
 #[command(
     name = "skillator",
     version,
-    about = "Manage agent Skill links for a Git repository",
+    about = "Manage agent skills in your library, user account, and Git repositories",
     after_help = "Examples:\n  skillator\n  skillator library\n  skillator init\n  skillator sync\n  skillator sync target --check --format=json"
 )]
 struct Cli {
@@ -30,30 +30,33 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Curate Sources and Skills in the user Library.
+    /// Add skill sources and choose which skills appear in Target.
     Library {
         #[command(subcommand)]
         command: Option<LibraryCommand>,
     },
-    /// Create initial Target configuration with no enabled Skills.
+    /// Create .agents/skillator.yaml with no skills enabled.
     Init(InitArgs),
-    /// Edit a Target Repository.
+    /// Link, copy, or remove skills in a Git repository.
     Target {
         #[command(subcommand)]
         command: TargetCommand,
     },
-    /// Edit machine-local User Scope skills.
+    /// Link, copy, or remove skills for the current user.
     User {
         #[command(subcommand)]
         command: UserCommand,
     },
-    /// Reconcile the discovered or explicitly selected Target context.
+    /// Update installed skills to match saved configuration.
+    ///
+    /// With no subcommand, Skillator uses worktree sync in a linked worktree
+    /// and target sync everywhere else.
     Sync(SyncCommandArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum LibraryCommand {
-    /// Register a Library Location without activating Skills.
+    /// Add a directory of skills to the Library.
     Add {
         location: String,
         #[arg(long)]
@@ -61,15 +64,15 @@ enum LibraryCommand {
         #[command(flatten)]
         output: MutationOutputArgs,
     },
-    /// Unregister a Library Location without deleting it.
+    /// Remove a directory from the Library without deleting it.
     Remove {
         location: String,
         #[command(flatten)]
         output: MutationOutputArgs,
     },
-    /// List configured Library Locations.
+    /// List directories registered with the Library.
     Locations(OutputArgs),
-    /// List discovered Skills, optionally filtered by Source Key prefix.
+    /// List available skills, optionally filtered by source.
     List {
         filter: Option<String>,
         #[command(flatten)]
@@ -79,11 +82,11 @@ enum LibraryCommand {
 
 #[derive(Debug, Subcommand)]
 enum TargetCommand {
-    /// Enable one Skill as a symbolic link.
+    /// Link one Library skill into a Git repository.
     Link(TargetMutationArgs),
-    /// Enable one Skill as a copied snapshot.
+    /// Copy one Library skill into a Git repository.
     Copy(TargetMutationArgs),
-    /// Disable one Skill and remove its managed Materialization.
+    /// Remove one managed skill from a Git repository.
     Remove(TargetMutationArgs),
 }
 
@@ -97,11 +100,11 @@ struct InitArgs {
 
 #[derive(Debug, Subcommand)]
 enum UserCommand {
-    /// Enable one User Scope Skill as a symbolic link.
+    /// Link one Library skill for the current user.
     Link(UserMutationArgs),
-    /// Enable one User Scope Skill as a copied snapshot.
+    /// Copy one Library skill for the current user.
     Copy(UserMutationArgs),
-    /// Disable one User Scope Skill.
+    /// Remove one managed skill for the current user.
     Remove(UserMutationArgs),
 }
 
@@ -127,14 +130,17 @@ struct UserMutationArgs {
 
 #[derive(Debug, clap::Args)]
 struct OutputArgs {
+    /// Choose the output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
+    /// Control color in text output.
     #[arg(long, value_enum)]
     color: Option<ColorPolicy>,
 }
 
 #[derive(Debug, clap::Args)]
 struct MutationOutputArgs {
+    /// Show what would change without writing files.
     #[arg(long)]
     check: bool,
     #[command(flatten)]
@@ -143,8 +149,10 @@ struct MutationOutputArgs {
 
 #[derive(Debug, clap::Args)]
 struct GuardedMutationOutputArgs {
+    /// Show what would change without writing files.
     #[arg(long, conflicts_with = "force")]
     check: bool,
+    /// Allow replacement of files Skillator would otherwise preserve.
     #[arg(long)]
     force: bool,
     #[command(flatten)]
@@ -162,9 +170,9 @@ struct SyncCommandArgs {
 
 #[derive(Debug, Subcommand)]
 enum SyncCommand {
-    /// Reconcile one existing local Target configuration.
+    /// Update skills from this checkout's Target configuration.
     Target(SyncArgs),
-    /// Project primary-worktree Target state into a linked worktree.
+    /// Copy Target configuration from the primary worktree, then update skills.
     Worktree(SyncArgs),
 }
 
@@ -178,16 +186,16 @@ struct SyncArgs {
 
 #[derive(Debug, clap::Args)]
 struct SyncOutputArgs {
-    /// Report required changes without writing.
+    /// Show what would change without writing files.
     #[arg(long, conflicts_with = "force")]
     check: bool,
-    /// Authorize every viable Guarded Change.
+    /// Allow replacement of files Skillator would otherwise preserve.
     #[arg(long)]
     force: bool,
-    /// Select the report encoding.
+    /// Choose the output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
-    /// Select text color behavior.
+    /// Control color in text output.
     #[arg(long, value_enum)]
     color: Option<ColorPolicy>,
 }
