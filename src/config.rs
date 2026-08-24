@@ -576,6 +576,26 @@ impl TargetRegistry {
         }
         Self::new(targets)
     }
+
+    pub fn without_target(&self, target: &Path) -> Result<Self, Vec<ConfigIssue>> {
+        Self::new(
+            self.targets
+                .iter()
+                .filter(|candidate| candidate.as_path() != target)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    pub fn retaining(&self, keep: impl Fn(&Path) -> bool) -> Result<Self, Vec<ConfigIssue>> {
+        Self::new(
+            self.targets
+                .iter()
+                .filter(|target| keep(target))
+                .cloned()
+                .collect(),
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]

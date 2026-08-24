@@ -2,7 +2,8 @@
 
 use crate::app::{
     AppPaths, CommandReport, LibraryInventoryReport, LibraryLocationsReport, LibraryWorkflow,
-    ReportStatus, SkillSelector, SyncMode, SyncWorkflow, TargetWorkflow, UserScopeWorkflow,
+    ReportStatus, ScopeEnablementsReport, SkillSelector, SyncMode, SyncWorkflow,
+    TargetRegistryReport, TargetRegistryWorkflow, TargetWorkflow, UserScopeWorkflow,
     WorktreeSyncWorkflow,
 };
 use crate::domain::MaterializationKind;
@@ -42,6 +43,11 @@ enum Commands {
         #[command(subcommand)]
         command: TargetCommand,
     },
+    /// Inspect or clean registered Target worktrees.
+    Targets {
+        #[command(subcommand)]
+        command: TargetsCommand,
+    },
     /// Link, copy, or remove skills for the current user.
     User {
         #[command(subcommand)]
@@ -70,6 +76,8 @@ enum LibraryCommand {
         #[command(flatten)]
         output: MutationOutputArgs,
     },
+    /// Remove registered directories that no longer exist.
+    Prune(MutationOutputArgs),
     /// List directories registered with the Library.
     Locations(OutputArgs),
     /// List available skills, optionally filtered by source.
@@ -82,6 +90,8 @@ enum LibraryCommand {
 
 #[derive(Debug, Subcommand)]
 enum TargetCommand {
+    /// List saved skills and their observed state.
+    List(TargetListArgs),
     /// Link one Library skill into a Git repository.
     Link(TargetMutationArgs),
     /// Copy one Library skill into a Git repository.
@@ -100,12 +110,36 @@ struct InitArgs {
 
 #[derive(Debug, Subcommand)]
 enum UserCommand {
+    /// List saved user skills and their observed state.
+    List(OutputArgs),
     /// Link one Library skill for the current user.
     Link(UserMutationArgs),
     /// Copy one Library skill for the current user.
     Copy(UserMutationArgs),
     /// Remove one managed skill for the current user.
     Remove(UserMutationArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum TargetsCommand {
+    /// List registered Target worktrees and their status.
+    List(OutputArgs),
+    /// Forget one Target without deleting its worktree or skills.
+    Remove {
+        directory: PathBuf,
+        #[command(flatten)]
+        output: MutationOutputArgs,
+    },
+    /// Forget registered Targets that are no longer configured worktrees.
+    Prune(MutationOutputArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TargetListArgs {
+    #[arg(value_name = "REPOSITORY")]
+    repository: Option<PathBuf>,
+    #[command(flatten)]
+    output: OutputArgs,
 }
 
 #[derive(Debug, clap::Args)]
@@ -261,6 +295,7 @@ pub fn run() -> ExitCode {
             command: Some(command),
         }) => run_library_command(&paths, command),
         Some(Commands::Target { command }) => run_target_command(&paths, command),
+        Some(Commands::Targets { command }) => run_targets_command(&paths, command),
         Some(Commands::User { command }) => run_user_command(&paths, command),
         None => {
             if !interactive_terminal() {
@@ -332,6 +367,15 @@ fn run_library_command(paths: &AppPaths, command: LibraryCommand) -> ExitCode {
                 &output.output,
             )
         }
+        LibraryCommand::Prune(output) => {
+            if let Err(code) = validate_output(&output.output) {
+                return code;
+            }
+            finish_report(
+                LibraryWorkflow::prune_locations(paths, mutation_mode(output.check, false)),
+                &output.output,
+            )
+        }
         LibraryCommand::Locations(output) => {
             if let Err(code) = validate_output(&output) {
                 return code;
@@ -355,6 +399,18 @@ fn run_library_command(paths: &AppPaths, command: LibraryCommand) -> ExitCode {
 
 fn run_target_command(paths: &AppPaths, command: TargetCommand) -> ExitCode {
     match command {
+        TargetCommand::List(arguments) => {
+            if let Err(code) = validate_output(&arguments.output) {
+                return code;
+            }
+            match TargetWorkflow::inspect(
+                paths,
+                arguments.repository.unwrap_or_else(|| PathBuf::from(".")),
+            ) {
+                Ok(report) => render_scope_enablements(report, &arguments.output),
+                Err(error) => diagnostic(error.exit_status(), &error.to_string()),
+            }
+        }
         TargetCommand::Link(arguments) => {
             run_target_mutation(paths, arguments, Some(MaterializationKind::Linked))
         }
@@ -362,6 +418,42 @@ fn run_target_command(paths: &AppPaths, command: TargetCommand) -> ExitCode {
             run_target_mutation(paths, arguments, Some(MaterializationKind::Copied))
         }
         TargetCommand::Remove(arguments) => run_target_mutation(paths, arguments, None),
+    }
+}
+
+fn run_targets_command(paths: &AppPaths, command: TargetsCommand) -> ExitCode {
+    match command {
+        TargetsCommand::List(output) => {
+            if let Err(code) = validate_output(&output) {
+                return code;
+            }
+            match TargetRegistryWorkflow::list(paths) {
+                Ok(report) => render_target_registry(report, &output),
+                Err(error) => diagnostic(error.exit_status(), &error.to_string()),
+            }
+        }
+        TargetsCommand::Remove { directory, output } => {
+            if let Err(code) = validate_output(&output.output) {
+                return code;
+            }
+            finish_report(
+                TargetRegistryWorkflow::remove(
+                    paths,
+                    &directory,
+                    mutation_mode(output.check, false),
+                ),
+                &output.output,
+            )
+        }
+        TargetsCommand::Prune(output) => {
+            if let Err(code) = validate_output(&output.output) {
+                return code;
+            }
+            finish_report(
+                TargetRegistryWorkflow::prune(paths, mutation_mode(output.check, false)),
+                &output.output,
+            )
+        }
     }
 }
 
@@ -405,7 +497,17 @@ fn run_target_mutation(
 }
 
 fn run_user_command(paths: &AppPaths, command: UserCommand) -> ExitCode {
+    if let UserCommand::List(output) = command {
+        if let Err(code) = validate_output(&output) {
+            return code;
+        }
+        return match UserScopeWorkflow::inspect(paths) {
+            Ok(report) => render_scope_enablements(report, &output),
+            Err(error) => diagnostic(error.exit_status(), &error.to_string()),
+        };
+    }
     let (arguments, materialization) = match command {
+        UserCommand::List(_) => unreachable!("handled above"),
         UserCommand::Link(arguments) => (arguments, Some(MaterializationKind::Linked)),
         UserCommand::Copy(arguments) => (arguments, Some(MaterializationKind::Copied)),
         UserCommand::Remove(arguments) => (arguments, None),
@@ -590,6 +692,64 @@ fn render_locations(report: LibraryLocationsReport, arguments: &OutputArgs) -> E
                 )
             })
             .collect()),
+        OutputFormat::Json => render_json(&report),
+        OutputFormat::Yaml => render_serialized_yaml(&report),
+    };
+    write_rendered(rendered, 0)
+}
+
+fn render_scope_enablements(report: ScopeEnablementsReport, arguments: &OutputArgs) -> ExitCode {
+    let rendered = match arguments.format {
+        OutputFormat::Text => {
+            let mut text = String::new();
+            for directory in &report.directories {
+                text.push_str(&format!("{}\t{}\n", directory.key, directory.path));
+                for enablement in &directory.enablements {
+                    text.push_str(&format!(
+                        "  {}:{}\t{}\t{}\t{}\n",
+                        enablement.source,
+                        enablement.skill,
+                        enablement.materialization,
+                        enablement.resolution,
+                        enablement.observed_state
+                    ));
+                }
+                for diagnostic in &directory.diagnostics {
+                    text.push_str(&format!("  warning\t{diagnostic}\n"));
+                }
+            }
+            for diagnostic in &report.diagnostics {
+                text.push_str(&format!(
+                    "{}\t{}\n",
+                    diagnostic.severity, diagnostic.message
+                ));
+            }
+            Ok(text)
+        }
+        OutputFormat::Json => render_json(&report),
+        OutputFormat::Yaml => render_serialized_yaml(&report),
+    };
+    write_rendered(rendered, 0)
+}
+
+fn render_target_registry(report: TargetRegistryReport, arguments: &OutputArgs) -> ExitCode {
+    let rendered = match arguments.format {
+        OutputFormat::Text => {
+            let mut text = String::new();
+            for target in &report.targets {
+                text.push_str(&format!("{}\t{}\n", target.status, target.path));
+                for diagnostic in &target.diagnostics {
+                    text.push_str(&format!("  warning\t{diagnostic}\n"));
+                }
+            }
+            for diagnostic in &report.diagnostics {
+                text.push_str(&format!(
+                    "{}\t{}\n",
+                    diagnostic.severity, diagnostic.message
+                ));
+            }
+            Ok(text)
+        }
         OutputFormat::Json => render_json(&report),
         OutputFormat::Yaml => render_serialized_yaml(&report),
     };

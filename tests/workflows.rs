@@ -541,6 +541,8 @@ fn worktree_sync_projects_primary_local_state_and_materializes_skills() {
             .file_type()
             .is_symlink()
     );
+    let registry = std::fs::read_to_string(fixture.paths.target_registry()).unwrap();
+    assert!(registry.contains(fixture.linked.to_string_lossy().as_ref()));
 }
 
 #[test]
@@ -554,8 +556,12 @@ fn worktree_sync_check_does_not_create_destination_configuration() {
     assert!(report.changes.iter().any(|change| {
         change.path == ".agents/skillator.yaml" && change.outcome == ReportOutcome::WouldApply
     }));
+    assert!(report.changes.iter().any(|change| {
+        change.action == "register_target" && change.outcome == ReportOutcome::WouldApply
+    }));
     assert!(!fixture.linked.join(".agents/skillator.yaml").exists());
     assert!(!fixture.linked.join(".agents/skills").exists());
+    assert!(!fixture.paths.target_registry().exists());
 }
 
 #[test]
@@ -600,6 +606,7 @@ fn worktree_sync_requires_force_for_differing_untracked_configuration() {
         std::fs::read(fixture.linked.join(".agents/skillator.yaml")).unwrap(),
         before
     );
+    assert!(!fixture.paths.target_registry().exists());
 
     let forced = WorktreeSyncWorkflow::run(
         &fixture.paths,
@@ -618,6 +625,7 @@ fn worktree_sync_requires_force_for_differing_untracked_configuration() {
         std::fs::read(fixture.linked.join(".agents/skillator.yaml")).unwrap(),
         std::fs::read(fixture.primary.join(".agents/skillator.yaml")).unwrap()
     );
+    assert!(fixture.paths.target_registry().is_file());
 }
 
 #[test]
@@ -646,6 +654,7 @@ fn worktree_sync_blocks_a_tracked_destination_configuration_even_with_force() {
         change.path == ".agents/skillator.yaml" && change.outcome == ReportOutcome::Blocked
     }));
     assert_eq!(std::fs::read(path).unwrap(), before);
+    assert!(!fixture.paths.target_registry().exists());
 }
 
 #[cfg(unix)]
@@ -681,6 +690,7 @@ fn worktree_sync_blocks_an_unreadable_destination_configuration() {
     assert!(report.changes.iter().any(|change| {
         change.path == ".agents/skillator.yaml" && change.outcome == ReportOutcome::Blocked
     }));
+    assert!(!fixture.paths.target_registry().exists());
 }
 
 #[test]
@@ -692,6 +702,7 @@ fn worktree_sync_rejects_missing_primary_configuration_without_writes() {
         WorktreeSyncWorkflow::run(&fixture.paths, &fixture.linked, SyncMode::Check).unwrap_err();
     assert!(error.to_string().contains("primary Target configuration"));
     assert!(!fixture.linked.join(".agents").exists());
+    assert!(!fixture.paths.target_registry().exists());
 }
 
 #[cfg(unix)]

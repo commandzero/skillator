@@ -34,6 +34,17 @@
 - **WHEN** removal would delete a Diverged Copy and the user did not authorize Guarded Changes
 - **THEN** Skillator preserves the Enablement and copy and reports that force is required
 
+### Requirement: Target Enablements can be inspected without the TUI
+`skillator target list [repository]` SHALL list saved Repository Enablements for the selected Target, defaulting the repository to `.`. Results SHALL be grouped by Skill Directory and include its key and path, the canonical Source Key and Skill path, materialized name, requested `linked` or `copied` mode, current resolution state, and observed Materialization state or diagnostics. The command SHALL list only Repository Enablements from Repository Configuration; it SHALL NOT mix in inherited User Scope Skills or repository-owned physical Skills.
+
+#### Scenario: List a configured Target
+- **WHEN** a Target has saved Enablements across one or more Skill Directories
+- **THEN** Skillator reports each Enablement under its saved directory in deterministic order
+
+#### Scenario: List unresolved Target state
+- **WHEN** a saved Target Enablement no longer resolves through the Library
+- **THEN** Skillator includes the declaration and reports it as unresolved
+
 ## MODIFIED Requirements
 
 ### Requirement: Repository Configuration has one version 1 schema

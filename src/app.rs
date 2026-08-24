@@ -181,6 +181,48 @@ pub struct LibraryLocationsReport {
     pub diagnostics: Vec<ReportDiagnostic>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeEnablementReport {
+    pub source: String,
+    pub skill: String,
+    pub materialized_name: Option<String>,
+    pub materialization: String,
+    pub resolution: String,
+    pub observed_state: String,
+    pub comparison: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeDirectoryReport {
+    pub key: String,
+    pub path: String,
+    pub enablements: Vec<ScopeEnablementReport>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeEnablementsReport {
+    pub format_version: u8,
+    pub scope: String,
+    pub root: String,
+    pub directories: Vec<ScopeDirectoryReport>,
+    pub diagnostics: Vec<ReportDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredTargetReport {
+    pub path: String,
+    pub status: String,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetRegistryReport {
+    pub format_version: u8,
+    pub targets: Vec<RegisteredTargetReport>,
+    pub diagnostics: Vec<ReportDiagnostic>,
+}
+
 pub struct SyncWorkflow;
 
 impl SyncWorkflow {
@@ -371,6 +413,7 @@ impl WorktreeSyncWorkflow {
                     &planner.configuration_bytes,
                     configuration_guard.as_ref(),
                 );
+                append_registration_preview(paths, &destination, &mut report)?;
                 Ok(report)
             }
             SyncMode::Apply { force } => {
@@ -388,6 +431,18 @@ impl WorktreeSyncWorkflow {
                 } else {
                     "worktree_sync".to_owned()
                 };
+                if report.changes.iter().all(|change| {
+                    !matches!(
+                        change.outcome,
+                        ReportOutcome::NotAuthorized
+                            | ReportOutcome::Blocked
+                            | ReportOutcome::Failed
+                            | ReportOutcome::RolledBack
+                            | ReportOutcome::RecoveryRequired
+                    )
+                }) {
+                    register_target(paths, &destination)?;
+                }
                 Ok(report)
             }
         }
@@ -735,6 +790,305 @@ fn append_registration_preview(
     Ok(())
 }
 
+pub struct TargetRegistryWorkflow;
+
+impl TargetRegistryWorkflow {
+    pub fn list(paths: &AppPaths) -> Result<TargetRegistryReport, WorkflowError> {
+        let (registry, _) = load_registry(paths)?;
+        Ok(TargetRegistryReport {
+            format_version: 1,
+            targets: registry
+                .targets()
+                .iter()
+                .map(|path| inspect_registered_target(path))
+                .collect(),
+            diagnostics: Vec::new(),
+        })
+    }
+
+    pub fn remove(
+        paths: &AppPaths,
+        directory: &Path,
+        mode: SyncMode,
+    ) -> Result<CommandReport, WorkflowError> {
+        let (registry, expected) = load_registry(paths)?;
+        let candidate = registered_target_candidate(directory)?;
+        if !registry.targets().contains(&candidate) {
+            return Ok(simple_report(
+                paths.target_registry(),
+                mode,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+        let staged =
+            registry
+                .without_target(&candidate)
+                .map_err(|issues| WorkflowError::InvalidInput {
+                    message: format_issues("invalid Target Registry", &issues),
+                })?;
+        let outcome = if mode == SyncMode::Check {
+            ReportOutcome::WouldApply
+        } else {
+            save_target_registry(&paths.target_registry(), &staged, &expected)
+                .map_err(save_error)?;
+            ReportOutcome::Applied
+        };
+        Ok(simple_report(
+            paths.target_registry(),
+            mode,
+            vec![ReportChange {
+                path: candidate.to_string_lossy().into_owned(),
+                action: "remove_target_registration".to_owned(),
+                safety: "safe".to_owned(),
+                outcome,
+            }],
+            Vec::new(),
+        ))
+    }
+
+    pub fn prune(paths: &AppPaths, mode: SyncMode) -> Result<CommandReport, WorkflowError> {
+        let (registry, expected) = load_registry(paths)?;
+        let inspected = registry
+            .targets()
+            .iter()
+            .map(|path| (path, inspect_registered_target(path)))
+            .collect::<Vec<_>>();
+        let stale = inspected
+            .iter()
+            .filter(|(_, report)| matches!(report.status.as_str(), "unavailable" | "unconfigured"))
+            .map(|(path, _)| (*path).clone())
+            .collect::<Vec<_>>();
+        let diagnostics = inspected
+            .iter()
+            .filter(|(_, report)| report.status != "available")
+            .map(|(path, report)| {
+                let preserved = matches!(report.status.as_str(), "invalid" | "uninspectable");
+                ReportDiagnostic {
+                    code: if preserved {
+                        "target_registration_preserved"
+                    } else {
+                        "target_registration_stale"
+                    }
+                    .to_owned(),
+                    severity: if preserved { "warning" } else { "info" }.to_owned(),
+                    message: format!(
+                        "Registered Target is {} and will {}: {}",
+                        report.status,
+                        if preserved {
+                            "be preserved"
+                        } else {
+                            "be pruned"
+                        },
+                        path.display()
+                    ),
+                    data: Some(BTreeMap::from([
+                        ("target".to_owned(), path.to_string_lossy().into_owned()),
+                        ("state".to_owned(), report.status.clone()),
+                    ])),
+                }
+            })
+            .collect::<Vec<_>>();
+        if stale.is_empty() {
+            return Ok(simple_report(
+                paths.target_registry(),
+                mode,
+                Vec::new(),
+                diagnostics,
+            ));
+        }
+        let staged = registry
+            .retaining(|path| !stale.iter().any(|stale| stale == path))
+            .map_err(|issues| WorkflowError::InvalidInput {
+                message: format_issues("invalid Target Registry", &issues),
+            })?;
+        let outcome = if mode == SyncMode::Check {
+            ReportOutcome::WouldApply
+        } else {
+            save_target_registry(&paths.target_registry(), &staged, &expected)
+                .map_err(save_error)?;
+            ReportOutcome::Applied
+        };
+        let changes = stale
+            .into_iter()
+            .map(|path| ReportChange {
+                path: path.to_string_lossy().into_owned(),
+                action: "prune_target_registration".to_owned(),
+                safety: "safe".to_owned(),
+                outcome,
+            })
+            .collect();
+        Ok(simple_report(
+            paths.target_registry(),
+            mode,
+            changes,
+            diagnostics,
+        ))
+    }
+}
+
+fn registered_target_candidate(directory: &Path) -> Result<PathBuf, WorkflowError> {
+    if let Ok(target) = Target::select(directory) {
+        return target.root().canonicalize().map_err(fatal);
+    }
+    let absolute = if directory.is_absolute() {
+        directory.to_owned()
+    } else {
+        std::env::current_dir().map_err(fatal)?.join(directory)
+    };
+    Ok(absolute.canonicalize().unwrap_or(absolute))
+}
+
+fn inspect_registered_target(path: &Path) -> RegisteredTargetReport {
+    let mut diagnostics = Vec::new();
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return RegisteredTargetReport {
+                path: path.to_string_lossy().into_owned(),
+                status: "unavailable".to_owned(),
+                diagnostics,
+            };
+        }
+        Err(error) => {
+            diagnostics.push(error.to_string());
+            return RegisteredTargetReport {
+                path: path.to_string_lossy().into_owned(),
+                status: "uninspectable".to_owned(),
+                diagnostics,
+            };
+        }
+        Ok(_) => {}
+    }
+    let status = match Target::select(path) {
+        Ok(target) => match load_target_repository(&target, "Repository") {
+            Ok(LoadResult::Valid(_)) => "available",
+            Ok(LoadResult::Missing) => "unconfigured",
+            Ok(LoadResult::Unsupported { version, .. }) => {
+                diagnostics.push(format!(
+                    "unsupported Repository Configuration version {version}"
+                ));
+                "invalid"
+            }
+            Ok(LoadResult::Invalid { issues }) => {
+                diagnostics.push(format_issues("invalid Repository Configuration", &issues));
+                "invalid"
+            }
+            Err(error @ WorkflowError::InvalidInput { .. }) => {
+                diagnostics.push(error.to_string());
+                "invalid"
+            }
+            Err(error) => {
+                diagnostics.push(error.to_string());
+                "uninspectable"
+            }
+        },
+        Err(
+            crate::target::TargetError::Missing(_)
+            | crate::target::TargetError::NotDirectory(_)
+            | crate::target::TargetError::NotGit(_)
+            | crate::target::TargetError::Bare(_),
+        ) => "unavailable",
+        Err(error) => {
+            diagnostics.push(error.to_string());
+            "uninspectable"
+        }
+    };
+    RegisteredTargetReport {
+        path: path.to_string_lossy().into_owned(),
+        status: status.to_owned(),
+        diagnostics,
+    }
+}
+
+fn scope_enablements_report(
+    scope: &str,
+    target: &Target,
+    config: &RepositoryConfig,
+    library: &LibrarySnapshot,
+    mut diagnostics: Vec<ReportDiagnostic>,
+) -> ScopeEnablementsReport {
+    let observed = crate::target::observe(target, config, library);
+    let observations = observed.enablements().collect::<Vec<_>>();
+    let directories = config
+        .skill_directories()
+        .iter()
+        .map(|directory| {
+            let enablements = observations
+                .iter()
+                .filter(|observation| observation.enablement().directory() == directory.key())
+                .map(|observation| ScopeEnablementReport {
+                    source: observation.enablement().skill().source().to_string(),
+                    skill: observation.enablement().skill().path().to_string(),
+                    materialized_name: observation.expected_entry().map(str::to_owned),
+                    materialization: match observation.enablement().materialization() {
+                        MaterializationKind::Linked => "linked",
+                        MaterializationKind::Copied => "copied",
+                    }
+                    .to_owned(),
+                    resolution: if observation.unresolved() {
+                        "unresolved"
+                    } else {
+                        "resolved"
+                    }
+                    .to_owned(),
+                    observed_state: materialization_state_name(observation.state()).to_owned(),
+                    comparison: comparison_name(observation.comparison()).to_owned(),
+                })
+                .collect();
+            let directory_diagnostics = observed
+                .directories()
+                .iter()
+                .find(|observed| observed.key() == directory.key().as_str())
+                .map(|observed| observed.diagnostics().to_vec())
+                .unwrap_or_default();
+            ScopeDirectoryReport {
+                key: directory.key().to_string(),
+                path: directory.path().to_string(),
+                enablements,
+                diagnostics: directory_diagnostics,
+            }
+        })
+        .collect();
+    diagnostics.sort_by(|left, right| {
+        left.code
+            .cmp(&right.code)
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    ScopeEnablementsReport {
+        format_version: 1,
+        scope: scope.to_owned(),
+        root: target.root().to_string_lossy().into_owned(),
+        directories,
+        diagnostics,
+    }
+}
+
+fn materialization_state_name(state: &crate::target::MaterializationState) -> &'static str {
+    use crate::target::MaterializationState;
+    match state {
+        MaterializationState::Missing => "missing",
+        MaterializationState::CanonicalLink => "canonical_link",
+        MaterializationState::NoncanonicalLink => "noncanonical_link",
+        MaterializationState::BrokenLink => "broken_link",
+        MaterializationState::MisdirectedLink => "misdirected_link",
+        MaterializationState::EquivalentCopy => "equivalent_copy",
+        MaterializationState::DivergedCopy => "diverged_copy",
+        MaterializationState::CopyIneligible => "copy_ineligible",
+        MaterializationState::WrongKind => "wrong_kind",
+        MaterializationState::Uninspectable => "uninspectable",
+        MaterializationState::ExpectedEntryCollision => "expected_entry_collision",
+        MaterializationState::UnknownExpectedEntry => "unknown_expected_entry",
+    }
+}
+
+fn comparison_name(comparison: crate::target::Comparison) -> &'static str {
+    match comparison {
+        crate::target::Comparison::InSync => "in_sync",
+        crate::target::Comparison::Drifted => "drifted",
+        crate::target::Comparison::Unverifiable => "unverifiable",
+    }
+}
+
 fn annotate_selector(report: &mut CommandReport, selector: &SkillSelector) {
     report.diagnostics.push(ReportDiagnostic {
         code: "selected_skill".to_owned(),
@@ -752,6 +1106,21 @@ fn affected_enablement_diagnostics(
     original_library: &LibrarySnapshot,
     staged_library: &LibrarySnapshot,
 ) -> Vec<ReportDiagnostic> {
+    enablement_resolution_diagnostics(paths, Some(original_library), staged_library)
+}
+
+fn unresolved_enablement_diagnostics(
+    paths: &AppPaths,
+    staged_library: &LibrarySnapshot,
+) -> Vec<ReportDiagnostic> {
+    enablement_resolution_diagnostics(paths, None, staged_library)
+}
+
+fn enablement_resolution_diagnostics(
+    paths: &AppPaths,
+    original_library: Option<&LibrarySnapshot>,
+    staged_library: &LibrarySnapshot,
+) -> Vec<ReportDiagnostic> {
     let mut scopes = Vec::new();
     let mut diagnostics = Vec::new();
     if let Ok(LoadResult::Valid(loaded)) = load_repository(&paths.user_config()) {
@@ -760,8 +1129,13 @@ fn affected_enablement_diagnostics(
     match load_registry(paths) {
         Ok((registry, _)) => {
             for root in registry.targets() {
-                let config = root.join(LOCAL_TARGET_CONFIG);
-                match load_repository(&config) {
+                let loaded = Target::select(root)
+                    .map_err(|error| error.to_string())
+                    .and_then(|target| {
+                        load_target_repository(&target, "Repository")
+                            .map_err(|error| error.to_string())
+                    });
+                match loaded {
                     Ok(LoadResult::Valid(loaded)) => {
                         scopes.push((root.to_string_lossy().into_owned(), loaded.value().clone()));
                     }
@@ -789,16 +1163,23 @@ fn affected_enablement_diagnostics(
     }
     for (scope, config) in scopes {
         for enablement in config.enablements() {
-            if original_library.resolve(enablement.skill()).is_some()
-                && staged_library.resolve(enablement.skill()).is_none()
+            if staged_library.resolve(enablement.skill()).is_none()
+                && original_library
+                    .is_none_or(|library| library.resolve(enablement.skill()).is_some())
             {
+                let newly_unresolved = original_library.is_some();
                 diagnostics.push(ReportDiagnostic {
                     code: "enablement_will_be_unresolved".to_owned(),
                     severity: "warning".to_owned(),
                     message: format!(
-                        "Enablement `{}/{}` in `{scope}` will be unresolved",
+                        "Enablement `{}/{}` in `{scope}` {} unresolved",
                         enablement.skill().source(),
-                        enablement.skill().path()
+                        enablement.skill().path(),
+                        if newly_unresolved {
+                            "will be"
+                        } else {
+                            "remains"
+                        }
                     ),
                     data: Some(BTreeMap::from([
                         ("scope".to_owned(), scope.clone()),
@@ -1376,6 +1757,90 @@ impl LibraryWorkflow {
         ))
     }
 
+    pub fn prune_locations(
+        paths: &AppPaths,
+        mode: SyncMode,
+    ) -> Result<CommandReport, WorkflowError> {
+        let session = Self::load_cli(paths)?;
+        let original_snapshot = Self::snapshot(paths, &session.config);
+        let library_config_path = paths.library_config();
+        let config_parent = library_config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        let mut stale = Vec::new();
+        let mut diagnostics = Vec::new();
+        for (index, location) in session.config.locations().iter().enumerate() {
+            match classify_library_location(
+                location.path(),
+                config_parent,
+                paths.home(),
+                paths.environment(),
+            ) {
+                LibraryLocationState::Present => {}
+                LibraryLocationState::Stale => stale.push(index),
+                LibraryLocationState::Preserve(message) => {
+                    diagnostics.push(ReportDiagnostic {
+                        code: "library_location_preserved".to_owned(),
+                        severity: "warning".to_owned(),
+                        message,
+                        data: Some(BTreeMap::from([(
+                            "location".to_owned(),
+                            location.path().to_owned(),
+                        )])),
+                    });
+                }
+            }
+        }
+        if stale.is_empty() {
+            diagnostics.extend(library_diagnostics(&original_snapshot));
+            return Ok(simple_report(
+                paths.library_config(),
+                mode,
+                Vec::new(),
+                diagnostics,
+            ));
+        }
+        let staged_locations = session
+            .config
+            .locations()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !stale.contains(index))
+            .map(|(_, location)| location.clone())
+            .collect();
+        let staged = session
+            .config
+            .with_locations(staged_locations)
+            .map_err(|issues| WorkflowError::InvalidInput {
+                message: format_issues("invalid Library Configuration", &issues),
+            })?;
+        let staged_snapshot = Self::snapshot(paths, &staged);
+        diagnostics.extend(unresolved_enablement_diagnostics(paths, &staged_snapshot));
+        diagnostics.extend(library_diagnostics(&staged_snapshot));
+        let outcome = if mode == SyncMode::Check {
+            ReportOutcome::WouldApply
+        } else {
+            save_library(&paths.library_config(), &staged, &session.fingerprint)
+                .map_err(save_error)?;
+            ReportOutcome::Applied
+        };
+        let changes = stale
+            .into_iter()
+            .map(|index| ReportChange {
+                path: session.config.locations()[index].path().to_owned(),
+                action: "prune_library_location".to_owned(),
+                safety: "safe".to_owned(),
+                outcome,
+            })
+            .collect();
+        Ok(simple_report(
+            paths.library_config(),
+            mode,
+            changes,
+            diagnostics,
+        ))
+    }
+
     pub fn affected_references(
         _original: &LibraryConfig,
         _staged: &LibraryConfig,
@@ -1385,6 +1850,54 @@ impl LibraryWorkflow {
         // reference is resolved against the fresh Snapshot immediately before
         // Target planning, so there is no configuration-only removal set.
         Vec::new()
+    }
+}
+
+enum LibraryLocationState {
+    Present,
+    Stale,
+    Preserve(String),
+}
+
+fn classify_library_location(
+    expression: &str,
+    config_parent: &Path,
+    home: &Path,
+    environment: &BTreeMap<String, String>,
+) -> LibraryLocationState {
+    let path = match expand_location(expression, config_parent, home, environment) {
+        Ok(path) => path,
+        Err(message) => return LibraryLocationState::Preserve(message),
+    };
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return LibraryLocationState::Stale;
+        }
+        Err(error) => {
+            return LibraryLocationState::Preserve(format!(
+                "Library Location could not be inspected: {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return match path.canonicalize() {
+            Ok(resolved) if resolved.is_dir() => LibraryLocationState::Present,
+            Ok(_) => LibraryLocationState::Stale,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                LibraryLocationState::Stale
+            }
+            Err(error) => LibraryLocationState::Preserve(format!(
+                "Library Location could not be resolved: {}: {error}",
+                path.display()
+            )),
+        };
+    }
+    if metadata.is_dir() {
+        LibraryLocationState::Present
+    } else {
+        LibraryLocationState::Stale
     }
 }
 
@@ -1704,6 +2217,30 @@ impl TargetStatePlanner {
 }
 
 impl TargetWorkflow {
+    pub fn inspect(
+        paths: &AppPaths,
+        target_path: impl AsRef<Path>,
+    ) -> Result<ScopeEnablementsReport, WorkflowError> {
+        let session = Self::load(target_path)?;
+        if session.first_run {
+            return Err(WorkflowError::InvalidInput {
+                message: format!(
+                    "Repository Configuration is missing at {}; run `skillator init {}` first",
+                    session.target.root().join(LOCAL_TARGET_CONFIG).display(),
+                    session.target.root().display()
+                ),
+            });
+        }
+        let (library, diagnostics) = load_library_snapshot(paths)?;
+        Ok(scope_enablements_report(
+            "target",
+            &session.target,
+            &session.config,
+            &library,
+            diagnostics,
+        ))
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<TargetSession, WorkflowError> {
         let target =
             Target::select(path.as_ref()).map_err(|error| WorkflowError::InvalidInput {
@@ -2107,6 +2644,27 @@ impl PreparedUserScopeSave {
 }
 
 impl UserScopeWorkflow {
+    pub fn inspect(paths: &AppPaths) -> Result<ScopeEnablementsReport, WorkflowError> {
+        let session = Self::load(paths)?;
+        if session.first_run {
+            return Ok(ScopeEnablementsReport {
+                format_version: 1,
+                scope: "user".to_owned(),
+                root: session.target.root().to_string_lossy().into_owned(),
+                directories: Vec::new(),
+                diagnostics: Vec::new(),
+            });
+        }
+        let (library, diagnostics) = load_library_snapshot(paths)?;
+        Ok(scope_enablements_report(
+            "user",
+            &session.target,
+            &session.config,
+            &library,
+            diagnostics,
+        ))
+    }
+
     pub fn load(paths: &AppPaths) -> Result<UserScopeSession, WorkflowError> {
         let target = Target::user(paths.home()).map_err(|error| WorkflowError::InvalidInput {
             message: error.to_string(),
@@ -2292,6 +2850,15 @@ fn validate_target_config_path(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(fatal(error)),
     }
+}
+
+fn load_target_repository(
+    target: &Target,
+    scope: &str,
+) -> Result<LoadResult<RepositoryConfig>, WorkflowError> {
+    let config_path = target.root().join(LOCAL_TARGET_CONFIG);
+    validate_target_config_path(target, &config_path, scope)?;
+    load_repository(&config_path).map_err(fatal)
 }
 
 #[cfg(test)]

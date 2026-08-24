@@ -15,3 +15,13 @@
 - **WHEN** the Expected Entry is occupied by content that Skillator cannot prove it manages
 - **THEN** Skillator preserves the entry and blocks the mutation
 
+### Requirement: User Scope Enablements can be inspected without the TUI
+`skillator user list` SHALL list saved User Scope Enablements grouped by Skill Directory. Results SHALL include the directory key and path, canonical Source Key and Skill path, materialized name, requested `linked` or `copied` mode, current resolution state, and observed Materialization state or diagnostics. An absent User Scope Configuration SHALL produce a successful empty result without creating configuration.
+
+#### Scenario: List User Scope state
+- **WHEN** User Scope Configuration contains saved Enablements
+- **THEN** Skillator reports them in deterministic Skill Directory and Enablement order
+
+#### Scenario: User Scope is not initialized
+- **WHEN** User Scope Configuration is absent
+- **THEN** `user list` succeeds with an empty result and performs no write

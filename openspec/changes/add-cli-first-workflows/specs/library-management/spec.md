@@ -19,6 +19,25 @@
 - **WHEN** a Library Location is removed successfully
 - **THEN** Skillator leaves the Location directory and its contents unchanged
 
+### Requirement: Stale Library Locations can be pruned explicitly
+`skillator library prune` SHALL prepare one stale-checked update that removes every configured Library Location whose resolved path is definitively absent. It SHALL treat a missing path and a broken symbolic link as absent. It SHALL preserve Locations that exist or cannot be classified because of permission, I/O, or resolution errors, and SHALL report those diagnostics. Pruning SHALL modify only Library Configuration and MUST NOT delete filesystem content. It SHALL inspect User Scope and available registered Target Enablements against the post-prune Library Snapshot, preserve every Enablement, and report saved identities that remain unresolved after pruning. Skillator SHALL NOT claim which stale Location supplied an unresolved identity because Library inventory is discovered live.
+
+#### Scenario: Prune missing Locations
+- **WHEN** one or more configured Location paths are definitively absent
+- **THEN** Skillator removes those registrations in one configuration update and reports each pruned Location
+
+#### Scenario: Preserve an uninspectable Location
+- **WHEN** a configured Location cannot be inspected because of a permission or I/O error
+- **THEN** Skillator preserves the Location and reports why it could not determine whether the Location is stale
+
+#### Scenario: Prune reports unresolved Enablements
+- **WHEN** saved User Scope or registered Target Enablements remain unresolved after missing Locations are pruned
+- **THEN** Skillator preserves those Enablements and reports their scope and canonical Skill identity
+
+#### Scenario: No stale Locations
+- **WHEN** every configured Location exists or must be preserved
+- **THEN** Skillator reports `unchanged`
+
 ### Requirement: Live Library inventory has an optional Source filter
 `skillator library list [filter]` SHALL list discovered Skills grouped by Source. With no filter it SHALL include every discovered Source. A filter SHALL match Source Keys case-insensitively from the beginning, so `elastic`, `mattpocock`, and `elastic/agent-skills` can select the corresponding owner or complete Source Key. Filtering SHALL NOT search Skill names or descriptions. Results SHALL include canonical Source Key, Skill path, display name, validity, and relevant diagnostics in deterministic order.
 

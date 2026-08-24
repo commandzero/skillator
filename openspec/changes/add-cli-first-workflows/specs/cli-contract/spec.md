@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: The CLI exposes interactive defaults and explicit command groups
-Skillator SHALL expose top-level `init`, `library`, `target`, `user`, and `sync` commands. It SHALL NOT expose a top-level `worktree` command. Unqualified `skillator [DIRECTORY]` SHALL launch the Target TUI, and unqualified `skillator library` SHALL launch the Library TUI. `init`, `library add`, `library remove`, `library locations`, `library list`, `target link`, `target copy`, `target remove`, `user link`, `user copy`, and `user remove` SHALL run without an interactive terminal. `skillator sync target [directory]` SHALL run ordinary Target reconciliation. `skillator sync worktree [directory]` SHALL project primary-worktree Target state into a linked worktree. Both explicit sync forms SHALL default the directory to `.`.
+Skillator SHALL expose top-level `init`, `library`, `target`, `targets`, `user`, and `sync` commands. It SHALL NOT expose a top-level `worktree` command. Unqualified `skillator [DIRECTORY]` SHALL launch the Target TUI, and unqualified `skillator library` SHALL launch the Library TUI. `init`, `library add`, `library remove`, `library prune`, `library locations`, `library list`, `target list`, `target link`, `target copy`, `target remove`, `targets list`, `targets remove`, `targets prune`, `user list`, `user link`, `user copy`, and `user remove` SHALL run without an interactive terminal. `skillator sync target [directory]` SHALL run ordinary Target reconciliation. `skillator sync worktree [directory]` SHALL project primary-worktree Target state into a linked worktree. Both explicit sync forms SHALL default the directory to `.`.
 
 #### Scenario: Default root invocation
 - **WHEN** the user runs `skillator` in a Git worktree with interactive input and output
@@ -20,7 +20,7 @@ Skillator SHALL expose top-level `init`, `library`, `target`, `user`, and `sync`
 - **THEN** Skillator runs only the requested workflow against `.` and emits the selected report format
 
 #### Scenario: Bare sync discovers a linked worktree
-- **WHEN** the user runs `skillator sync` from a registered linked worktree
+- **WHEN** the user runs `skillator sync` from a linked worktree
 - **THEN** Skillator runs worktree synchronization
 
 #### Scenario: Bare sync discovers a Target
@@ -54,3 +54,21 @@ Every CLI-first mutation SHALL support `--check` and `--format <text|json|yaml>`
 #### Scenario: Guarded mutation without authorization
 - **WHEN** a CLI-first mutation plans a Guarded Change and the user did not pass `--force`
 - **THEN** Skillator reports that the change requires force and leaves the guarded state unchanged
+
+### Requirement: Read-only CLI reports are deterministic and scriptable
+`library locations`, `library list`, `target list`, `targets list`, and `user list` SHALL support `--format <text|json|yaml>`. Their machine formats SHALL be ANSI-free, encode the same logical value, and use deterministic ordering. Read-only commands SHALL NOT accept `--check` or modify configuration, registries, control files, or Materializations.
+
+#### Scenario: Inspect scope state as JSON
+- **WHEN** a user runs `skillator target list --format json`
+- **THEN** Skillator emits a deterministic versioned report without changing Target state
+
+### Requirement: Skillator composes with Git repository operations
+Skillator SHALL NOT provide commands that clone a remote repository or create, remove, or prune Git worktrees. Users and agents SHALL use Git for those operations, then use Skillator to register Library Locations, initialize Targets, synchronize linked worktrees, and clean Skillator registries.
+
+#### Scenario: Acquire a remote Skill source
+- **WHEN** an agent needs a remote Skills repository
+- **THEN** it runs `git clone` and then registers the resulting directory with `skillator library add`
+
+#### Scenario: Create a linked worktree
+- **WHEN** an agent needs a linked worktree
+- **THEN** it runs `git worktree add` and then runs `skillator sync worktree` in or against that worktree

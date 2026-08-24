@@ -21,6 +21,7 @@ The CLI report schema currently describes reconciliation only. CLI-first configu
 - Register individual Sources or Skills. Discovery remains live.
 - Add arbitrary Target Skill Directories in this first slice.
 - Delete a Library Location directory when unregistering it.
+- Clone remote repositories or create, remove, or prune Git worktrees.
 - Add migration aliases for alternate command spellings.
 
 ## Decisions
@@ -93,9 +94,27 @@ Repository tabs keep the repository root in the `Target:` header. User tabs show
 
 ### Put reconciliation workflows under sync
 
-`skillator sync target [directory]` and `skillator sync worktree [directory]` select a workflow explicitly. Bare `skillator sync` inspects `.` with Git. A registered linked worktree selects worktree synchronization; a primary worktree or ordinary checkout selects Target synchronization. Invalid directories then fail through the selected workflow's existing diagnostics. The old top-level `worktree` command is removed.
+`skillator sync target [directory]` and `skillator sync worktree [directory]` select a workflow explicitly. Bare `skillator sync` inspects `.` with Git. A linked worktree selects worktree synchronization; a primary worktree or ordinary checkout selects Target synchronization. Invalid directories then fail through the selected workflow's existing diagnostics. The old top-level `worktree` command is removed.
 
 Initialization moves to `skillator init [directory]`. Target Enablement mutations remain under `skillator target`, so the rename does not disturb canonical link, copy, and remove commands.
+
+### Compose with Git instead of wrapping repository operations
+
+Repository acquisition and worktree creation remain Git operations. An agent uses `git clone` before `library add` and `git worktree add` before `sync worktree`. Skillator starts where its own state begins: Library registration, Repository Configuration, Materializations, synchronization, and machine-local registries.
+
+Wrapping a subset of Git was rejected because it would duplicate mature path, branch, remote, and worktree semantics while still requiring users and agents to understand Git for the rest of the lifecycle.
+
+### Separate scope inspection from Target registry inspection
+
+Singular `target list [repository]` reports Enablements saved in one Repository Configuration, while `user list` reports saved User Scope Enablements. Plural `targets list` reports the machine-local registry of known worktrees and their availability. This keeps the existing `target` mutation group focused on one selected Target and gives registry maintenance an unambiguous namespace.
+
+The scope listings report declarations and their observed state. Target listing excludes inherited User Scope Skills and repository-owned physical Skills so automation can treat every row as an editable Repository Enablement.
+
+### Prune only registrations that are definitively stale
+
+`library prune` and `targets prune` are explicit, previewable mutations. They remove entries only when Skillator can prove the registered state no longer exists: a Library path is absent, or a Target path is absent, is no longer a Git worktree, or lacks Repository Configuration. Permission failures, I/O errors, and invalid configurations are preserved with diagnostics because they can represent repairable or temporarily unavailable state.
+
+Each prune uses one stale-checked atomic configuration update and never deletes filesystem content. Library pruning performs the same post-removal dependency inspection as an explicit Location removal. Target pruning changes only `targets.yaml`. `targets remove` remains the deliberate escape hatch for an entry that should be forgotten even when it is not classifiable as stale.
 
 ## Risks / Trade-offs
 
@@ -104,7 +123,8 @@ Initialization moves to `skillator init [directory]`. Target Enablement mutation
 - [First-mutation User Scope initialization can surprise callers] -> Include the new configuration in check output and create only the documented default directory with the requested Enablement.
 - [Machine report variants expand the public compatibility contract] -> Keep each report compact, version it, and test JSON and YAML logical equivalence plus deterministic order.
 - [Removing a Location can break resolution for many Enablements] -> Preserve every declaration and include affected unresolved identities in diagnostics.
-- [Registered paths become stale when checkouts move] -> Preserve missing entries as unavailable and report them; removal from the registry can follow with the Target switcher command set.
+- [A missing Location can be a temporarily detached mount] -> Require an explicit prune command, expose the complete removal set in `--check`, and preserve every path that cannot be classified as absent.
+- [Pruning Targets can remove useful history] -> Remove only provably stale entries, report each path and reason, and keep `targets remove` separate for intentional deregistration.
 
 ## Migration Plan
 

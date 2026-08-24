@@ -85,3 +85,12 @@
 - [x] 13.2 Nest explicit Target and worktree reconciliation under `sync`, remove top-level `worktree`, and dispatch bare `sync` from the current Git context.
 - [x] 13.3 Update help, README, agent guidance, diagnostics, and CLI coverage for the new command tree.
 - [x] 13.4 Rerun skill validation, formatting, tests, clippy, strict OpenSpec validation, and diff checks.
+
+## 14. Complete agent-managed Skill lifecycle
+
+- [x] 14.1 Add deterministic read-only `target list`, `user list`, and `targets list` application reports, renderers, clap routes, and coverage for empty, unresolved, invalid, and mixed-status state.
+- [x] 14.2 Add stale-checked `targets remove` and `targets prune` workflows that never delete worktree content, preserve uninspectable entries, and cover check, apply, idempotency, and stale-write behavior.
+- [x] 14.3 Add a stale-checked `library prune` workflow that removes only definitively absent Locations, performs dependency inspection, preserves uninspectable Locations and every Enablement, and covers deterministic reports and atomic multi-removal.
+- [x] 14.4 Register a linked-worktree destination after successful worktree synchronization, report planned registration in check mode, and cover failure and rollback boundaries.
+- [x] 14.5 Update command help, README examples, and the project-owned agent skill to compose `git clone` and `git worktree add` with the new inspection, synchronization, and pruning commands.
+- [x] 14.6 Run skill validation, formatting, the full test suite, clippy with warnings denied, strict OpenSpec validation, command-help snapshots, and diff checks.

@@ -48,6 +48,10 @@ skillator library
 # Register a Library Location without activating its Skills.
 skillator library add ~/Development/agent-skills
 
+# Clone with Git, then register the local repository with Skillator.
+git clone https://github.com/elastic/agent-skills.git ~/Development/elastic-agent-skills
+skillator library add ~/Development/elastic-agent-skills
+
 # List discovered Skills from matching Sources.
 skillator library list elastic
 
@@ -57,6 +61,10 @@ skillator library locations
 # Unregister a Location without deleting it.
 skillator library remove ~/Development/agent-skills
 
+# Preview and remove registrations for Library directories that no longer exist.
+skillator library prune --check
+skillator library prune
+
 # Initialize clone-local Target state with no enabled Skills.
 skillator init
 
@@ -64,9 +72,21 @@ skillator init
 skillator target link elastic/agent-skills:skills/esdiag --check
 skillator target link elastic/agent-skills:skills/esdiag
 
+# Inspect saved Target Enablements and their observed state.
+skillator target list
+
 # Copy or remove a User Scope Skill.
 skillator user copy local/library:release-checklist
 skillator user remove local/library:release-checklist
+
+# Inspect User Scope Enablements.
+skillator user list
+
+# Inspect registered Targets, forget one, or clean stale registrations.
+skillator targets list
+skillator targets remove /path/to/old-worktree
+skillator targets prune --check
+skillator targets prune
 
 # Preview filesystem work without writing anything.
 skillator sync --check
@@ -85,9 +105,13 @@ skillator sync worktree
 
 # Preview the projection without writing.
 skillator sync worktree --check
+
+# Git creates linked worktrees; Skillator synchronizes and registers them.
+git worktree add ../feature-worktree -b feature
+skillator sync worktree ../feature-worktree
 ```
 
-Bare `sync` inspects the current Git context. It runs worktree synchronization from a registered linked worktree and Target synchronization everywhere else. Use `sync target [directory]` or `sync worktree [directory]` to select the workflow explicitly. Both default to `.`.
+Bare `sync` inspects the current Git context. It runs worktree synchronization from a linked worktree and Target synchronization everywhere else. Use `sync target [directory]` or `sync worktree [directory]` to select the workflow explicitly. Both default to `.`.
 
 Sync reads existing configuration. It does not create a Library, create repository configuration, or add skills to either one. Use `init`, the explicit `library`, `target`, and `user` commands, or the TUI for those jobs. Worktree sync reads the primary worktree's local configuration and reconciles the current linked worktree using this machine's Library. It never changes the primary worktree or synchronizes Library settings.
 
@@ -103,7 +127,7 @@ Repository-owned skills that Skillator does not manage are allowed and remain or
 
 Library configuration is local to your machine at `~/.skillator/library.yaml`. It records Library locations, not a fixed inventory. Skillator discovers added, removed, and renamed skills whenever it scans those locations.
 
-Configured Target worktrees are registered at `~/.skillator/targets.yaml`. Successful Target initialization, CLI mutations, and TUI saves add the canonical worktree path. Skillator uses the registry to report which known Enablements will become unresolved when a Library Location is removed. Missing worktrees remain registered and are reported as unavailable.
+Configured Target worktrees are registered at `~/.skillator/targets.yaml`. Successful Target initialization, CLI mutations, TUI saves, and worktree synchronization add the canonical worktree path. Skillator uses the registry to report which known Enablements will become unresolved when a Library Location is removed. Missing worktrees remain visible until `targets remove` or `targets prune` forgets them.
 
 Repository configuration is clone-local at `.agents/skillator.yaml` and is ignored by the generated `.agents/.gitignore`. Skillator does not edit the repository root `.gitignore`. A typical parent control file is:
 
