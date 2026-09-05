@@ -1,28 +1,32 @@
 ---
 name: skillator
-description: Manage Skillator Library Locations, registered Targets, and Target or User Scope Skill Enablements when a task requires acquiring, inspecting, linking, copying, removing, pruning, or synchronizing local agent skills.
+description: Manage local agent skills with Skillator. Use when registering skill libraries, choosing project or user skills, syncing worktrees, or cleaning library and worktree registrations.
 ---
 
 # Skillator
 
-Use the installed executable's `--help` output as the command reference.
+Read `skillator --help` and the relevant subcommand's help for the installed version's syntax and options.
 
 ## Workflow
 
-1. Inspect the relevant command help. Use Git to clone a remote Skills repository, then preview and apply its Library registration. Skillator does not wrap `git clone`.
-2. Resolve the requested Skill with `skillator library list [filter] --format json`. Continue once one canonical Source Key and Skill path identify it. If the results are ambiguous, present the candidates and wait for a choice.
-3. Inspect saved and observed state with `target list`, `user list`, `targets list`, or `library locations`. Run `skillator init --check` only when Repository Configuration is absent. Continue once the intended scope, Target Repository, and Skill Directory are explicit.
-4. Preview the exact mutation with `--check --format json`. Continue only when the report contains no Blocked Change or Recovery Required state.
-5. If the preview requires `--force`, report the affected path and reason and wait for explicit authorization. Authorization to manage a Skill does not imply authorization to replace diverged or unmanaged content.
-6. Apply the same command without `--check`. Add `--force` only after the preceding authorization.
-7. Run the corresponding list or check command. Finish when saved and observed state match the request, or report the remaining diagnostics and preserve recoverable content.
+1. Inspect the requested scope using `target list`, `user list`, `targets list`, or `library locations`. Resolve the project path and skill folder from the request and current directory. Use `user` only for account-wide changes. For inspection requests, report the findings and finish here.
+2. For a skill change, find its source key and source-relative path with `skillator library list [filter] --format json`. Use those fields as its selector. If multiple results still fit the request, ask the user to choose. For a project missing configuration, preview and apply `skillator init` before changing skills.
+3. Preview each change with `--check --format json`. Account for every affected path. If a change is blocked or needs recovery, resolve the reported cause before applying it. When `--force` is required, proceed only if the user has authorized replacing or removing the affected content; otherwise ask with the path and reason.
+4. Apply the previewed command without `--check`, keeping the same scope and selector. Add `--force` only when step 3 permits it.
+5. Verify with the corresponding list or check command. Finish when saved choices and installed skills match the request. Report any remaining mismatch and its affected path.
 
-## Decisions
+## Linking and copying
 
-- Prefer `link` when edits in the Library should appear immediately in the active Skill.
-- Use `copy` when the active Skill must remain an independent snapshot. Treat later divergence as ambiguous ownership, not automatic permission to replace it.
-- A canonical selector is the Source Key and Source-relative Skill path shown by Library JSON output. Display names and directory basenames are not identities.
-- Removing a Library Location unregisters the path. It does not delete its directory or remove saved Enablements.
-- Preview Library or Target registry pruning and report every path Skillator would forget. Prune changes configuration only; it never deletes repository or Library content.
-- Use `git worktree add` to create a linked worktree, then preview and apply `skillator sync worktree` against it. Verify that `targets list` contains the destination.
-- User Scope changes affect machine-local agent sessions. Target changes affect one selected Git worktree.
+Prefer `link` so library edits appear immediately. Use `copy` when the user wants an independent snapshot. Preserve edits to a copied skill unless replacing them is authorized.
+
+## Library and registry changes
+
+For a remote collection, clone it with Git, then register its local folder with `library add`. Registration makes skills available for selection; linking or copying activates them.
+
+Removing a library folder unregisters it and leaves its files and saved skill choices in place. Report any choices that will lose their source. When pruning library or worktree registrations, review every path the preview would forget. Verify the resulting registrations with `library locations` or `targets list`.
+
+## Worktree sync
+
+Use Git to create a linked worktree when requested. Preview and apply `skillator sync worktree` for that destination, then verify its skills and its entry in `targets list`.
+
+Worktree sync uses the primary worktree's choices and this machine's library. Use `sync target` when the intent is to apply a checkout's own saved choices. Sync reads existing settings; use the setup and selection commands when those settings need to change.

@@ -3,6 +3,10 @@ name = "skillator"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
+description = "A terminal UI and CLI for managing agent skills across Git repositories"
+repository = "https://github.com/commandzero/skillator"
+license = "MIT"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
