@@ -6,7 +6,13 @@ Keep your skills in library folders. Skillator finds directories containing `SKI
 
 ## Install
 
-Requires Rust 1.97 or newer. From this checkout:
+Requires Rust 1.97 or newer. Install the published crate with:
+
+```sh
+cargo install skillator --locked
+```
+
+To install the current checkout instead:
 
 ```sh
 cargo install --path . --locked
