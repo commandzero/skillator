@@ -69,13 +69,13 @@ pub enum LoadError {
 pub enum RenderError {
     #[error("cannot encode YAML string: {0}")]
     String(#[from] serde_json::Error),
-    #[error("Skill name `{skill}` appears more than once in target `{target}")]
+    #[error("Skill name `{skill}` appears more than once in skill folder `{target}`")]
     DuplicateTargetSkill { target: String, skill: String },
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum SaveError {
-    #[error("configuration changed since it was loaded")]
+    #[error("Configuration changed since it was loaded; reopen it and try again")]
     Stale,
     #[error("cannot save configuration: {0}")]
     Io(#[from] std::io::Error),
@@ -1265,7 +1265,7 @@ fn validate_repository(config: &RepositoryConfig) -> Vec<ConfigIssue> {
         if !keys.insert(directory.key.as_str()) {
             issues.push(ConfigIssue {
                 path: "skill_directories".to_owned(),
-                message: format!("duplicate Skill Directory Key `{}`", directory.key),
+                message: format!("duplicate skill folder key `{}`", directory.key),
             });
         }
         let path = directory.path.as_str();
@@ -1273,7 +1273,7 @@ fn validate_repository(config: &RepositoryConfig) -> Vec<ConfigIssue> {
             issues.push(ConfigIssue {
                 path: format!("skill_directories.{}", directory.key),
                 message:
-                    "Skill Directory must be nested so its generated control file does not replace the repository root .gitignore"
+                    "Use a nested skill folder such as .agents/skills so Skillator does not replace the repository root .gitignore"
                         .to_owned(),
             });
         }
@@ -1285,7 +1285,7 @@ fn validate_repository(config: &RepositoryConfig) -> Vec<ConfigIssue> {
         {
             issues.push(ConfigIssue {
                 path: format!("skill_directories.{}", directory.key),
-                message: "Skill Directory overlaps a protected path".to_owned(),
+                message: "skill folder overlaps a protected path".to_owned(),
             });
         }
     }
@@ -1304,7 +1304,7 @@ fn validate_repository(config: &RepositoryConfig) -> Vec<ConfigIssue> {
         if !keys.contains(enablement.directory().as_str()) {
             issues.push(ConfigIssue {
                 path: "enablements.directory".to_owned(),
-                message: format!("unknown Skill Directory `{}`", enablement.directory()),
+                message: format!("unknown skill folder `{}`", enablement.directory()),
             });
         }
         let identity = (
@@ -1315,7 +1315,7 @@ fn validate_repository(config: &RepositoryConfig) -> Vec<ConfigIssue> {
         if !relationships.insert(identity) {
             issues.push(ConfigIssue {
                 path: "enablements".to_owned(),
-                message: "duplicate Enablement".to_owned(),
+                message: "skill is enabled more than once in the same folder".to_owned(),
             });
         }
     }
@@ -1346,7 +1346,7 @@ fn convert_library(raw: RawLibrary) -> Result<LibraryConfig, Vec<ConfigIssue>> {
         if raw.path.trim().is_empty() {
             issues.push(ConfigIssue {
                 path: format!("locations[{location_index}].path"),
-                message: "Location path cannot be empty".to_owned(),
+                message: "Folder path cannot be empty".to_owned(),
             });
         }
         // `sources` is accepted as legacy input so development builds can open
@@ -1516,7 +1516,7 @@ fn conditional_save_with(
                 Err(SaveError::Stale)
             } else {
                 Err(SaveError::Io(std::io::Error::other(format!(
-                    "configuration changed during save and atomic rollback failed; preserve and recover {}",
+                    "Configuration changed during saving and could not be restored; recover it from {}",
                     stage.display()
                 ))))
             };

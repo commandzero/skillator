@@ -246,7 +246,7 @@ pub fn scan_library(
                 });
                 snapshot.diagnostics.push(LibraryDiagnostic {
                     code: "location_unavailable",
-                    message: format!("Library Location is unavailable: {}", expanded.display()),
+                    message: format!("library folder is unavailable: {}", expanded.display()),
                     path: Some(expanded),
                 });
                 continue;
@@ -262,9 +262,9 @@ pub fn scan_library(
                         "overlapping_locations"
                     },
                     message: format!(
-                        "Library Locations overlap{}: {} and {}",
+                        "library folders overlap{}: {} and {}",
                         if allowed {
-                            " with explicit authorization"
+                            " as allowed in the configuration"
                         } else {
                             ""
                         },
@@ -555,19 +555,19 @@ fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
         Ok(metadata) => {
             let basename = directory.file_name().and_then(OsStr::to_str);
             if !valid_skill_name(&metadata.name) {
-                diagnostics.push("frontmatter name is not specification-valid".to_owned());
+                diagnostics.push("SKILL.md name must be 1 to 64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen".to_owned());
             }
             if !relative.as_os_str().is_empty()
                 && relative != Path::new(".")
                 && basename != Some(metadata.name.as_str())
             {
                 diagnostics.push(format!(
-                    "frontmatter name `{}` does not match directory",
+                    "SKILL.md name `{}` does not match directory",
                     metadata.name
                 ));
             }
             if metadata.description.trim().is_empty() {
-                diagnostics.push("frontmatter description is empty".to_owned());
+                diagnostics.push("SKILL.md description is empty".to_owned());
             }
             LibrarySkill {
                 path,
@@ -602,7 +602,7 @@ fn parse_frontmatter(bytes: &[u8]) -> Result<SkillFrontmatter, String> {
         std::str::from_utf8(bytes).map_err(|error| format!("SKILL.md is not UTF-8: {error}"))?;
     let mut lines = text.lines();
     if lines.next() != Some("---") {
-        return Err("SKILL.md has no YAML frontmatter".to_owned());
+        return Err("SKILL.md must start with YAML metadata between --- lines".to_owned());
     }
     let mut yaml = String::new();
     let mut closed = false;
@@ -615,7 +615,7 @@ fn parse_frontmatter(bytes: &[u8]) -> Result<SkillFrontmatter, String> {
         yaml.push('\n');
     }
     if !closed {
-        return Err("SKILL.md frontmatter is not closed".to_owned());
+        return Err("SKILL.md metadata is missing its closing --- line".to_owned());
     }
     serde_saphyr::from_str(&yaml).map_err(|error| error.to_string())
 }
@@ -664,7 +664,7 @@ fn insert_discovered_source(
     if snapshot.sources.contains_key(&key_text) {
         snapshot.diagnostics.push(LibraryDiagnostic {
             code: "source_key_collision",
-            message: format!("suggested Source Key `{suggested}` collides"),
+            message: format!("More than one source uses the name `{suggested}`"),
             path: Some(source.root.clone()),
         });
         let inventory_key = format!(

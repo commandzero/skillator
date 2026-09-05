@@ -11,15 +11,15 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TargetError {
-    #[error("Target does not exist: {0}")]
+    #[error("Directory does not exist: {0}")]
     Missing(PathBuf),
-    #[error("Target is not a directory: {0}")]
+    #[error("Path is not a directory: {0}")]
     NotDirectory(PathBuf),
-    #[error("Target is not in a Git worktree: {0}")]
+    #[error("Directory is not in a Git worktree: {0}")]
     NotGit(PathBuf),
-    #[error("Target is a bare Git repository: {0}")]
+    #[error("Directory is a bare Git repository; use a working checkout: {0}")]
     Bare(PathBuf),
-    #[error("cannot inspect Target: {0}")]
+    #[error("Cannot inspect the directory: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Git(#[from] GitError),
@@ -91,6 +91,34 @@ pub enum MaterializationState {
     Uninspectable,
     ExpectedEntryCollision,
     UnknownExpectedEntry,
+}
+
+impl MaterializationState {
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Missing => "Skill link or copy is missing",
+            Self::CanonicalLink | Self::EquivalentCopy => "Up to date",
+            Self::NoncanonicalLink => "Link needs updating",
+            Self::BrokenLink => "Link destination is missing",
+            Self::MisdirectedLink => "Link points to a different skill",
+            Self::DivergedCopy => "Local copy differs from the library",
+            Self::CopyIneligible => "Skill contains files or links that cannot be copied safely",
+            Self::WrongKind => "An existing file or folder is in the way",
+            Self::Uninspectable => "Cannot read the skill files",
+            Self::ExpectedEntryCollision => "Multiple skills use the same destination name",
+            Self::UnknownExpectedEntry => "Cannot determine the skill's destination name",
+        }
+    }
+}
+
+impl Comparison {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::InSync => "Up to date",
+            Self::Drifted => "Changes still needed",
+            Self::Unverifiable => "Cannot verify the files",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -471,7 +499,7 @@ pub fn observe_with_repository_skills(
                     .any(|expected| expected.eq_ignore_ascii_case(name))
                 {
                     diagnostics.push(format!(
-                        "entry `{name}` differs from an Expected Entry only by case"
+                        "entry `{name}` differs from a configured skill name only by letter case"
                     ));
                 }
                 if fs::symlink_metadata(child)
@@ -486,7 +514,7 @@ pub fn observe_with_repository_skills(
                 {
                     duplicate_entries.push(child.clone());
                     diagnostics.push(format!(
-                        "possible Duplicate Materialization at {}",
+                        "The same skill may be installed twice: {}",
                         child.display()
                     ));
                 }
@@ -522,35 +550,35 @@ pub fn observe_with_repository_skills(
         match control_file {
             ControlFileState::Missing if root_state == RootState::Absent => {}
             ControlFileState::Missing => diagnostics.push(format!(
-                "Skill Directory Control File is missing at {}; save to create it",
+                ".gitignore is missing at {}; save to create it",
                 control_relative.display()
             )),
             ControlFileState::PrefixRequired => diagnostics.push(format!(
-                "Skill Directory Control File needs Skillator's generated prefix at {}; save to add it without replacing existing rules",
+                ".gitignore needs Skillator's rules at {}; save to add them and keep existing rules",
                 control_relative.display()
             )),
             ControlFileState::Modified => diagnostics.push(format!(
-                "Skill Directory Control File differs from Skillator's required content at {}; save to review replacement",
+                ".gitignore has different contents at {}; save to review replacing the entire file",
                 control_relative.display()
             )),
             ControlFileState::WrongKind => diagnostics.push(format!(
-                "Skill Directory Control File path is not a regular file: {}",
+                ".gitignore must be a regular file, not a directory or link: {}",
                 control_relative.display()
             )),
             ControlFileState::Uninspectable => diagnostics.push(format!(
-                "Skill Directory Control File cannot be read: {}",
+                "Cannot read .gitignore: {}",
                 control_relative.display()
             )),
             ControlFileState::Canonical | ControlFileState::NotRequired => {}
         }
         if control_file == ControlFileState::Canonical && !control_ignored {
             diagnostics.push(format!(
-                "local Skillator control file is not ignored by the repository root: {}",
+                "The repository's root .gitignore does not ignore this file: {}",
                 control_relative.display(),
             ));
         }
         if control_file == ControlFileState::Canonical && !generated_ignored {
-            diagnostics.push("generated entries are not effectively Git-ignored".to_owned());
+            diagnostics.push("Generated skill files are not ignored by Git".to_owned());
         }
         let compatible_agents = compatibility(directory.path().as_str());
         for other in config.skill_directories() {
@@ -568,7 +596,7 @@ pub fn observe_with_repository_skills(
             });
             if overlap && shared_skill {
                 diagnostics.push(format!(
-                    "agent compatibility overlaps with Skill Directory `{}`",
+                    "The same agents also read skills from `{}`",
                     other.key()
                 ));
             }
@@ -761,7 +789,7 @@ fn read_children_stable_with(
     if first == second {
         Ok(first)
     } else {
-        Err("Skill Directory changed while it was inspected".to_owned())
+        Err("skill folder changed while it was inspected".to_owned())
     }
 }
 
@@ -979,7 +1007,7 @@ mod tests {
         let result = read_children_stable_with(|| Ok(scans.next().expect("two scans")));
         assert_eq!(
             result.unwrap_err(),
-            "Skill Directory changed while it was inspected"
+            "skill folder changed while it was inspected"
         );
     }
 

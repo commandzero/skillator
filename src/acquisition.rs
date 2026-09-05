@@ -1,4 +1,4 @@
-//! Transactional acquisition of Skills into the writable local Library.
+//! Transactional acquisition of Skills into the writable local library.
 
 use crate::fs_safety::rename_noreplace;
 use crate::library::validated_skill_name_at;
@@ -67,9 +67,9 @@ impl LibraryAcquisition {
 pub enum AcquisitionError {
     #[error("{0}")]
     Invalid(String),
-    #[error("Library acquisition failed: {0}")]
+    #[error("Could not add skills to the library: {0}")]
     Failed(String),
-    #[error("Library acquisition rollback requires manual recovery: {0}")]
+    #[error("Adding skills failed and could not be undone; restore these files manually: {0}")]
     RecoveryRequired(String),
 }
 
@@ -96,7 +96,7 @@ impl PreparedAcquisitions {
         let metadata = fs::symlink_metadata(local_root).map_err(failed)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err(AcquisitionError::Invalid(format!(
-                "local Library must be a physical directory: {}",
+                "local library must be a directory, not a link: {}",
                 local_root.display()
             )));
         }
@@ -107,14 +107,14 @@ impl PreparedAcquisitions {
             if !names.insert(request.name.clone()) {
                 cleanup_items(&items)?;
                 return Err(AcquisitionError::Invalid(format!(
-                    "multiple acquisitions use local Library name `{}`",
+                    "More than one skill would use the library name `{}`",
                     request.name
                 )));
             }
             if request.source_root_git_skill {
                 cleanup_items(&items)?;
                 return Err(AcquisitionError::Invalid(format!(
-                    "Source-root Git Skill `{}` cannot be acquired as one Skill directory",
+                    "Skill `{}` is at a Git repository root and cannot be imported as a single folder",
                     request.name
                 )));
             }
@@ -122,7 +122,7 @@ impl PreparedAcquisitions {
             if source.starts_with(&local_root) {
                 cleanup_items(&items)?;
                 return Err(AcquisitionError::Invalid(format!(
-                    "Skill is already inside the local Library: {}",
+                    "Skill is already inside the local library: {}",
                     source.display()
                 )));
             }
@@ -137,7 +137,7 @@ impl PreparedAcquisitions {
             if fs::symlink_metadata(&destination).is_ok() {
                 cleanup_items(&items)?;
                 return Err(AcquisitionError::Invalid(format!(
-                    "local Library destination already exists: {}",
+                    "local library destination already exists: {}",
                     destination.display()
                 )));
             }
@@ -150,7 +150,9 @@ impl PreparedAcquisitions {
                             if equal {
                                 Ok(())
                             } else {
-                                Err(io::Error::other("staged tree differs from Source"))
+                                Err(io::Error::other(
+                                    "The temporary copy does not match the source",
+                                ))
                             }
                         })
                 }
@@ -266,26 +268,26 @@ fn publish_item(item: &mut PreparedItem) -> Result<(), AcquisitionError> {
     if validated_skill_name_at(&item.request.source).as_deref() != Some(item.request.name.as_str())
     {
         return Err(AcquisitionError::Invalid(format!(
-            "Skill changed before acquisition: {}",
+            "The skill changed before it could be added; refresh and retry: {}",
             item.request.source.display()
         )));
     }
     if fs::symlink_metadata(&item.destination).is_ok() {
         return Err(AcquisitionError::Invalid(format!(
-            "local Library destination appeared during acquisition: {}",
+            "The destination was created by another process: {}",
             item.destination.display()
         )));
     }
     if item.request.mode == LibraryAcquisitionMode::Move {
         let parent = item.request.source.parent().ok_or_else(|| {
-            AcquisitionError::Invalid("Skill Source has no parent directory".to_owned())
+            AcquisitionError::Invalid("The source skill has no parent folder".to_owned())
         })?;
         let backup = artifact_path(parent, "backup", &item.request.name);
         rename_noreplace(&item.request.source, &backup).map_err(failed)?;
         item.backup = Some(backup.clone());
         if !trees_equal(&backup, &item.stage).map_err(failed)? {
             return Err(AcquisitionError::Failed(format!(
-                "Skill changed during acquisition: {}",
+                "The skill changed while it was being added; refresh and retry: {}",
                 item.request.source.display()
             )));
         }

@@ -31,7 +31,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Add skill sources and choose which skills appear in Target.
+    /// Choose which skills are available in your library.
     Library {
         #[command(subcommand)]
         command: Option<LibraryCommand>,
@@ -164,10 +164,10 @@ struct UserMutationArgs {
 
 #[derive(Debug, clap::Args)]
 struct OutputArgs {
-    /// Choose the output format.
+    /// Choose text, JSON, or YAML output.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
-    /// Control color in text output.
+    /// Choose when to use color in text output.
     #[arg(long, value_enum)]
     color: Option<ColorPolicy>,
 }
@@ -186,7 +186,7 @@ struct GuardedMutationOutputArgs {
     /// Show what would change without writing files.
     #[arg(long, conflicts_with = "force")]
     check: bool,
-    /// Allow replacement of files Skillator would otherwise preserve.
+    /// Allow replacing or removing existing files. Review with --check first.
     #[arg(long)]
     force: bool,
     #[command(flatten)]
@@ -223,13 +223,13 @@ struct SyncOutputArgs {
     /// Show what would change without writing files.
     #[arg(long, conflicts_with = "force")]
     check: bool,
-    /// Allow replacement of files Skillator would otherwise preserve.
+    /// Allow replacing or removing existing files. Review with --check first.
     #[arg(long)]
     force: bool,
-    /// Choose the output format.
+    /// Choose text, JSON, or YAML output.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
-    /// Control color in text output.
+    /// Choose when to use color in text output.
     #[arg(long, value_enum)]
     color: Option<ColorPolicy>,
 }
@@ -301,7 +301,7 @@ pub fn run() -> ExitCode {
             if !interactive_terminal() {
                 return diagnostic(
                     3,
-                    "skillator requires an interactive terminal for the Target TUI",
+                    "Open skillator in an interactive terminal, or use `skillator sync`",
                 );
             }
             let directory = cli.directory.unwrap_or_else(|| PathBuf::from("."));
@@ -812,28 +812,37 @@ pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
     }
     for change in &report.changes {
         let marker = match change.outcome {
-            crate::app::ReportOutcome::WouldApply => "would_apply",
-            crate::app::ReportOutcome::WouldRequireForce => "would_require_force",
-            crate::app::ReportOutcome::Applied => "applied",
-            crate::app::ReportOutcome::NotAuthorized => "not_authorized",
-            crate::app::ReportOutcome::Blocked => "blocked",
-            crate::app::ReportOutcome::Failed => "failed",
-            crate::app::ReportOutcome::RolledBack => "rolled_back",
-            crate::app::ReportOutcome::RecoveryRequired => "recovery_required",
+            crate::app::ReportOutcome::WouldApply => "Would change",
+            crate::app::ReportOutcome::WouldRequireForce => "Needs --force",
+            crate::app::ReportOutcome::Applied => "Saved",
+            crate::app::ReportOutcome::NotAuthorized => "Skipped: needs confirmation",
+            crate::app::ReportOutcome::Blocked => "Cannot change",
+            crate::app::ReportOutcome::Failed => "Failed",
+            crate::app::ReportOutcome::RolledBack => "Failed; original restored",
+            crate::app::ReportOutcome::RecoveryRequired => "Manual recovery needed",
+        };
+        let action = match change.action.as_str() {
+            "create_directory" => "create folder",
+            "write_control_file" => "write .gitignore",
+            "link" => "create link",
+            "copy" => "copy skill",
+            "replace" => "replace existing file or folder",
+            "remove_unmanaged" => "remove disabled skill",
+            "track_control_file" => "check .gitignore tracking",
+            "recover" => "recover interrupted save",
+            "write_target_configuration" => "save skill settings",
+            "write_root_ignore" => "update root .gitignore",
+            other => other,
         };
         if color {
             output.push_str(&format!(
-                "{} {} ({}, {})\n",
+                "{}: {} ({})\n",
                 marker.cyan(),
                 change.path,
-                change.action,
-                change.safety
+                action
             ));
         } else {
-            output.push_str(&format!(
-                "{marker} {} ({}, {})\n",
-                change.path, change.action, change.safety
-            ));
+            output.push_str(&format!("{marker}: {} ({action})\n", change.path));
         }
     }
     for diagnostic in &report.diagnostics {

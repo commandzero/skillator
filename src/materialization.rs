@@ -58,13 +58,13 @@ pub(crate) enum CopyError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("internal symlink `{path}` is absolute")]
+    #[error("cannot copy link `{path}`: use a relative path within the skill folder")]
     AbsoluteSymlink { path: PathBuf },
-    #[error("internal symlink `{path}` escapes the Skill tree")]
+    #[error("cannot copy link `{path}`: it points outside the skill folder")]
     EscapingSymlink { path: PathBuf },
-    #[error("internal symlink `{path}` is broken, cyclic, or inaccessible")]
+    #[error("cannot copy link `{path}`: its destination is missing, unreadable, or forms a loop")]
     UnresolvedSymlink { path: PathBuf },
-    #[error("unsupported filesystem entry `{path}`")]
+    #[error("cannot copy `{path}`: only regular files, folders, and links are supported")]
     Unsupported { path: PathBuf },
 }
 

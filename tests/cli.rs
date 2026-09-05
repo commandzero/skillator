@@ -172,7 +172,7 @@ fn root_non_tty_and_missing_repository_configuration_use_stable_errors() {
         .code(3)
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains(
-            "Repository Configuration is missing",
+            "repository configuration is missing",
         ));
 }
 
@@ -334,7 +334,7 @@ fn bare_sync_discovers_linked_worktrees_and_explicit_target_overrides_it() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains(
-            "cannot read primary Target configuration",
+            "cannot read primary worktree configuration",
         ));
 
     Command::cargo_bin("skillator")
@@ -730,10 +730,10 @@ fn registered_target_inspection_does_not_follow_repository_config_symlinks() {
         .success()
         .stdout(predicate::str::contains("\"status\": \"invalid\""))
         .stdout(predicate::str::contains(
-            "Repository Configuration must be a physical file",
+            "Repository configuration must be a regular file, not a link",
         ))
         .stdout(predicate::str::contains(
-            "Repository Configuration parent must be a physical directory",
+            "Repository configuration parent must be a directory, not a link",
         ));
 
     Command::cargo_bin("skillator")
@@ -758,10 +758,10 @@ fn registered_target_inspection_does_not_follow_repository_config_symlinks() {
         .code(1)
         .stdout(predicate::str::contains("registered_target_unavailable"))
         .stdout(predicate::str::contains(
-            "Repository Configuration must be a physical file",
+            "Repository configuration must be a regular file, not a link",
         ))
         .stdout(predicate::str::contains(
-            "Repository Configuration parent must be a physical directory",
+            "Repository configuration parent must be a directory, not a link",
         ));
 }
 
@@ -813,6 +813,64 @@ fn library_prune_removes_missing_locations_and_preserves_unresolved_expressions(
     assert!(!pruned.contains(broken.to_string_lossy().as_ref()));
     assert!(pruned.contains("${DETACHED_LIBRARY}"));
     assert!(fixture.target.join(".agents/skillator.yaml").is_file());
+}
+
+#[test]
+fn text_reports_translate_internal_statuses_without_changing_machine_fields() {
+    use skillator::app::{CommandReport, ReportChange, ReportOutcome, ReportStatus};
+    use skillator::cli::{ColorPolicy, render_text};
+
+    let outcomes = [
+        (ReportOutcome::WouldApply, "Would change"),
+        (ReportOutcome::WouldRequireForce, "Needs --force"),
+        (ReportOutcome::Applied, "Saved"),
+        (ReportOutcome::NotAuthorized, "Skipped: needs confirmation"),
+        (ReportOutcome::Blocked, "Cannot change"),
+        (ReportOutcome::Failed, "Failed"),
+        (ReportOutcome::RolledBack, "Failed; original restored"),
+        (ReportOutcome::RecoveryRequired, "Manual recovery needed"),
+    ];
+    for (outcome, label) in outcomes {
+        let report = CommandReport {
+            format_version: 1,
+            status: ReportStatus::NotConverged,
+            exit_status: 1,
+            mode: "check".to_owned(),
+            target: "/repo".to_owned(),
+            changes: vec![ReportChange {
+                path: ".agents/.gitignore".to_owned(),
+                action: "write_control_file".to_owned(),
+                safety: "guarded".to_owned(),
+                outcome,
+            }],
+            diagnostics: vec![],
+        };
+        for color in [ColorPolicy::Never, ColorPolicy::Always] {
+            let text = render_text(&report, color);
+            assert!(text.contains(label), "{text}");
+            assert!(text.contains("write .gitignore"), "{text}");
+            assert!(!text.contains("guarded"), "{text}");
+            assert!(!text.contains("write_control_file"), "{text}");
+        }
+        let machine = serde_json::to_value(&report).unwrap();
+        assert_eq!(machine["changes"][0]["safety"], "guarded");
+        assert_eq!(machine["changes"][0]["action"], "write_control_file");
+    }
+}
+
+#[test]
+fn sync_help_explains_force_in_plain_language() {
+    for args in [vec!["sync", "--help"], vec!["sync", "worktree", "--help"]] {
+        Command::cargo_bin("skillator")
+            .unwrap()
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "Allow replacing or removing existing files",
+            ))
+            .stdout(predicate::str::contains("Guarded").not());
+    }
 }
 
 struct Fixture {

@@ -123,7 +123,7 @@ pub fn plan(
                 path: directory.path().to_owned(),
                 action: Action::CreateDirectory,
                 safety: Safety::Safe,
-                reason: "Skill Directory is missing".to_owned(),
+                reason: "skill folder is missing".to_owned(),
                 operation: Operation::CreateDirectory,
             }),
             RootState::Directory => {}
@@ -132,7 +132,7 @@ pub fn plan(
                 items.push(blocked(
                     directory.path(),
                     Action::CreateDirectory,
-                    "Skill Directory is inaccessible",
+                    "Cannot access the skill folder; check its permissions",
                 ));
                 continue;
             }
@@ -141,7 +141,7 @@ pub fn plan(
                 items.push(blocked(
                     directory.path(),
                     Action::CreateDirectory,
-                    "Skill Directory root is not a physical directory",
+                    "The skill folder must be a directory, not a link or file",
                 ));
                 continue;
             }
@@ -155,14 +155,14 @@ pub fn plan(
                         items.push(blocked(
                             control,
                             Action::WriteControlFile,
-                            "Skill Directory Control File has Git index protection",
+                            ".gitignore is tracked, staged, or has merge conflicts; resolve its Git status before replacing it",
                         ));
                     } else {
                         items.push(PlanItem {
                             path: control.to_owned(),
                             action: Action::WriteControlFile,
                             safety: Safety::Safe,
-                            reason: "Skill Directory Control File is missing".to_owned(),
+                            reason: ".gitignore is missing".to_owned(),
                             operation: Operation::WriteFile {
                                 bytes: directory.control_content().to_vec(),
                                 expected: EntryFingerprint::Missing,
@@ -175,19 +175,19 @@ pub fn plan(
                         items.push(blocked(
                             control,
                             Action::WriteControlFile,
-                            "local Skillator control file has Git index protection",
+                            ".gitignore is tracked, staged, or has merge conflicts; resolve its Git status before replacing it",
                         ));
                     } else if !directory.control_ignored() {
                         items.push(blocked(
                             control,
                             Action::WriteControlFile,
-                            "local Skillator control file is not effectively Git-ignored",
+                            ".gitignore is not ignored by Git; check the repository's ignore rules",
                         ));
                     } else if !directory.generated_ignored() {
                         items.push(blocked(
                             control,
                             Action::WriteControlFile,
-                            "generated Skill Entries are not effectively Git-ignored",
+                            "Generated skill files are not ignored by Git; check the repository's ignore rules",
                         ));
                     }
                 }
@@ -198,14 +198,14 @@ pub fn plan(
                         items.push(blocked(
                             control,
                             Action::WriteControlFile,
-                            "Skill Directory Control File cannot be safely prefixed",
+                            "Cannot update .gitignore; check its permissions and whether Git tracks it",
                         ));
                     } else {
                         items.push(PlanItem {
                             path: control.to_owned(),
                             action: Action::WriteControlFile,
                             safety: Safety::Safe,
-                            reason: "prefix the existing control file without replacing its rules"
+                            reason: "Add Skillator's ignore rules and keep existing rules"
                                 .to_owned(),
                             operation: Operation::WriteFile {
                                 bytes: directory.control_content().to_vec(),
@@ -227,8 +227,15 @@ pub fn plan(
                         path: control.to_owned(),
                         action: Action::WriteControlFile,
                         safety,
-                        reason: "Skill Directory Control File differs from canonical content"
-                            .to_owned(),
+                        reason: if directory.control_protected() {
+                            ".gitignore is tracked, staged, or has merge conflicts; resolve its Git status before replacing it"
+                        } else if expected == EntryFingerprint::Uninspectable {
+                            "Cannot read .gitignore; check its type and permissions"
+                        } else if *directory.control_file() == ControlFileState::WrongKind {
+                            "A folder or link occupies the .gitignore path. Saving will replace it with Skillator's ignore file"
+                        } else {
+                            "This .gitignore has different contents. Saving will replace the entire file with Skillator's ignore rules"
+                        }.to_owned(),
                         operation: if safety == Safety::Blocked {
                             Operation::None
                         } else {
@@ -242,7 +249,7 @@ pub fn plan(
                 ControlFileState::Uninspectable => items.push(blocked(
                     control,
                     Action::WriteControlFile,
-                    "control file cannot be inspected",
+                    "Cannot read .gitignore; check its type and permissions",
                 )),
             }
         }
@@ -250,7 +257,7 @@ pub fn plan(
             items.push(blocked(
                 recovery,
                 Action::Recover,
-                "Recovery Artifact requires deterministic recovery or manual review",
+                "Files remain from an interrupted save; review them before continuing",
             ));
         }
     }
@@ -260,7 +267,7 @@ pub fn plan(
             items.push(blocked(
                 observation.path().unwrap_or(observed.target_root()),
                 materialize_action(observation.enablement().materialization()),
-                "Skill Directory containment or accessibility is invalid",
+                "The skill folder is inaccessible or points outside the selected directory",
             ));
             continue;
         }
@@ -271,7 +278,7 @@ pub fn plan(
             items.push(blocked(
                 observed.target_root(),
                 materialize_action(observation.enablement().materialization()),
-                "Expected Entry name is unavailable",
+                "Cannot determine the skill's destination name",
             ));
             continue;
         };
@@ -290,11 +297,11 @@ pub fn plan(
             action,
             safety,
             reason: if observation.tracked() {
-                "Expected Entry is Git-tracked".to_owned()
+                "Git tracks this path; Skillator cannot replace it".to_owned()
             } else if source.is_none() {
-                "Source or Skill is unavailable".to_owned()
+                "Cannot find or read the source skill".to_owned()
             } else {
-                format!("observed state is {:?}", observation.state())
+                observation.state().description().to_owned()
             },
             operation: if safety == Safety::Blocked {
                 Operation::None
@@ -367,7 +374,7 @@ pub enum Authorization {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("Target Busy")]
+#[error("Another Skillator process is saving changes")]
 pub struct TargetBusy;
 
 /// Locks one or more Targets in canonical root-path order.
@@ -518,11 +525,12 @@ pub fn prepare_transition_with_locks_and_repository_skills(
             action: Action::RemoveUnmanaged,
             safety,
             reason: if safety == Safety::Safe {
-                "remove an In-Sync disabled Materialization".to_owned()
+                "Remove the disabled skill's unchanged link or copy".to_owned()
             } else if entry.tracked() {
-                "disabled Materialization is Git-tracked".to_owned()
+                "Git tracks this disabled skill; Skillator cannot remove it".to_owned()
             } else {
-                "disabled Materialization differs from its desired state".to_owned()
+                "This disabled skill has changed; saving will remove its existing link or copy"
+                    .to_owned()
             },
             operation: if safety == Safety::Blocked {
                 Operation::None
@@ -645,7 +653,7 @@ fn plan_recovery(plan: &mut Plan, target: &Target, config: &RepositoryConfig) {
                     .find(|item| item.action == Action::Recover && item.path == backup[0])
                 {
                     item.safety = Safety::Safe;
-                    item.reason = "restore the unique interrupted-operation backup".to_owned();
+                    item.reason = "Restore the backup from the interrupted save".to_owned();
                     item.operation = Operation::Recover {
                         artifact: backup[0].clone(),
                         artifact_expected: fingerprint(&backup[0]),
@@ -668,7 +676,8 @@ fn plan_recovery(plan: &mut Plan, target: &Target, config: &RepositoryConfig) {
                         .find(|item| item.action == Action::Recover && item.path == *stage)
                     {
                         item.safety = Safety::Safe;
-                        item.reason = "remove an abandoned interrupted-operation stage".to_owned();
+                        item.reason =
+                            "Remove temporary files left by an interrupted save".to_owned();
                         item.operation = Operation::Remove {
                             expected: fingerprint(stage),
                         };
@@ -688,7 +697,7 @@ fn git_path_unprotected(target: &Target, path: &Path) -> bool {
 fn target_path_facts(target: &Target, path: &Path) -> Result<PathFacts, String> {
     let relative = path
         .strip_prefix(target.root())
-        .map_err(|_| "planned path escapes Target".to_owned())?;
+        .map_err(|_| "The destination is outside the selected directory".to_owned())?;
     if let Some(repository) = target.git_repository() {
         repository
             .facts_for(relative)
@@ -794,7 +803,7 @@ pub fn execute(
             outcomes.push(outcome(
                 &item,
                 Outcome::NotAuthorized,
-                "Guarded Change requires authorization".to_owned(),
+                "This change needs confirmation; review the path before using --force".to_owned(),
             ));
             continue;
         }
@@ -811,7 +820,8 @@ pub fn execute(
             outcomes.push(outcome(
                 &item,
                 Outcome::Blocked,
-                "Git facts changed or could not be verified after planning".to_owned(),
+                "Git status changed or could not be checked; review the changes and retry"
+                    .to_owned(),
             ));
             continue;
         }
@@ -968,7 +978,7 @@ fn apply_operation_with(
                     if fs::read_link(&stage).map_err(failed)? != source {
                         let _ = remove_any(&stage);
                         return Err(ApplyFailure::Failed(
-                            "staged link failed validation".to_owned(),
+                            "The new link could not be verified".to_owned(),
                         ));
                     }
                 }
@@ -1012,17 +1022,17 @@ fn apply_operation_with(
                     Err(ApplyFailure::Changed)
                 } else {
                     Err(ApplyFailure::RecoveryRequired(format!(
-                        "removed occupant changed after planning; preserved {}",
+                        "The file changed before removal; a backup was kept at {}",
                         backup.display()
                     )))
                 };
             }
             remove_any(&backup).map_err(|error| {
                 if rename_noreplace(&backup, &item.path).is_ok() {
-                    ApplyFailure::RolledBack(format!("removal failed and was rolled back: {error}"))
+                    ApplyFailure::RolledBack(format!("Removal failed; the original content was restored: {error}"))
                 } else {
                     ApplyFailure::RecoveryRequired(format!(
-                        "removal and rollback failed; preserved {}: {error}",
+                        "Removal failed and the original content could not be restored; recover it from {}: {error}",
                         backup.display()
                     ))
                 }
@@ -1056,7 +1066,10 @@ fn ensure_contained_physical_parent(path: &Path, target_root: &Path) -> Result<(
         .parent()
         .ok_or_else(|| ApplyFailure::Failed("destination has no parent".to_owned()))?;
     let relative = parent.strip_prefix(target_root).map_err(|_| {
-        ApplyFailure::Failed(format!("destination escapes Target: {}", path.display()))
+        ApplyFailure::Failed(format!(
+            "The destination is outside the selected directory: {}",
+            path.display()
+        ))
     })?;
     let mut current = target_root.to_owned();
     for component in relative.components() {
@@ -1064,13 +1077,13 @@ fn ensure_contained_physical_parent(path: &Path, target_root: &Path) -> Result<(
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(ApplyFailure::Failed(format!(
-                    "directory ancestor is a symlink: {}",
+                    "parent folder is a symlink: {}",
                     current.display()
                 )));
             }
             Ok(metadata) if !metadata.is_dir() => {
                 return Err(ApplyFailure::Failed(format!(
-                    "directory ancestor is not a directory: {}",
+                    "parent folder is not a directory: {}",
                     current.display()
                 )));
             }
@@ -1130,11 +1143,11 @@ fn publish_with_faults(
         return if restored {
             let _ = remove_any(stage);
             Err(ApplyFailure::RolledBack(format!(
-                "publication failed and was rolled back: {error}"
+                "Saving failed; the original content was restored: {error}"
             )))
         } else {
             Err(ApplyFailure::RecoveryRequired(format!(
-                "publication and rollback failed; preserved {}: {error}",
+                "Saving failed and the original content could not be restored; recover it from {}: {error}",
                 backup.display()
             )))
         };

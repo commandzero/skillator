@@ -426,7 +426,7 @@ fn apply_blocks_when_git_protection_changes_after_planning() {
         "index placeholder"
     );
     assert!(result.outcomes().iter().any(|item| {
-        item.outcome == Outcome::Blocked && item.message.contains("Git facts changed")
+        item.outcome == Outcome::Blocked && item.message.contains("Git status changed")
     }));
 }
 

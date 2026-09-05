@@ -456,8 +456,8 @@ fn first_target_save_creates_required_paths_without_initialization_diagnostics()
     assert!(!target_root.join(".agents").exists());
     for directory in observed.directories() {
         assert!(directory.diagnostics().iter().all(|message| {
-            !message.contains("Skill Directory is not initialized")
-                && !message.contains("Skill Directory Control File is missing")
+            !message.contains("skill folder is not initialized")
+                && !message.contains(".gitignore is missing")
         }));
     }
 
@@ -700,7 +700,7 @@ fn worktree_sync_rejects_missing_primary_configuration_without_writes() {
 
     let error =
         WorktreeSyncWorkflow::run(&fixture.paths, &fixture.linked, SyncMode::Check).unwrap_err();
-    assert!(error.to_string().contains("primary Target configuration"));
+    assert!(error.to_string().contains("primary worktree configuration"));
     assert!(!fixture.linked.join(".agents").exists());
     assert!(!fixture.paths.target_registry().exists());
 }

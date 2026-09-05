@@ -161,13 +161,13 @@ fn case_variants_and_links_to_known_skills_remain_unmanaged_duplicates() {
         directory
             .diagnostics()
             .iter()
-            .any(|message| message.contains("only by case"))
+            .any(|message| message.contains("only by letter case"))
     );
     assert!(
         directory
             .diagnostics()
             .iter()
-            .any(|message| message.contains("needs Skillator's generated prefix"))
+            .any(|message| message.contains("needs Skillator's rules"))
     );
 }
 
@@ -218,7 +218,7 @@ fn expected_entry_collisions_and_agent_compatibility_overlap_are_reported() {
         observed.directories()[0]
             .diagnostics()
             .iter()
-            .any(|message| message.contains("compatibility overlaps"))
+            .any(|message| message.contains("The same agents also read skills from"))
     );
     assert!(
         observed.directories()[0]

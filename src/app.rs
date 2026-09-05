@@ -65,7 +65,7 @@ impl AppPaths {
 pub enum WorkflowError {
     #[error("{message}")]
     InvalidInput { message: String },
-    #[error("Target Busy")]
+    #[error("Another Skillator process is saving changes")]
     Busy,
     #[error("{message}")]
     Fatal { message: String },
@@ -241,7 +241,7 @@ impl SyncWorkflow {
             LoadResult::Missing => {
                 return Err(WorkflowError::InvalidInput {
                     message: format!(
-                        "Repository Configuration is missing at {}; run `skillator init {}` first",
+                        "repository configuration is missing at {}; run `skillator init {}` first",
                         repository_path.display(),
                         target.root().display()
                     ),
@@ -250,12 +250,12 @@ impl SyncWorkflow {
             LoadResult::Valid(loaded) => loaded.value().clone(),
             LoadResult::Unsupported { version, .. } => {
                 return Err(WorkflowError::InvalidInput {
-                    message: format!("unsupported Repository Configuration version {version}"),
+                    message: format!("unsupported repository configuration version {version}"),
                 });
             }
             LoadResult::Invalid { issues } => {
                 return Err(WorkflowError::InvalidInput {
-                    message: format_issues("invalid Repository Configuration", &issues),
+                    message: format_issues("invalid repository configuration", &issues),
                 });
             }
         };
@@ -371,7 +371,7 @@ impl WorktreeSyncWorkflow {
             return Ok(configuration_blocked_report(
                 destination.root(),
                 "worktree_sync",
-                "primary Target configuration changed while worktree sync was being prepared"
+                "primary worktree configuration changed while worktree sync was being prepared"
                     .to_owned(),
             ));
         }
@@ -403,7 +403,7 @@ impl WorktreeSyncWorkflow {
                     return Ok(configuration_blocked_report(
                         destination.root(),
                         "worktree_check",
-                        "primary Target configuration changed while worktree sync was being prepared"
+                        "primary worktree configuration changed while worktree sync was being prepared"
                             .to_owned(),
                     ));
                 }
@@ -471,7 +471,7 @@ fn load_primary_target_configuration(
     validate_target_config_path(primary, &path, "Primary Repository")?;
     let bytes = fs::read(&path).map_err(|error| WorkflowError::InvalidInput {
         message: format!(
-            "cannot read primary Target configuration at {}: {error}",
+            "cannot read primary worktree configuration at {}: {error}",
             path.display()
         ),
     })?;
@@ -480,12 +480,12 @@ fn load_primary_target_configuration(
         LoadResult::Valid(loaded) => loaded.value().clone(),
         LoadResult::Unsupported { version, .. } => {
             return Err(WorkflowError::InvalidInput {
-                message: format!("unsupported primary Repository Configuration version {version}"),
+                message: format!("unsupported primary repository configuration version {version}"),
             });
         }
         LoadResult::Invalid { issues } => {
             return Err(WorkflowError::InvalidInput {
-                message: format_issues("invalid primary Repository Configuration", &issues),
+                message: format_issues("invalid primary repository configuration", &issues),
             });
         }
         LoadResult::Missing => unreachable!("configuration bytes were read immediately above"),
@@ -510,14 +510,14 @@ fn inspect_destination_configuration(
         Ok(facts) => facts,
         Err(error) => {
             return Ok(DestinationConfiguration::Blocked {
-                message: format!("cannot inspect destination Target configuration: {error}"),
+                message: format!("cannot inspect linked worktree configuration: {error}"),
             });
         }
     };
     if facts.tracked || facts.staged || facts.unmerged {
         return Ok(DestinationConfiguration::Blocked {
             message: format!(
-                "destination Target configuration is still tracked; run `git rm --cached -- {LOCAL_TARGET_CONFIG}` before replacing it (Skillator never changes the Git index)"
+                "linked worktree configuration is still tracked; run `git rm --cached -- {LOCAL_TARGET_CONFIG}` before replacing it (Skillator never changes the Git index)"
             ),
         });
     }
@@ -530,14 +530,14 @@ fn inspect_destination_configuration(
         }
         Err(error) => {
             return Ok(DestinationConfiguration::Blocked {
-                message: format!("cannot inspect destination Target configuration: {error}"),
+                message: format!("cannot inspect linked worktree configuration: {error}"),
             });
         }
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Ok(DestinationConfiguration::Blocked {
             message: format!(
-                "destination Target configuration must be a physical file: {}",
+                "linked worktree configuration must be a regular file, not a link: {}",
                 path.display()
             ),
         });
@@ -546,7 +546,7 @@ fn inspect_destination_configuration(
         Ok(bytes) => bytes,
         Err(error) => {
             return Ok(DestinationConfiguration::Blocked {
-                message: format!("destination Target configuration is unreadable: {error}"),
+                message: format!("linked worktree configuration is unreadable: {error}"),
             });
         }
     };
@@ -559,7 +559,7 @@ fn inspect_destination_configuration(
             }),
             _ => Ok(DestinationConfiguration::Blocked {
                 message:
-                    "destination Target configuration matches the primary bytes but is invalid"
+                    "linked worktree configuration matches the primary worktree file, but contains invalid settings"
                         .to_owned(),
             }),
         };
@@ -572,12 +572,12 @@ fn inspect_destination_configuration(
             });
         }
         LoadResult::Unsupported { version, .. } => {
-            format!("destination Target configuration has unsupported version {version}")
+            format!("linked worktree configuration has unsupported version {version}")
         }
         LoadResult::Invalid { issues } => {
-            format_issues("destination Target configuration is invalid", &issues)
+            format_issues("linked worktree configuration is invalid", &issues)
         }
-        LoadResult::Missing => "destination Target configuration is unavailable".to_owned(),
+        LoadResult::Missing => "linked worktree configuration is unavailable".to_owned(),
     };
     Ok(DestinationConfiguration::Guarded {
         fingerprint,
@@ -588,7 +588,7 @@ fn inspect_destination_configuration(
 fn configuration_guard_report(root: &Path, mode: &str, guard: ConfigurationGuard) -> CommandReport {
     let message = match guard {
         ConfigurationGuard::Guarded => {
-            "destination Target configuration differs from the primary; rerun with `--force` to replace it"
+            "linked worktree configuration differs from the primary; rerun with `--force` to replace it"
                 .to_owned()
         }
         ConfigurationGuard::GuardedWithMessage(message) => format!(
@@ -670,12 +670,12 @@ fn load_library_snapshot(
         LoadResult::Valid(loaded) => loaded.value().clone(),
         LoadResult::Unsupported { version, .. } => {
             return Err(WorkflowError::InvalidInput {
-                message: format!("unsupported Library Configuration version {version}"),
+                message: format!("unsupported library configuration version {version}"),
             });
         }
         LoadResult::Invalid { issues } => {
             return Err(WorkflowError::InvalidInput {
-                message: format_issues("invalid Library Configuration", &issues),
+                message: format_issues("invalid library configuration", &issues),
             });
         }
     };
@@ -1285,9 +1285,9 @@ fn report_apply(
             code: "final_directory_state".to_owned(),
             severity: "warning".to_owned(),
             message: format!(
-                "Skill Directory `{}` finished {:?}: {}",
+                "skill folder `{}`: {}. {}",
                 display_path(root, directory.path()),
-                directory.comparison(),
+                directory.comparison().description(),
                 directory.diagnostics().join("; ")
             ),
             data: Some(BTreeMap::from([
@@ -1308,11 +1308,11 @@ fn report_apply(
             code: "final_enablement_state".to_owned(),
             severity: "warning".to_owned(),
             message: format!(
-                "Enablement `{}/{}` finished {:?}: {:?}",
+                "Skill `{}/{}`: {}. {}",
                 enablement.enablement().skill().source(),
                 enablement.enablement().skill().path(),
-                enablement.comparison(),
-                enablement.state()
+                enablement.comparison().description(),
+                enablement.state().description()
             ),
             data: enablement
                 .path()
@@ -1328,7 +1328,7 @@ fn report_apply(
             code: "library_location_overlap".to_owned(),
             severity: "warning".to_owned(),
             message: format!(
-                "Library Location overlap affects Enablement `{}/{}`",
+                "Overlapping library folders affect skill `{}/{}`",
                 enablement.enablement().skill().source(),
                 enablement.enablement().skill().path()
             ),
@@ -1451,10 +1451,10 @@ impl LibraryWorkflow {
                 first_run: false,
             }),
             LoadResult::Unsupported { version, .. } => Err(WorkflowError::InvalidInput {
-                message: format!("unsupported Library Configuration version {version}"),
+                message: format!("unsupported library configuration version {version}"),
             }),
             LoadResult::Invalid { issues } => Err(WorkflowError::InvalidInput {
-                message: format_issues("invalid Library Configuration", &issues),
+                message: format_issues("invalid library configuration", &issues),
             }),
         }
     }
@@ -1486,7 +1486,7 @@ impl LibraryWorkflow {
         {
             return Err(WorkflowError::InvalidInput {
                 message:
-                    "overlapping Library Locations require explicit allow_overlap on both Locations"
+                    "Library folders overlap; set allow_overlap: true for both folders to allow this"
                         .to_owned(),
             });
         }
@@ -1507,7 +1507,7 @@ impl LibraryWorkflow {
             .first()
             .and_then(|location| location.resolved())
             .ok_or_else(|| WorkflowError::InvalidInput {
-                message: "the first Library Location must be available for acquisition".to_owned(),
+                message: "Cannot add skills: the first library folder is unavailable".to_owned(),
             })?;
         let mut prepared =
             PreparedAcquisitions::prepare(local_root, acquisitions).map_err(acquisition_error)?;
@@ -2115,7 +2115,7 @@ impl TargetStatePlanner {
             return Ok(configuration_blocked_report(
                 self.target.root(),
                 "worktree_sync",
-                "primary Target configuration changed while worktree sync was being prepared"
+                "primary worktree configuration changed while worktree sync was being prepared"
                     .to_owned(),
             ));
         }
@@ -2138,7 +2138,7 @@ impl TargetStatePlanner {
             .map_err(fatal)?;
         if config_facts.tracked || config_facts.staged || config_facts.unmerged {
             let message = format!(
-                "local Target configuration is still tracked; run `git rm --cached -- {LOCAL_TARGET_CONFIG}` before saving (Skillator never changes the Git index)"
+                "local skill configuration is still tracked; run `git rm --cached -- {LOCAL_TARGET_CONFIG}` before saving (Skillator never changes the Git index)"
             );
             if source.is_some() {
                 return Ok(configuration_blocked_report(
@@ -2168,7 +2168,7 @@ impl TargetStatePlanner {
                 return Ok(configuration_blocked_report(
                     self.target.root(),
                     "worktree_sync",
-                    "destination Target configuration changed while worktree sync was being prepared"
+                    "linked worktree configuration changed while worktree sync was being prepared"
                         .to_owned(),
                 ));
             }
@@ -2271,10 +2271,10 @@ impl TargetWorkflow {
                 recommendations: Vec::new(),
             }),
             LoadResult::Unsupported { version, .. } => Err(WorkflowError::InvalidInput {
-                message: format!("unsupported Repository Configuration version {version}"),
+                message: format!("unsupported repository configuration version {version}"),
             }),
             LoadResult::Invalid { issues } => Err(WorkflowError::InvalidInput {
-                message: format_issues("invalid Repository Configuration", &issues),
+                message: format_issues("invalid repository configuration", &issues),
             }),
         }
     }
@@ -2294,7 +2294,7 @@ impl TargetWorkflow {
         if facts.tracked || facts.staged || facts.unmerged {
             return Err(WorkflowError::InvalidInput {
                 message: format!(
-                    "local Target configuration is still tracked; run `git rm --cached -- {LOCAL_TARGET_CONFIG}` before saving (Skillator never changes the Git index)"
+                    "local skill configuration is still tracked; run `git rm --cached -- {LOCAL_TARGET_CONFIG}` before saving (Skillator never changes the Git index)"
                 ),
             });
         }
@@ -2543,26 +2543,25 @@ fn validate_destination_configuration_at_commit(
             return if expected == &Fingerprint::Absent {
                 Ok(())
             } else {
-                Err("destination Target configuration became unavailable after planning".to_owned())
+                Err("linked worktree configuration became unavailable after planning".to_owned())
             };
         }
         Err(error) => {
             return Err(format!(
-                "destination Target configuration cannot be inspected after planning: {error}"
+                "linked worktree configuration cannot be inspected after planning: {error}"
             ));
         }
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(
-            "destination Target configuration changed to a non-regular file after planning"
-                .to_owned(),
+            "linked worktree configuration changed to a non-regular file after planning".to_owned(),
         );
     }
     let bytes = fs::read(path).map_err(|error| {
-        format!("destination Target configuration is unreadable after planning: {error}")
+        format!("linked worktree configuration is unreadable after planning: {error}")
     })?;
     if &Fingerprint::for_bytes(&bytes) != expected {
-        return Err("destination Target configuration changed after planning".to_owned());
+        return Err("linked worktree configuration changed after planning".to_owned());
     }
     Ok(())
 }
@@ -2676,7 +2675,7 @@ impl UserScopeWorkflow {
             message: error.to_string(),
         })?;
         let config_path = paths.user_config();
-        validate_target_config_path(&target, &config_path, "User Scope")?;
+        validate_target_config_path(&target, &config_path, "User account")?;
         match load_repository(&config_path).map_err(fatal)? {
             LoadResult::Missing => Ok(UserScopeSession {
                 target,
@@ -2691,10 +2690,10 @@ impl UserScopeWorkflow {
                 first_run: false,
             }),
             LoadResult::Unsupported { version, .. } => Err(WorkflowError::InvalidInput {
-                message: format!("unsupported User Scope Configuration version {version}"),
+                message: format!("unsupported user configuration version {version}"),
             }),
             LoadResult::Invalid { issues } => Err(WorkflowError::InvalidInput {
-                message: format_issues("invalid User Scope Configuration", &issues),
+                message: format_issues("invalid user configuration", &issues),
             }),
         }
     }
@@ -2722,7 +2721,7 @@ impl UserScopeWorkflow {
         authorization: Authorization,
     ) -> Result<CommandReport, WorkflowError> {
         let path = paths.user_config();
-        validate_target_config_path(&prepared.target, &path, "User Scope")?;
+        validate_target_config_path(&prepared.target, &path, "User account")?;
         save_repository(&path, &prepared.staged, &prepared.expected).map_err(save_error)?;
         let result = execute(
             prepared.prepared,
@@ -2834,7 +2833,7 @@ fn validate_target_config_path(
         Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
             return Err(WorkflowError::InvalidInput {
                 message: format!(
-                    "{scope} Configuration parent must be a physical directory: {}",
+                    "{scope} configuration parent must be a directory, not a link: {}",
                     parent.display()
                 ),
             });
@@ -2847,7 +2846,7 @@ fn validate_target_config_path(
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(WorkflowError::InvalidInput {
                 message: format!(
-                    "{scope} Configuration must be a physical file: {}",
+                    "{scope} configuration must be a regular file, not a link: {}",
                     config_path.display()
                 ),
             })

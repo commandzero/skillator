@@ -2,7 +2,7 @@
 
 Skillator is a terminal UI for deciding which agent skills are active in a project.
 
-Keep skills in one or more Library locations outside your repositories. Skillator discovers the `SKILL.md` directories there, then easily link or copy the skills _you_ choose into the repository's `.agents/skills` directories. Each checkout keeps a small declarative clone-local `skillator.yaml` configuration. The materialized skills and generated local controls stay out of the repository history.
+Keep skills in library folders outside your repositories. Skillator finds folders containing `SKILL.md`, then links or copies the skills you choose into `.agents/skills`. Each checkout saves its choices in `.agents/skillator.yaml`. Git ignores this configuration, the installed skills, and Skillator's generated `.gitignore` file.
 
 This is useful when a shared skill collection is larger than the set you want an agent to load for one project.
 
@@ -24,14 +24,14 @@ cargo run --
 
 1. Start `skillator` from a Git repository.
 2. On a first run, Skillator opens the Library and asks you to configure where your skills live. The default is `~/.skillator/library`.
-3. Add any other Library locations that contain skills or skill repositories. A skill is a directory with a valid `SKILL.md` file.
-4. Press `Ctrl+L` to switch to the current repository's Target view.
+3. Add any other library folders that contain skills or skill repositories. A skill is a directory with a valid `SKILL.md` file.
+4. Press `Ctrl+L` to switch to the Skills view for the current repository.
 5. Enable the skills you want. Use `m` to choose `link` or `copy`.
 6. Press `s` to review and save, or `Ctrl+S` to save and exit when every pending change is safe.
 
-The Library is your inventory. A Target is where an agent can discover enabled skills.
+The Library lists available skills. The Skills view lets you choose which ones to enable for a repository or your user account.
 
-By default, Skillator manages `.agents/skills`. Add another Target tab when a project also needs a directory such as `.claude/skills`.
+By default, Skillator manages `.agents/skills`. Add another skill tab when a project also needs a directory such as `.claude/skills`.
 
 ## Commands
 
@@ -91,19 +91,19 @@ skillator targets prune
 # Preview filesystem work without writing anything.
 skillator sync --check
 
-# Reconcile safe work without opening the TUI.
+# Update skill links and copies without opening the interface.
 skillator sync
 
-# Permit guarded replacements during non-interactive sync.
+# Allow replacing or removing existing files. Review with --check first.
 skillator sync --force
 
 # Use a machine-readable report.
 skillator sync --check --format json
 
-# Project the primary worktree's local Target state into this linked worktree.
+# Apply the primary worktree's skill settings to this linked worktree.
 skillator sync worktree
 
-# Preview the projection without writing.
+# Preview worktree changes without writing.
 skillator sync worktree --check
 
 # Git creates linked worktrees; Skillator synchronizes and registers them.
@@ -119,9 +119,11 @@ Sync reads existing configuration. It does not create a Library, create reposito
 
 `link` is the default. The target entry is a symbolic link to the Library skill, so edits to the Library take effect right away.
 
-`copy` creates an independent snapshot in the Target. Use it when the Target needs its own copy. Skillator compares copied skills with their Library source and reports drift.
+`copy` gives the repository its own copy of a skill. Skillator reports when that copy differs from the library version.
 
-Repository-owned skills that Skillator does not manage are allowed and remain ordinary Git-trackable files. Skillator leaves them alone. For the default Target, `.agents/.gitignore` ignores the local configuration, its own generated control file, and every entry under `.agents/skills`. Repository-owned skills become trackable through explicit exceptions kept at the end of that one file.
+Skills that Skillator does not manage can still be tracked in Git. The generated `.agents/.gitignore` ignores the local configuration, itself, and all entries under `.agents/skills`. Exceptions at the end of that file allow repository skills to be tracked.
+
+Skillator keeps existing ignore rules when adding its generated section. Replacing a folder or link at the `.gitignore` path requires confirmation. Items marked "Cannot change" are skipped even if you confirm the save or use `--force`.
 
 ## Configuration
 
@@ -165,13 +167,13 @@ enablements:
     materialization: copied
 ```
 
-The local configuration records desired enablements, not a shared inventory. CLI and TUI saves maintain the parent control file without staging files or changing the Git index. If a legacy checkout still tracks `.agents/skillator.yaml`, Skillator preserves it and reports the explicit migration step:
+The local configuration records which skills you enabled. Saving updates the parent `.gitignore` without staging files. If an older checkout still tracks `.agents/skillator.yaml`, stop tracking it while keeping the local file:
 
 ```sh
 git rm --cached -- .agents/skillator.yaml
 ```
 
-Skillator also has a machine-local User Scope at `~/.agents/skillator.yaml`. Its enabled skills appear in the `User` tab and are available outside a repository. Repository tabs show inherited User skills as `[u] user`.
+Skillator saves skills enabled for your user account in `~/.agents/skillator.yaml`. Manage them in the `User` tab. They are also available outside a repository and appear as `[u] user` in repository tabs.
 
 Repository tabs also discover physical Skills that have no Library Enablement. They appear as repository candidates. Press `m` to stage one as `[r] repo`; Save adds its exact parent `.gitignore` exception, such as `!skills/skillator/`. Repo rows are read-only under Space, just like `[u] user` rows. They never create a Library Enablement, link, copy, or participate in Library drift checks.
 
@@ -186,12 +188,12 @@ The interface uses vim-style navigation. Arrow keys work too.
 | `h` / `l` | Collapse or expand a Source group |
 | `Space` | Toggle a skill or Source group |
 | `m` | Change link or copy mode |
-| `Tab` / `Shift+Tab` | Change Target or User Scope tab |
-| `Ctrl+L` | Switch between Target and Library views |
+| `Tab` / `Shift+Tab` | Switch between skill folders or the User tab |
+| `Ctrl+L` | Switch between Skills and Library views |
 | `/` | Filter rows. `/pending` shows rows with pending actions. |
 | `s` | Save after confirmation |
 | `Ctrl+S` | Save and exit when safe |
-| `u` | Undo staged edits back to the saved state |
+| `u` | Discard unsaved changes |
 | `?` | Show help |
 | `q` | Quit |
 

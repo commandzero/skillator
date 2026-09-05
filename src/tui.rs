@@ -1053,7 +1053,7 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
                     .is_some_and(|row| row.kind == RowKind::Location)
             {
                 model.overlay =
-                    Overlay::Notice("Select a Library Location divider to delete it.".to_owned());
+                    Overlay::Notice("Select a library folder row to remove it.".to_owned());
             } else {
                 model.overlay = Overlay::ConfirmDelete;
             }
@@ -1077,7 +1077,7 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
             if model.workspace == Workspace::Library {
                 if model.dirty {
                     model.overlay = Overlay::Notice(
-                        "Save or discard staged Library changes before refreshing.".to_owned(),
+                        "Save or discard unsaved library changes before refreshing.".to_owned(),
                     );
                 } else {
                     return vec![Effect::RefreshLibrary];
@@ -1160,7 +1160,8 @@ fn toggle_selected(model: &mut Model) {
         }
         RowKind::Skill if row.check == Some(CheckState::User) => {
             model.overlay = Overlay::Notice(
-                "This Skill is enabled in User Scope. Manage it from the User tab.".to_owned(),
+                "This skill is enabled for your user account. Change it in the User tab."
+                    .to_owned(),
             );
         }
         RowKind::Skill if row.repository_candidate => {
@@ -1242,9 +1243,9 @@ fn refresh_library_action(row: &mut Row) {
 fn refresh_library_visibility(row: &mut Row) {
     row.action = if row.check != row.initial_check {
         if row.check == Some(CheckState::Checked) {
-            "Show in Targets".to_owned()
+            "Show in skill selection".to_owned()
         } else {
-            "Hide from Targets".to_owned()
+            "Hide from skill selection".to_owned()
         }
     } else {
         row.initial_action.clone()
@@ -1478,7 +1479,17 @@ fn row_is_conflict(row: &Row) -> bool {
             row.state.as_str(),
         ]
         .into_iter()
-        .any(|value| contains_any(value, &["conflict", "guarded", "collision"]))
+        .any(|value| {
+            contains_any(
+                value,
+                &[
+                    "conflict",
+                    "needs confirmation",
+                    "duplicate name",
+                    "collision",
+                ],
+            )
+        })
 }
 
 fn pending_action_color(action: &str) -> Option<Color> {
@@ -1561,7 +1572,7 @@ pub fn render(frame: &mut Frame<'_>, model: &Model) {
     ])
     .split(frame.area());
     let (workspace_label, workspace_color) = match model.workspace {
-        Workspace::Target => ("Target", PURPLE),
+        Workspace::Target => ("Skills", PURPLE),
         Workspace::Library => ("Library", BLUE),
     };
     let mut title = vec![
@@ -1589,7 +1600,13 @@ pub fn render(frame: &mut Frame<'_>, model: &Model) {
     };
     if let Some(path) = target_path {
         title[2] = Span::styled(
-            "Target:",
+            if model.workspace == Workspace::Target
+                && model.directory_scopes.get(model.directory_index) == Some(&TargetTabScope::User)
+            {
+                "User skills:"
+            } else {
+                "Repository:"
+            },
             Style::default()
                 .fg(workspace_color)
                 .add_modifier(Modifier::BOLD),
@@ -1762,7 +1779,7 @@ fn status_line(model: &Model) -> Line<'static> {
         .unwrap_or_default();
     if model.dirty {
         let mut spans = vec![Span::styled(
-            "Staged changes",
+            "Unsaved changes",
             Style::default().fg(BONE).add_modifier(Modifier::BOLD),
         )];
         if !inspector.spans.is_empty() {
@@ -1779,16 +1796,16 @@ fn render_overlay(frame: &mut Frame<'_>, model: &Model) {
     let (title, body, footer, confirmation) = match &model.overlay {
         Overlay::None => return,
         Overlay::Welcome => (
-            "I AM SKILLATOR!".to_owned(),
-            "Welcome to skillator, before we can manage target skills, please configure your skills library. When complete use Ctrl+L to switch to target view to assign skills to this repo.".to_owned(),
+            "Welcome to Skillator".to_owned(),
+            "First, add folders to your skills library. Then press Ctrl+L to choose skills for this repository.".to_owned(),
             Some("Enter OK · Esc Exit".to_owned()),
             false,
         ),
         Overlay::Help => return render_help(frame, model.workspace, model.detail_scroll),
         Overlay::Filter => return render_filter(frame, &model.filter),
         Overlay::ConfirmSave => (
-            "Save and Exit".to_owned(),
-            "Save the desired state?".to_owned(),
+            "Save changes".to_owned(),
+            "Save your changes?".to_owned(),
             Some("y/Enter save · n/Esc return".to_owned()),
             true,
         ),
@@ -1796,33 +1813,33 @@ fn render_overlay(frame: &mut Frame<'_>, model: &Model) {
         Overlay::GuardedConfirmation(message) => {
             let (body, footer) = split_confirmation_message(message);
             (
-                "Review Guarded Changes".to_owned(),
+                "Review changes".to_owned(),
                 remove_first_line(&body),
                 Some(footer),
                 true,
             )
         }
         Overlay::ConfirmLibrarySwitch => (
-            "Save Library Changes".to_owned(),
-            "Save staged Library changes before switching to Target?".to_owned(),
+            "Save library changes".to_owned(),
+            "Save library changes before switching to skill selection?".to_owned(),
             Some("Enter save and switch · Esc cancel".to_owned()),
             true,
         ),
         Overlay::DiscardWorkspace => (
-            "Discard Workspace Changes".to_owned(),
-            "Discard staged edits before switching workspaces?".to_owned(),
+            "Discard changes".to_owned(),
+            "Discard unsaved changes before switching views?".to_owned(),
             Some("y/Enter discard · n/Esc return".to_owned()),
             true,
         ),
         Overlay::DiscardTarget => (
-            "Discard Target Changes".to_owned(),
-            "Discard staged edits before changing Target?".to_owned(),
+            "Discard repository changes".to_owned(),
+            "Discard unsaved changes before opening another repository?".to_owned(),
             Some("y/Enter discard · n/Esc return".to_owned()),
             true,
         ),
         Overlay::SwitchScope { .. } => (
-            "Switch Scope".to_owned(),
-            "This scope has staged edits.".to_owned(),
+            "Switch tabs".to_owned(),
+            "This tab has unsaved changes.".to_owned(),
             Some(
                 "y/Enter save and switch · d discard and switch · n/Esc return".to_owned(),
             ),
@@ -1832,7 +1849,7 @@ fn render_overlay(frame: &mut Frame<'_>, model: &Model) {
             let mode = if *edit { "Edit" } else { "New" };
             return render_input(
                 frame,
-                &format!("{mode} Target Tab"),
+                &format!("{mode} skill tab"),
                 "agents | .claude | key,path,label",
                 input,
             );
@@ -1841,7 +1858,7 @@ fn render_overlay(frame: &mut Frame<'_>, model: &Model) {
             let mode = if *edit { "Edit" } else { "Add" };
             return render_input(
                 frame,
-                &format!("{mode} Library Location"),
+                &format!("{mode} library folder"),
                 "path",
                 input,
             );
@@ -1849,23 +1866,23 @@ fn render_overlay(frame: &mut Frame<'_>, model: &Model) {
         Overlay::SourceKeyEditor(input) => {
             return render_input(
                 frame,
-                "Resolve Source Key Collision",
+                "Choose a unique source name",
                 "owner/repository",
                 input,
             );
         }
         Overlay::TargetPicker(input) => {
-            return render_input(frame, "Change Target", "directory", input);
+            return render_input(frame, "Change repository", "directory", input);
         }
         Overlay::ConfirmDelete => (
-            "Delete Selection".to_owned(),
-            "Delete the selected directory or location?".to_owned(),
+            "Remove from configuration".to_owned(),
+            "Remove the selected folder from the configuration? This does not delete the folder or its files.".to_owned(),
             Some("y/Enter delete · n/Esc return".to_owned()),
             true,
         ),
         Overlay::Busy => (
-            "Target Busy".to_owned(),
-            "Another process is changing this Target.".to_owned(),
+            "Another Skillator process is saving changes".to_owned(),
+            "Another Skillator process is saving changes here. Wait for it to finish, then retry.".to_owned(),
             Some("Enter retry · Esc return to editing".to_owned()),
             true,
         ),
@@ -1878,7 +1895,7 @@ fn render_overlay(frame: &mut Frame<'_>, model: &Model) {
         }
         Overlay::Notice(_) => return,
         Overlay::Result(message) => (
-            "Save Result".to_owned(),
+            "Save result".to_owned(),
             message.to_owned(),
             Some("Enter exit".to_owned()),
             false,
@@ -1889,7 +1906,15 @@ fn render_overlay(frame: &mut Frame<'_>, model: &Model) {
     } else {
         Text::styled(body, overlay_text_style(&model.overlay))
     };
-    let area = centered(frame.area(), 70, 30);
+    let height = if matches!(
+        model.overlay,
+        Overlay::GuardedConfirmation(_) | Overlay::Result(_)
+    ) {
+        70
+    } else {
+        30
+    };
+    let area = centered(frame.area(), 70, height);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(text)
@@ -1906,35 +1931,35 @@ fn render_help(frame: &mut Frame<'_>, workspace: Workspace, scroll: u16) {
         ("J/K · ⇧↑/⇧↓", Some("Move by source")),
         ("h/l · ←/→", Some("Collapse / expand a source")),
         ("PgUp/PgDn", Some("Page through the list")),
-        ("/", Some("Filter (use /pending for staged actions)")),
+        ("/", Some("Filter (use /pending for pending changes)")),
     ];
     match workspace {
         Workspace::Target => entries.extend([
             ("Skills", None),
             ("Space", Some("Enable / disable")),
             ("m", Some("Cycle modes: link / copy / repo")),
-            ("Target tabs", None),
-            ("Ctrl+T", Some("Add target tab")),
+            ("Skill tabs", None),
+            ("Ctrl+T", Some("Add skill tab")),
             ("t", Some("Change repository")),
-            ("a / e / d", Some("Add / edit / delete target tab")),
+            ("a / e / d", Some("Add / edit / remove skill tab")),
             ("Commands", None),
             ("Ctrl+L", Some("Switch to Library")),
             ("s", Some("Save")),
             ("Ctrl+S", Some("Save and exit")),
-            ("u", Some("Undo staged edits")),
+            ("u", Some("Undo unsaved changes")),
             ("q", Some("Quit; close overlays like Esc")),
         ]),
         Workspace::Library => entries.extend([
             ("Library", None),
-            ("Space", Some("Show / hide in Target")),
+            ("Space", Some("Show / hide in skill selection")),
             ("m", Some("Cycle modes: move / copy / link / none")),
-            ("a / e / d", Some("Add / edit / delete location")),
+            ("a / e / d", Some("Add / edit / remove folder")),
             ("r", Some("Refresh locations")),
             ("Commands", None),
-            ("Ctrl+L", Some("Switch to Target")),
+            ("Ctrl+L", Some("Switch to Skills")),
             ("s", Some("Save")),
             ("Ctrl+S", Some("Save and exit")),
-            ("u", Some("Undo staged edits")),
+            ("u", Some("Undo unsaved changes")),
             ("q", Some("Quit; close overlays like Esc")),
         ]),
     }
@@ -1985,9 +2010,7 @@ fn render_skill_details(
         Style::default().fg(DIM_FOREGROUND),
     ))];
     if document.is_empty() {
-        lines.push(Line::from(
-            "No readable SKILL.md is available for this Skill.",
-        ));
+        lines.push(Line::from("Cannot find or read this skill's SKILL.md."));
     } else {
         let mut frontmatter = false;
         let mut fenced_code = false;
@@ -2020,7 +2043,7 @@ fn render_skill_details(
             .wrap(ratatui::widgets::Wrap { trim: true })
             .scroll((scroll, 0))
             .block(modal_block(
-                &format!("Skill Details: {title}"),
+                &format!("Skill details: {title}"),
                 Some("j/k or ↑/↓ scroll · PgUp/PgDn page · Enter/Esc close"),
             )),
         area,
@@ -2201,15 +2224,15 @@ fn save_warning_modal(message: &str) -> (String, String, Option<String>, bool) {
             Some(footer),
             true,
         )
-    } else if message.starts_with("Save Library changes?") {
+    } else if message.starts_with("Save library changes?") {
         (
-            "Save Library Changes".to_owned(),
+            "Save library changes".to_owned(),
             remove_question_from_first_line(&body),
             Some(footer),
             true,
         )
     } else {
-        ("Confirm Save".to_owned(), body, Some(footer), true)
+        ("Confirm save".to_owned(), body, Some(footer), true)
     }
 }
 
@@ -2256,10 +2279,12 @@ fn confirmation_text(text: &str) -> Text<'static> {
             if line.is_empty() {
                 return Line::default();
             }
-            if line.starts_with("• Guarded") || contains_any(line, &["warning", "conflict"]) {
+            if line.starts_with("• Needs confirmation")
+                || contains_any(line, &["warning", "conflict"])
+            {
                 return Line::styled(line.to_owned(), Style::default().fg(WARNING));
             }
-            if line.starts_with("• Blocked")
+            if line.starts_with("• Cannot change")
                 || contains_any(
                     line,
                     &[
@@ -2593,7 +2618,7 @@ fn run_library_once(
                         .as_ref()
                         .map_or(0, |(_, acquisitions)| acquisitions.len());
                     Overlay::ConfirmSaveWarning(format!(
-                        "Save Library changes? {acquisition_count} acquisition(s); {} Enablement reference(s) in the current Target will become Unresolved.\ny/Enter proceed · n/Esc return",
+                        "Save library changes? {acquisition_count} skills to add to the library. The current repository will no longer be able to find {} enabled skills.\ny/Enter proceed · n/Esc return",
                         affected.len()
                     ))
                 };
@@ -2635,7 +2660,7 @@ fn run_library_once(
         Effect::ApplyLocationEdit { edit, value } => {
             let value = value.trim();
             if value.is_empty() {
-                model.overlay = Overlay::Notice("Location path cannot be empty.".to_owned());
+                model.overlay = Overlay::Notice("Folder path cannot be empty.".to_owned());
                 return Ok(None);
             }
             let previous_checks = library_skill_checks(&model.rows);
@@ -2644,7 +2669,7 @@ fn run_library_once(
             if edit {
                 let Some(index) = model.selected_row().and_then(|row| row.location_index) else {
                     model.overlay =
-                        Overlay::Notice("Select a Location divider to edit.".to_owned());
+                        Overlay::Notice("Select a library folder row to edit.".to_owned());
                     return Ok(None);
                 };
                 let old = &locations[index];
@@ -2679,7 +2704,7 @@ fn run_library_once(
         }
         Effect::ApplySourceKey(_value) => {
             model.overlay = Overlay::Notice(
-                "Source keys are derived from the discovered Location and cannot be edited."
+                "Source names come from their library folders and cannot be edited here."
                     .to_owned(),
             );
             Ok(None)
@@ -2690,7 +2715,8 @@ fn run_library_once(
                 .filter(|row| row.kind == RowKind::Location)
                 .and_then(|row| row.location_index)
             else {
-                model.overlay = Overlay::Notice("Select a Location divider to delete.".to_owned());
+                model.overlay =
+                    Overlay::Notice("Select a library folder row to remove.".to_owned());
                 return Ok(None);
             };
             working_config = library_config_from_rows(&working_config, &model.rows)?;
@@ -2944,9 +2970,8 @@ fn run_target_once(
                 }
             };
             if state.tabs.is_empty() {
-                model.overlay = Overlay::Notice(
-                    "There is no Skill Directory to edit; add one instead.".to_owned(),
-                );
+                model.overlay =
+                    Overlay::Notice("No skill folder is selected. Add one first.".to_owned());
                 return Ok(None);
             }
             if edit {
@@ -2959,7 +2984,7 @@ fn run_target_once(
                     })
                 {
                     model.overlay = Overlay::Notice(
-                        "Disable and save every Skill before changing this directory path."
+                        "Disable all skills and save before changing this directory path."
                             .to_owned(),
                     );
                     return Ok(None);
@@ -3045,7 +3070,7 @@ fn run_target_once(
                             || row.initial_check == Some(CheckState::Checked))
                 }) {
                     model.overlay = Overlay::Notice(
-                        "Disable and save every Skill in this directory before deleting it."
+                        "Disable all skills in this folder and save before removing the folder from the configuration."
                             .to_owned(),
                     );
                     return Ok(None);
@@ -3057,7 +3082,7 @@ fn run_target_once(
                 activate_target_tab(model, &state.tabs, &dirty_scopes, target);
             } else {
                 model.overlay = Overlay::Notice(
-                    "Each scope must keep at least one Skill Directory.".to_owned(),
+                    "Keep at least one skill folder for your user account and one for this repository.".to_owned(),
                 );
             }
             Ok(None)
@@ -3139,7 +3164,7 @@ fn build_target_state(
     {
         for recommendation in repository.recommendations.iter().rev() {
             let mut row = Row::diagnostic(format!(
-                "[ ] {} exists; press `a` to add this Skill Directory",
+                "[ ] {} exists; press `a` to add this skill folder",
                 recommendation.path()
             ));
             row.name = "Recommendation".to_owned();
@@ -3337,20 +3362,31 @@ fn save_review_overlay(plan: &crate::reconcile::Plan) -> Overlay {
     if plan_is_safe(plan) {
         Overlay::ConfirmSave
     } else {
-        let mut message = String::from("Review Guarded and Blocked Changes:\n");
+        let mut message = String::from("Review changes before saving:\n");
         for item in plan
             .items()
             .iter()
             .filter(|item| item.safety() != crate::reconcile::Safety::Safe)
         {
             message.push_str(&format!(
-                "• {:?} {} — {}\n",
-                item.safety(),
+                "• {}: {}\n  {}\n",
+                match item.safety() {
+                    crate::reconcile::Safety::Guarded => "Needs confirmation",
+                    crate::reconcile::Safety::Blocked => "Cannot change",
+                    crate::reconcile::Safety::Safe => unreachable!("safe changes are filtered out"),
+                },
                 item.path().display(),
                 item.reason()
             ));
         }
-        message.push_str("\ny/Enter save and authorize every listed Guarded Change · n/Esc return");
+        if plan
+            .items()
+            .iter()
+            .any(|item| item.safety() == crate::reconcile::Safety::Blocked)
+        {
+            message.push_str("\nItems marked 'Cannot change' will be skipped.\n");
+        }
+        message.push_str("\ny/Enter confirm and save · n/Esc return");
         Overlay::GuardedConfirmation(message)
     }
 }
@@ -3368,18 +3404,11 @@ fn commit_scope_save(
 }
 
 fn show_save_result(model: &mut Model, report: &crate::app::CommandReport) {
-    let mut summary = String::from("Save completed with unresolved work:\n");
-    for change in &report.changes {
-        summary.push_str(&format!(
-            "• {:?}: {} ({})\n",
-            change.outcome, change.path, change.action
-        ));
-    }
-    for diagnostic in &report.diagnostics {
-        summary.push_str("• ");
-        summary.push_str(&diagnostic.message);
-        summary.push('\n');
-    }
+    let mut summary = String::from("Some changes still need attention:\n");
+    summary.push_str(&crate::cli::render_text(
+        report,
+        crate::cli::ColorPolicy::Never,
+    ));
     summary.push_str("\nPress Enter to exit.");
     model.overlay = Overlay::Result(summary);
 }
@@ -3490,9 +3519,9 @@ fn rows_for_directory(
                         .as_str()
                         .rsplit('/')
                         .next()
-                        .unwrap_or("unresolved")
+                        .unwrap_or("unavailable")
                         .to_owned(),
-                    "Unavailable or unresolved Skill".to_owned(),
+                    "Skill not found or unreadable".to_owned(),
                     false,
                 )
             });
@@ -3510,9 +3539,9 @@ fn rows_for_directory(
                         .as_str()
                         .rsplit('/')
                         .next()
-                        .unwrap_or("unresolved")
+                        .unwrap_or("unavailable")
                         .to_owned(),
-                    "Enabled in User Scope".to_owned(),
+                    "Enabled for your user account".to_owned(),
                     false,
                 )
             });
@@ -3587,12 +3616,12 @@ fn rows_for_directory(
                 "Disabled"
             });
         let overlap = if observation.is_some_and(|observation| observation.overlap_advisory()) {
-            " · Library Location overlap may affect this Enablement"
+            " · Overlapping library folders may affect this skill"
         } else {
             ""
         };
         let mut row = if desired.is_none() && inherited {
-            Row::inherited_user(source.clone(), name, description, available, "User Scope")
+            Row::inherited_user(source.clone(), name, description, available, "User account")
         } else {
             Row::skill_inventory(SkillInventoryRow {
                 group: source.clone(),
@@ -3627,7 +3656,8 @@ fn rows_for_directory(
             row.initial_action = row.action.clone();
         }
         if inherited && desired.is_some() {
-            row.details.push_str(" · also active in User Scope");
+            row.details
+                .push_str(" · also enabled for your user account");
         }
         rows.push(row);
     }
@@ -3711,16 +3741,16 @@ fn materialization_state(state: &MaterializationState) -> &'static str {
     match state {
         MaterializationState::Missing => "Missing",
         MaterializationState::CanonicalLink | MaterializationState::EquivalentCopy => "In Sync",
-        MaterializationState::DivergedCopy => "Diverged Copy",
+        MaterializationState::DivergedCopy => "Copy has changed",
         MaterializationState::UnknownExpectedEntry | MaterializationState::Uninspectable => {
-            "Unresolved"
+            "Unavailable"
         }
-        MaterializationState::NoncanonicalLink => "Noncanonical Link",
-        MaterializationState::BrokenLink => "Broken Link",
-        MaterializationState::MisdirectedLink => "Misdirected Link",
-        MaterializationState::CopyIneligible => "Copy-Ineligible",
-        MaterializationState::WrongKind => "Wrong Kind",
-        MaterializationState::ExpectedEntryCollision => "Collision",
+        MaterializationState::NoncanonicalLink => "Link needs updating",
+        MaterializationState::BrokenLink => "Link destination missing",
+        MaterializationState::MisdirectedLink => "Link points elsewhere",
+        MaterializationState::CopyIneligible => "Cannot copy safely",
+        MaterializationState::WrongKind => "Path already occupied",
+        MaterializationState::ExpectedEntryCollision => "Duplicate name",
     }
 }
 
@@ -3791,18 +3821,18 @@ fn library_rows(config: &LibraryConfig, snapshot: &LibrarySnapshot) -> Vec<Row> 
         let mut location_row = Row::location(location.path());
         location_row.location_index = Some(index);
         location_row.description = if index == 0 {
-            "Writable local Library Location".to_owned()
+            "Writable library folder".to_owned()
         } else {
-            "Read-only Library Location".to_owned()
+            "Read-only library folder".to_owned()
         };
         if let Some(observed) = snapshot.locations().get(index) {
             location_row.details = format!(
-                "expression {} · resolved {} · {}",
+                "Configured path: {} · Full path: {} · {}",
                 observed.expression(),
                 observed
                     .resolved()
                     .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "unresolved".to_owned()),
+                    .unwrap_or_else(|| "unavailable".to_owned()),
                 if observed.available() {
                     "available"
                 } else {
@@ -3811,9 +3841,9 @@ fn library_rows(config: &LibraryConfig, snapshot: &LibrarySnapshot) -> Vec<Row> 
             );
         }
         if snapshot.location_has_overlap_advisory(index) {
-            location_row
-                .details
-                .push_str(" · WARNING: overlaps another explicitly authorized Library Location");
+            location_row.details.push_str(
+                " · WARNING: overlaps another library folder; allowed in the configuration",
+            );
         }
         rows.push(location_row);
         for source in snapshot
@@ -3833,28 +3863,33 @@ fn library_rows(config: &LibraryConfig, snapshot: &LibrarySnapshot) -> Vec<Row> 
                 source.available(),
                 source.key_collision(),
             );
+            let source_kind = match source.kind() {
+                crate::library::SourceKind::Local => "Local folder",
+                crate::library::SourceKind::Git => "Git repository",
+                crate::library::SourceKind::Unknown => "Unknown source",
+            };
             source_row.description = format!(
-                "{:?} Source · {} skill{}",
-                source.kind(),
+                "{} · {} skill{}",
+                source_kind,
                 skill_count,
                 if skill_count == 1 { "" } else { "s" }
             );
             source_row.details = format!(
-                "{:?} Source · root {} · origin {}{}",
-                source.kind(),
+                "{} · Folder: {} · Git remote: {}{}",
+                source_kind,
                 source
                     .root()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| "unavailable".to_owned()),
                 source.origin().unwrap_or("none"),
                 if snapshot.location_has_overlap_advisory(index) {
-                    " · WARNING: Library Location overlap"
+                    " · WARNING: library folder overlap"
                 } else {
                     ""
                 }
             );
             if source.key_collision() {
-                source_row.state = "Key Collision".to_owned();
+                source_row.state = "Duplicate name".to_owned();
                 source_row.initial_state = source_row.state.clone();
                 source_row.check = Some(CheckState::Invalid);
             }
@@ -4178,6 +4213,52 @@ mod internal_tests {
     }
 
     #[test]
+    fn occupied_ignore_path_review_explains_replacement_and_preserves_the_folder() {
+        let home = tempfile::tempdir().unwrap();
+        let repository = home.path().join("repo");
+        std::fs::create_dir_all(repository.join(".agents/skills")).unwrap();
+        let git = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&repository)
+            .output()
+            .unwrap();
+        assert!(git.status.success());
+        let ignore = repository.join(".agents/.gitignore");
+        std::fs::create_dir(&ignore).unwrap();
+        std::fs::write(ignore.join("custom-rule"), "keep me\n").unwrap();
+        let paths = AppPaths::new(home.path().to_owned());
+        let session = TargetWorkflow::load(&repository).unwrap();
+        let prepared =
+            TargetWorkflow::prepare_save(&paths, &session, session.config.clone()).unwrap();
+        let overlay = save_review_overlay(prepared.plan());
+        let Overlay::GuardedConfirmation(ref message) = overlay else {
+            panic!("expected a confirmation prompt");
+        };
+        assert!(message.contains("Needs confirmation"), "{message}");
+        assert!(message.contains("Saving will replace it"), "{message}");
+        assert!(!message.to_lowercase().contains("guarded"), "{message}");
+        assert!(!message.contains("canonical"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(ignore.join("custom-rule")).unwrap(),
+            "keep me\n"
+        );
+        let mut model = Model::new(Workspace::Target, Vec::new());
+        model.overlay = overlay;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_overlay(frame, &model))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("ignore file"), "{screen}");
+        assert!(screen.contains("confirm and save"), "{screen}");
+    }
+
+    #[test]
     fn initial_target_tab_prefers_the_first_repository_tab() {
         let tabs = vec![
             TargetTab {
@@ -4325,7 +4406,7 @@ mod internal_tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(repository_screen.contains("Target: ~/Development/project"));
+        assert!(repository_screen.contains("Repository: ~/Development/project"));
 
         activate_target_tab(&mut model, &tabs, &BTreeSet::new(), 0);
         terminal.draw(|frame| render(frame, &model)).unwrap();
@@ -4336,7 +4417,7 @@ mod internal_tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(user_screen.contains("Target: ~/.agents/skills"));
+        assert!(user_screen.contains("User skills: ~/.agents/skills"));
         assert!(!user_screen.contains("~/Development/project"));
     }
 
@@ -4491,8 +4572,8 @@ mod internal_tests {
     fn confirmation_distinguishes_desired_actions_from_warnings() {
         let text = confirmation_text(
             "• Move to Library: source → destination\n\
-             • Guarded existing path — conflict\n\
-             • Blocked tracked path — cannot replace",
+             • Needs confirmation: existing path\n\
+             • Cannot change: tracked path",
         );
 
         assert_eq!(text.lines[0].style.fg, None);

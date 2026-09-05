@@ -81,7 +81,7 @@ impl SourceKey {
                 && lower.split('/').count() >= 2
                 && lower.split('/').all(canonical_segment))
             .then_some(lower);
-            Err(ValidationError::new("Source Key", value, suggestion))
+            Err(ValidationError::new("source name", value, suggestion))
         }
     }
 }
@@ -109,11 +109,7 @@ impl SkillDirectoryKey {
         } else {
             let lower = value.to_ascii_lowercase().replace('_', "-");
             let suggestion = (lower != value && canonical_segment(&lower)).then_some(lower);
-            Err(ValidationError::new(
-                "Skill Directory Key",
-                value,
-                suggestion,
-            ))
+            Err(ValidationError::new("skill folder key", value, suggestion))
         }
     }
 }

@@ -59,10 +59,11 @@ enablements: []
 "#;
 
     let LoadResult::Invalid { issues } = RepositoryConfigCodec::parse(input) else {
-        panic!("expected root-level Skill Directory to be rejected");
+        panic!("expected root-level skill folder to be rejected");
     };
     assert!(issues.iter().any(|issue| {
-        issue.message.contains("must be nested") && issue.path == "skill_directories.skills"
+        issue.message.contains("Use a nested skill folder")
+            && issue.path == "skill_directories.skills"
     }));
 }
 

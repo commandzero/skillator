@@ -184,7 +184,7 @@ fn temporary_messages_use_the_final_status_line() {
     let model = Model::new(
         Workspace::Target,
         vec![
-            Row::diagnostic("Skill Directory needs attention"),
+            Row::diagnostic("skill folder needs attention"),
             Row::source("local/library", CheckState::Unchecked),
         ],
     );
@@ -203,12 +203,12 @@ fn temporary_messages_use_the_final_status_line() {
         lines
             .last()
             .unwrap()
-            .contains("Skill Directory needs attention")
+            .contains("skill folder needs attention")
     );
     assert!(
         lines[..lines.len() - 1]
             .iter()
-            .all(|line| !line.contains("Skill Directory needs attention"))
+            .all(|line| !line.contains("skill folder needs attention"))
     );
     assert!(!lines.iter().any(|line| line.contains("Diagnostic")));
 }
@@ -222,7 +222,7 @@ fn notice_messages_use_the_final_status_line_without_a_modal() {
             "release-checklist",
             "Prepare a release",
             true,
-            "User Scope",
+            "User account",
         )],
     );
     reduce(&mut model, Action::Toggle);
@@ -349,7 +349,7 @@ fn inherited_user_skill_renders_as_read_only_user_enablement() {
                 "release-checklist",
                 "Prepare a release",
                 true,
-                "User Scope",
+                "User account",
             ),
             Row::source("another/library", CheckState::Unchecked),
         ],
@@ -374,7 +374,7 @@ fn inherited_user_skill_renders_as_read_only_user_enablement() {
             .content()
             .iter()
             .any(|cell| cell.symbol() == "r" && cell.fg == Color::Indexed(240)),
-        "inherited User Scope entries should use the dim foreground"
+        "inherited User account entries should use the dim foreground"
     );
 
     reduce(&mut model, Action::MoveUp);
@@ -601,7 +601,7 @@ fn library_keeps_the_default_location_in_the_table_until_edit_is_requested() {
         .map(|cell| cell.symbol())
         .collect::<String>();
 
-    assert!(!screen.contains("Edit Library Location"));
+    assert!(!screen.contains("Edit library folder"));
     assert!(screen.contains("./library"));
     assert!(screen.contains("a/e/d location"));
 
@@ -614,7 +614,7 @@ fn library_keeps_the_default_location_in_the_table_until_edit_is_requested() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(editor.contains("Edit Library Location"));
+    assert!(editor.contains("Edit library folder"));
     assert!(editor.contains("Enter apply · Esc cancel"));
 }
 
@@ -648,13 +648,13 @@ fn confirmation_uses_a_descriptive_title_and_bottom_border_controls() {
 
     let title_line = lines
         .iter()
-        .position(|line| line.contains("Discard Workspace Changes"))
+        .position(|line| line.contains("Discard changes"))
         .unwrap();
     let footer_line = lines
         .iter()
         .position(|line| line.contains("y/Enter discard"))
         .unwrap();
-    assert!(lines[title_line].contains("┌ Discard Workspace Changes "));
+    assert!(lines[title_line].contains("┌ Discard changes "));
     assert!(lines[footer_line].contains("└"));
     assert!(lines[footer_line].contains("n/Esc return"));
     assert!(
