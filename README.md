@@ -18,6 +18,12 @@ To install the current checkout instead:
 cargo install --path . --locked
 ```
 
+To install the prebuilt formula from GitHub:
+
+```sh
+brew install commandzero/tools/skillator
+```
+
 Supports macOS, Linux, and WSL using its Linux filesystem. Native Windows is not supported.
 
 ## Get started
