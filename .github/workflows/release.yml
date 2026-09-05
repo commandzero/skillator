@@ -58,7 +58,10 @@ jobs:
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/skillator" "dist/${ARTIFACT}"
           tar -C dist -czf "dist/${ARTIFACT}.tar.gz" "${ARTIFACT}"
-          shasum -a 256 "dist/${ARTIFACT}.tar.gz" > "dist/${ARTIFACT}.tar.gz.sha256"
+          (
+            cd dist
+            shasum -a 256 "${ARTIFACT}.tar.gz"
+          ) > "dist/${ARTIFACT}.tar.gz.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
