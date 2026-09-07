@@ -30,3 +30,12 @@ Removing a library folder unregisters it and leaves its files and saved skill ch
 Use Git to create a linked worktree when requested. Preview and apply `skillator sync worktree` for that destination, then verify its skills and its entry in `targets list`.
 
 Worktree sync uses the primary worktree's choices and this machine's library. Use `sync target` when the intent is to apply a checkout's own saved choices. Sync reads existing settings; use the setup and selection commands when those settings need to change.
+
+An optional repository-local `post-checkout` hook can run this sync automatically after a populated linked worktree is created. Check it with `skillator hook status`. Do not rely on it for agent or CI completion: use the explicit sequence below so the workflow is visible and works when hooks are absent or disabled.
+
+```sh
+git worktree add <directory> <branch-or-commit>
+skillator sync worktree <directory>
+```
+
+Use `skillator hook install --check` before enabling the hook. An existing hook needs explicit `--force` to be preserved and chained. `git worktree add --no-checkout` bypasses `post-checkout`, and `SKILLATOR_NO_AUTO_SYNC=1` skips the automatic step for one operation. If an automatic sync reports a failure, retry the explicit command and verify with `targets list`.

@@ -5,6 +5,7 @@ pub mod config;
 pub mod domain;
 mod fs_safety;
 pub mod git;
+pub mod hooks;
 pub mod library;
 mod materialization;
 pub mod reconcile;

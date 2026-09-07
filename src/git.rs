@@ -36,6 +36,7 @@ pub struct PathFacts {
 pub struct GitRepository {
     root: PathBuf,
     git_dir: PathBuf,
+    common_dir: PathBuf,
     bare: bool,
     superproject: Option<PathBuf>,
 }
@@ -80,6 +81,15 @@ impl GitRepository {
             });
         }
         let git_dir = PathBuf::from(stdout(&git_dir_output)?.trim());
+        let common_dir_output = git_at(&root, ["rev-parse", "--git-common-dir"])?;
+        if !common_dir_output.status.success() {
+            return Err(GitError::NotWorktree {
+                message: String::from_utf8_lossy(&common_dir_output.stderr)
+                    .trim()
+                    .to_owned(),
+            });
+        }
+        let common_dir = resolve_git_path(&root, stdout(&common_dir_output)?.trim());
         let super_output = git_at(&root, ["rev-parse", "--show-superproject-working-tree"])?;
         let superproject = super_output
             .status
@@ -91,6 +101,7 @@ impl GitRepository {
         Ok(Self {
             root,
             git_dir,
+            common_dir,
             bare: false,
             superproject,
         })
@@ -102,6 +113,20 @@ impl GitRepository {
 
     pub fn git_dir(&self) -> &Path {
         &self.git_dir
+    }
+
+    pub fn common_dir(&self) -> &Path {
+        &self.common_dir
+    }
+
+    pub fn is_linked_worktree(&self) -> bool {
+        self.git_dir != self.common_dir
+    }
+
+    pub fn hooks_path(&self) -> Result<PathBuf, GitError> {
+        let output = self.command(["rev-parse", "--git-path", "hooks"])?;
+        require_success(&output, "git rev-parse --git-path hooks")?;
+        Ok(resolve_git_path(&self.root, stdout(&output)?.trim()))
     }
 
     pub fn is_bare(&self) -> bool {
@@ -331,6 +356,15 @@ where
     S: AsRef<OsStr>,
 {
     Ok(git_command(path).args(args).output()?)
+}
+
+fn resolve_git_path(root: &Path, path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
 }
 
 fn git_command(path: &Path) -> Command {

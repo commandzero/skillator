@@ -18,6 +18,7 @@ fn help_and_version_are_successful_text_on_stdout() {
                 .and(predicate::str::contains("target"))
                 .and(predicate::str::contains("targets"))
                 .and(predicate::str::contains("user"))
+                .and(predicate::str::contains("hook"))
                 .and(predicate::str::contains("\n  worktree").not()),
         )
         .stderr(predicate::str::is_empty());
@@ -54,6 +55,16 @@ fn help_and_version_are_successful_text_on_stdout() {
             predicate::str::contains("list")
                 .and(predicate::str::contains("remove"))
                 .and(predicate::str::contains("prune")),
+        );
+    Command::cargo_bin("skillator")
+        .unwrap()
+        .args(["hook", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("install")
+                .and(predicate::str::contains("status"))
+                .and(predicate::str::contains("uninstall")),
         );
     Command::cargo_bin("skillator")
         .unwrap()
