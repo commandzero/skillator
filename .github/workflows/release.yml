@@ -35,6 +35,10 @@ jobs:
         with:
           node-version: '22'
       - run: bash scripts/setup-tools.sh
+      - name: Install policy check dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep shellcheck
       - run: bash scripts/preflight.sh
       - name: Validate release proposal and tag
         run: |

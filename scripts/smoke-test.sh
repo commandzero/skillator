@@ -16,6 +16,8 @@ Follow the example instructions.
 SKILL
 # HOME is only set for isolated child processes; no user configuration is read.
 HOME="$scratch/home" "$binary" library add "$scratch/library"
-HOME="$scratch/home" "$binary" library list | rg -F example
+listing=$(HOME="$scratch/home" "$binary" library list)
+[[ "$listing" == *example* ]]
 HOME="$scratch/home" "$binary" library remove "$scratch/library"
-test -z "$(HOME="$scratch/home" "$binary" library list | rg -F example || true)"
+test -z "$(listing=$(HOME="$scratch/home" "$binary" library list)
+[[ "$listing" == *example* ]] || true)"

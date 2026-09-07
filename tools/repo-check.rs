@@ -291,12 +291,12 @@ fn check_review(root: &Path, head: &str, id: &str) -> Result<String> {
     Ok(archive)
 }
 
-fn validate_selected(root: &Path, head: &str, archives: &[String]) -> Result<()> {
-    if archives.is_empty() {
-        return Ok(());
-    }
+fn stage_selected(root: &Path, head: &str, archives: &[String]) -> Result<tempfile::TempDir> {
     let stage = tempfile::tempdir()?;
     let mut paths = files(root, head, "openspec/specs")?;
+    // Preserve the reviewed revision's configuration and local schema definitions.
+    paths.extend(files(root, head, "openspec/config.yaml")?);
+    paths.extend(files(root, head, "openspec/schemas")?);
     for archive in archives {
         paths.extend(files(root, head, archive)?);
     }
@@ -308,10 +308,14 @@ fn validate_selected(root: &Path, head: &str, archives: &[String]) -> Result<()>
             git(root, &["show", &format!("{head}:{path}")])?,
         )?;
     }
-    fs::write(
-        stage.path().join("openspec/config.yaml"),
-        "schema: spec-driven\n",
-    )?;
+    Ok(stage)
+}
+
+fn validate_selected(root: &Path, head: &str, archives: &[String]) -> Result<()> {
+    if archives.is_empty() {
+        return Ok(());
+    }
+    let stage = stage_selected(root, head, archives)?;
     for kind in ["--specs", "--archived"] {
         let status = Command::new("openspec")
             .current_dir(stage.path())

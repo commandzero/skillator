@@ -283,3 +283,40 @@ fn changed_main_specs_require_an_association() {
     let head = repo.commit();
     assert!(selected(repo.root(), base.trim(), &head, NONE).is_err());
 }
+
+#[test]
+fn validation_uses_reviewed_config_and_schemas_without_unrelated_changes() {
+    let repo = Repo::new();
+    let config = "schema: custom\ncontext: Committed project settings\n";
+    repo.write("openspec/config.yaml", config);
+    repo.write("openspec/schemas/custom/schema.yaml", "name: custom\n");
+    repo.archived("selected");
+    repo.archived("unrelated");
+    repo.active("active");
+    let head = repo.commit();
+    repo.write("openspec/config.yaml", "schema: spec-driven\n");
+    let archive = "openspec/changes/archive/2026-09-06-selected".to_owned();
+    let stage = stage_selected(repo.root(), &head, std::slice::from_ref(&archive)).unwrap();
+    assert_eq!(
+        fs::read_to_string(stage.path().join("openspec/config.yaml")).unwrap(),
+        config
+    );
+    assert_eq!(
+        fs::read_to_string(stage.path().join("openspec/schemas/custom/schema.yaml")).unwrap(),
+        "name: custom\n"
+    );
+    assert!(stage.path().join(&archive).is_dir());
+    assert!(
+        stage
+            .path()
+            .join("openspec/specs/unrelated/spec.md")
+            .is_file()
+    );
+    assert!(
+        !stage
+            .path()
+            .join("openspec/changes/archive/2026-09-06-unrelated")
+            .exists()
+    );
+    assert!(!stage.path().join("openspec/changes/active").exists());
+}
