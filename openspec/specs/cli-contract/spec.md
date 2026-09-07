@@ -2,17 +2,23 @@
 
 ## Purpose
 Defines Skillator's small public command surface, non-interactive synchronization behavior, compact machine-readable output, and stable process outcomes for scripts.
+
 ## Requirements
 ### Requirement: The CLI exposes interactive defaults and explicit command groups
-Skillator SHALL expose top-level `init`, `library`, `target`, `targets`, `user`, and `sync` commands. It SHALL NOT expose a top-level `worktree` command. Unqualified `skillator [DIRECTORY]` SHALL launch the Target TUI, and unqualified `skillator library` SHALL launch the Library TUI. `init`, `library add`, `library remove`, `library prune`, `library locations`, `library list`, `target list`, `target link`, `target copy`, `target remove`, `targets list`, `targets remove`, `targets prune`, `user list`, `user link`, `user copy`, and `user remove` SHALL run without an interactive terminal. `skillator sync target [directory]` SHALL run ordinary Target reconciliation. `skillator sync worktree [directory]` SHALL project primary-worktree Target state into a linked worktree. Both explicit sync forms SHALL default the directory to `.`.
+Skillator SHALL expose top-level `init`, `library`, `target`, `targets`, `user`, `sync`, and `hook` commands. It SHALL NOT expose a top-level `worktree` command. Unqualified `skillator [DIRECTORY]` SHALL launch the Target TUI, and unqualified `skillator library` SHALL launch the Library TUI. `init`, `library add`, `library remove`, `library prune`, `library locations`, `library list`, `target list`, `target link`, `target copy`, `target remove`, `targets list`, `targets remove`, `targets prune`, `user list`, `user link`, `user copy`, and `user remove` SHALL run without an interactive terminal. `skillator sync target [directory]` SHALL run ordinary Target reconciliation. `skillator sync worktree [directory]` SHALL project primary-worktree Target state into a linked worktree. Both explicit sync forms SHALL default the directory to `.`. The non-interactive `skillator hook install`, `skillator hook status`, and `skillator hook uninstall` commands SHALL manage the repository-local Git integration. The MVP MUST NOT expose aliases or command-line registration CRUD.
 
 #### Scenario: Default root invocation
+
 - **WHEN** the user runs `skillator` in a Git worktree with interactive input and output
 - **THEN** Skillator opens the normal Library workspace with its first-run welcome when Library Configuration is absent, otherwise launches the Target TUI for the current worktree root
 
 #### Scenario: Bare Library invocation
 - **WHEN** the user runs `skillator library` with interactive input and output
 - **THEN** Skillator launches the Library TUI without requiring a Target Repository
+
+#### Scenario: Library invocation outside Git
+- **WHEN** the user runs `skillator library` from a non-Git directory with interactive input and output
+- **THEN** Skillator launches the Library workspace without requiring a Target
 
 #### Scenario: Library subcommand without a terminal
 - **WHEN** the user runs `skillator library list elastic` without interactive input or output
@@ -29,6 +35,26 @@ Skillator SHALL expose top-level `init`, `library`, `target`, `targets`, `user`,
 #### Scenario: Bare sync discovers a Target
 - **WHEN** the user runs `skillator sync` from a primary worktree or ordinary Git checkout
 - **THEN** Skillator runs Target synchronization
+
+#### Scenario: Hook commands do not require a terminal
+- **WHEN** the user runs any `skillator hook` command with redirected input or output
+- **THEN** Skillator performs the requested inspection or mutation without launching a TUI
+
+### Requirement: Hook mutations follow shared CLI safety rules
+`skillator hook install` and `skillator hook uninstall` SHALL support `--check` and the text, JSON, and YAML formats. Installation SHALL support `--force` only for an inspected, readable existing hook that can be preserved and chained. `--check --force` SHALL be invalid. `skillator hook status` SHALL be read-only and SHALL reject `--check`.
+
+#### Scenario: Hook installation conflict
+- **WHEN** hook installation encounters an unrelated existing hook without `--force`
+- **THEN** it emits a trustworthy guarded report and performs no write
+
+#### Scenario: Invalid hook options
+- **WHEN** the user supplies `--check --force` to a hook mutation
+- **THEN** command parsing fails with exit status `2`
+
+#### Scenario: Machine-readable hook report
+- **WHEN** the user requests JSON or YAML from a hook mutation or status command
+- **THEN** Skillator emits ANSI-free deterministic output using the same format and stable exit-status meanings as other non-interactive commands
+
 ### Requirement: Interactive commands require terminals
 The Target and Library TUI commands SHALL require both interactive input and output terminals. A non-TTY invocation SHALL fail with guidance and MUST NOT silently run synchronization. `-h`, `--help`, and root `-V` or `--version` SHALL render text to stdout and exit successfully.
 
@@ -36,7 +62,7 @@ The Target and Library TUI commands SHALL require both interactive input and out
 - **WHEN** the root command lacks an interactive input or output terminal
 - **THEN** Skillator reports the requirement and performs no writes
 ### Requirement: Sync has a bounded option set
-`skillator sync` and `skillator worktree sync` SHALL support only `--check`, `--force`, `--format <text|json|yaml>`, and `--color <auto|always|never>` in addition to one optional Target directory. Format SHALL default to `text`. `--check --force` SHALL be invalid, and explicit color SHALL conflict with JSON or YAML.
+`skillator sync` and its explicit `target` and `worktree` modes SHALL support only `--check`, `--force`, `--format <text|json|yaml>`, and `--color <auto|always|never>` in addition to one optional Target directory. Format SHALL default to `text`. `--check --force` SHALL be invalid, and explicit color SHALL conflict with JSON or YAML.
 
 #### Scenario: Equals and separated format syntax
 - **WHEN** the user supplies either `--format=json` or `--format json`
@@ -52,7 +78,7 @@ Check mode SHALL run the same loading, discovery, observation, validation, and p
 - **WHEN** check observes a missing Materialization that ordinary sync could safely create
 - **THEN** it reports Would Apply and leaves the filesystem unchanged
 ### Requirement: Sync does not create or edit desired state
-Sync SHALL load current local Target configuration and reconcile only filesystem state. It MUST NOT create missing Repository Configuration, change Repository Configuration, or register Sources or Skills. `worktree sync` is the sole exception: it MAY replace the current linked worktree's local Target configuration with the validated primary worktree configuration. Missing Repository Configuration for ordinary sync SHALL direct the user to the TUI. Missing Library configuration SHALL behave as an empty Library, leaving existing Source references Unresolved while permitting independent work that does not require Source content.
+Sync SHALL load current local Target configuration and reconcile only filesystem state. It MUST NOT create missing Repository Configuration, change Repository Configuration, or register Sources or Skills. `sync worktree` is the sole exception: it MAY replace the current linked worktree's local Target configuration with the validated primary worktree configuration. Missing Repository Configuration for ordinary sync SHALL direct the user to the TUI. Missing Library configuration SHALL behave as an empty Library, leaving existing Source references Unresolved while permitting independent work that does not require Source content.
 
 #### Scenario: Missing Repository Configuration
 - **WHEN** sync targets a repository without `.agents/skillator.yaml`
@@ -63,7 +89,7 @@ Sync SHALL load current local Target configuration and reconcile only filesystem
 - **THEN** sync treats the Library as empty, preserves desired state, and reports unresolved references rather than malformed input
 
 #### Scenario: Worktree command is not ordinary sync
-- **WHEN** `skillator worktree sync` has a valid primary worktree configuration and the current linked worktree has none
+- **WHEN** `skillator sync worktree` has a valid primary worktree configuration and the current linked worktree has none
 - **THEN** it copies the primary configuration before reconciling the current worktree
 ### Requirement: Completed reports use stdout and diagnostics use stderr
 A completed trustworthy sync or check report SHALL be written entirely to stdout, including a non-converged report returning `1`. Parser errors and fatal pre-report failures SHALL be written entirely to stderr with stdout empty. Help and version SHALL always use text stdout.

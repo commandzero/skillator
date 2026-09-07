@@ -8,7 +8,7 @@ Defines how a registered linked Git worktree receives clone-local Target configu
 
 ### Requirement: Worktree sync projects primary local Target state
 
-`skillator worktree sync` SHALL run only from a registered linked Git worktree. It SHALL discover the primary and current roots through Git's registered worktree metadata, read and validate the primary `.agents/skillator.yaml`, and atomically publish the same configuration only into the current worktree. It SHALL then reconcile the current worktree using that copied desired state and the current user's Library. It MUST NOT change the primary worktree, the Library configuration, or either worktree's Git index.
+`skillator sync worktree` SHALL run only from a registered linked Git worktree. It SHALL discover the primary and current roots through Git's registered worktree metadata, read and validate the primary `.agents/skillator.yaml`, and atomically publish the same configuration only into the current worktree. It SHALL then reconcile the current worktree using that copied desired state and the current user's Library. It MUST NOT change the primary worktree, the Library configuration, or either worktree's Git index.
 
 #### Scenario: Linked worktree receives configuration and Skills
 
