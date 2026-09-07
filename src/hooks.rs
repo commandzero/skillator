@@ -559,6 +559,18 @@ fn permission_mode(metadata: &Metadata) -> u32 {
     }
 }
 
+fn set_permission_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Ok(())
+    }
+}
+
 fn write_new_hook(context: &HookContext, original: Option<&OriginalHook>) -> Result<(), HookError> {
     if let Some(parent) = context.hook_path.parent() {
         fs::create_dir_all(parent).map_err(fatal_io)?;
@@ -799,7 +811,7 @@ fn write_noreplace(path: &Path, bytes: &[u8], mode: u32) -> Result<(), HookError
     let result = (|| {
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
+        set_permission_mode(&temporary, mode)?;
         rename_noreplace(&temporary, path)
     })();
     if result.is_err() {
@@ -956,6 +968,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn force_install_preserves_and_uninstall_restores_existing_hook() {
         let directory = test_repository();
