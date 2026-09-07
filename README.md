@@ -26,6 +26,10 @@ brew install commandzero/tools/skillator
 
 Supports macOS, Linux, and WSL using its Linux filesystem. Native Windows is not supported.
 
+Release builds provide macOS arm64, Linux x86_64, and Linux arm64 archives.
+The next release targets macOS 14 or Ubuntu 24.04 with glibc 2.39 and newer.
+See [release support and installation checks](docs/release.md) for the exact matrix and limits.
+
 ## Get started
 
 1. Run `skillator` inside a Git repository.
@@ -75,6 +79,29 @@ In a linked Git worktree, `skillator sync` applies the primary worktree's skill 
 
 Every command has `--help`. Use `--check` to preview changes and `--format json` for scripts. Review affected paths before using `--force` to replace or remove existing content. Items marked "Cannot change" are skipped even with `--force`.
 
+Commands take paths and selectors as arguments. They do not read documents from stdin or use `-` as a stdin marker.
+JSON and YAML each contain one complete report. Diagnostics go to stderr.
+
+| Exit status | Meaning |
+| --- | --- |
+| 0 | Completed acceptable result |
+| 1 | Completed result with unresolved or unapplied work |
+| 2 | Invalid invocation |
+| 3 | Invalid or unavailable required input |
+| 4 | Target is busy |
+| 5 | Fatal failure, including a failed stdout write |
+
+A failed output write, including a broken pipe, returns 5. It can leave a partial report, so scripts must check the exit status before parsing it.
+Mutations may already have completed when output fails; inspect state before retrying.
+
+Skillator retains the discovered inventory and complete report in memory.
+It reads configuration, skill metadata, and individual skill files in full; it has no configured size or depth limit.
+Use narrowly scoped library locations for large collections. There is no bounded-memory or network-filesystem timeout guarantee.
+
+For the TUI, use `q` to quit or `u` to discard pending edits.
+Process signals can interrupt work without a final report or graceful rollback.
+After an interrupted mutation, inspect the next run's recovery diagnostics and preserve any reported recovery artifacts.
+
 ## Local files and Git
 
 Skillator stores the library's folder list in `~/.skillator/library.yaml` and its registered worktrees in `~/.skillator/targets.yaml`. Account-wide skill choices live in `~/.agents/skillator.yaml`.
@@ -109,12 +136,13 @@ git rm --cached -- .agents/skillator.yaml
 ## Development
 
 ```sh
-cargo run --
-cargo fmt --check
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+bash scripts/setup-tools.sh
+bash scripts/preflight.sh
 ```
+
+Setup requires Node.js 22 or newer, curl, tar, and SHA-256 tools. Install Rust through rustup, plus ShellCheck and ripgrep.
+See [contributor checks](docs/contributing.md), [release procedure](docs/release.md), and [change history](CHANGELOG.md).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENCE.md)

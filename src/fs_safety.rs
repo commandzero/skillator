@@ -26,6 +26,9 @@ fn rename_with_mode(source: &Path, destination: &Path, mode: RenameMode) -> io::
     })?;
 
     #[cfg(target_os = "linux")]
+    // SAFETY: Both CStrings own NUL-terminated path bytes and outlive the call.
+    // The syscall receives two valid directory descriptors, two path pointers,
+    // and a supported rename flag. It retains no pointers after returning.
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,
@@ -41,6 +44,8 @@ fn rename_with_mode(source: &Path, destination: &Path, mode: RenameMode) -> io::
     };
 
     #[cfg(target_os = "macos")]
+    // SAFETY: Both pointers refer to live, NUL-terminated CStrings. renamex_np
+    // only reads these paths during the call, and the flags are its constants.
     let result = unsafe {
         libc::renamex_np(
             source.as_ptr(),

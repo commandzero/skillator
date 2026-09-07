@@ -60,7 +60,7 @@ A managed exposure boundary where active Skills are materialized for discovery b
 _Avoid_: Target, library
 
 **Skill Directory Control File**:
-The canonical, Skillator-owned `.gitignore` in the parent of a Repository Skill Directory (for example, `.agents/.gitignore` for `.agents/skills`). It ignores Skillator-managed materializations while explicitly allowing the repository configuration and pre-existing unmanaged entries. It remains eligible for repository tracking. User Scope Skill Directories do not use control files.
+The checkout-local ignore rules for a Repository Skill Directory. They keep local configuration, the control file itself, and managed Materializations outside version control while preserving exceptions for repository-owned Skills; User Scope Skill Directories have no control file.
 _Avoid_: Repository ignore policy, user `.gitignore`
 
 **Skill Directory Key**:
