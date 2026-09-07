@@ -564,6 +564,28 @@ fn user_mutation_preserves_an_unmanaged_collision() {
 }
 
 #[test]
+fn user_remove_on_uninitialized_scope_is_unchanged_and_write_free() {
+    let home = support::TestHome::new();
+
+    Command::cargo_bin("skillator")
+        .unwrap()
+        .args([
+            "user",
+            "remove",
+            "local/library:release-checklist",
+            "--format=json",
+        ])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"in_sync\""))
+        .stdout(predicate::str::contains("\"changes\": []"));
+
+    assert!(!home.path().join(".agents/skillator.yaml").exists());
+    assert!(!home.path().join(".agents/skills").exists());
+}
+
+#[test]
 fn scope_and_target_registry_lists_are_machine_readable() {
     let fixture = Fixture::new();
     fixture.command().arg("init").assert().success();

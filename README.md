@@ -40,17 +40,29 @@ Use the `User` tab for skills available across projects. Add another skill tab f
 ## Command line
 
 ```sh
-# Add a local skill collection and find skills in it.
+# Register a local skill collection and inspect its locations.
 skillator library add /path/to/agent-skills
-skillator library list
+skillator library locations
+skillator library list --format json
+skillator library list elastic --format json
 
-# Set up this checkout, then inspect its selected skills.
+# Set up this checkout, then inspect or change its selected skills.
 skillator init
 skillator target list
-
-# Preview and apply a skill, using a selector from the library listing.
 skillator target link SOURCE:PATH --check
 skillator target link SOURCE:PATH
+skillator target copy SOURCE:PATH
+skillator target remove SOURCE:PATH --check
+
+# Inspect and change account-wide skills.
+skillator user list
+skillator user link SOURCE:PATH --check
+skillator user copy SOURCE:PATH
+skillator user remove SOURCE:PATH
+
+# Inspect or clean the machine-local Target registry.
+skillator targets list
+skillator targets prune --check
 
 # Preview and update installed skills from saved settings.
 skillator sync --check

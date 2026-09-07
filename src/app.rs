@@ -2746,6 +2746,16 @@ impl UserScopeWorkflow {
         mode: SyncMode,
     ) -> Result<CommandReport, WorkflowError> {
         let session = Self::load(paths)?;
+        if session.first_run && materialization.is_none() {
+            let mut report = simple_report(
+                session.target.root().to_owned(),
+                mode,
+                Vec::new(),
+                Vec::new(),
+            );
+            annotate_selector(&mut report, selector);
+            return Ok(report);
+        }
         let directory = select_directory(&session.config, None)?;
         if materialization.is_some() {
             let snapshot =
