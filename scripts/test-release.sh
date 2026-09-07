@@ -79,6 +79,29 @@ rm "$scratch/dist/skillator-v0.2.0-aarch64-apple-darwin.tar.gz"
 : > "$CALLS"
 if CASE=new bash "$scratch/scripts/publish-release.sh" v0.2.0 > "$scratch/output" 2>&1; then exit 1; fi
 test ! -s "$CALLS"
+# Smoke validation must reject both a no-op removal and a failed list command.
+cat > "$scratch/bin/skillator" <<'MOCK'
+#!/bin/bash
+set -eu
+case "$*" in
+  --version) echo 'skillator 0.2.0' ;;
+  'library add '*) touch "$HOME/registered" ;;
+  'library remove '*) [[ "$SMOKE_CASE" = noop ]] || rm "$HOME/registered" ;;
+  'library list')
+    [[ "$SMOKE_CASE" != list-failure ]] || exit 1
+    if [[ -f "$HOME/registered" ]]; then echo example; fi
+    ;;
+  *) exit 1 ;;
+esac
+MOCK
+chmod +x "$scratch/bin/skillator"
+for mode in valid noop list-failure; do
+  if SMOKE_CASE="$mode" bash "$repo/scripts/smoke-test.sh" "$scratch/bin/skillator" 0.2.0; then
+    [[ "$mode" = valid ]] || { echo "Smoke test accepted $mode" >&2; exit 1; }
+  else
+    [[ "$mode" != valid ]] || { echo 'Valid smoke fixture failed' >&2; exit 1; }
+  fi
+done
 # Invalid and mismatched tags must fail before notes are used.
 cd "$scratch"
 for tag in v0.2.1 bad v01.2.0; do

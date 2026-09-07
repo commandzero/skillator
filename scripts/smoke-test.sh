@@ -19,5 +19,5 @@ HOME="$scratch/home" "$binary" library add "$scratch/library"
 listing=$(HOME="$scratch/home" "$binary" library list)
 [[ "$listing" == *example* ]]
 HOME="$scratch/home" "$binary" library remove "$scratch/library"
-test -z "$(listing=$(HOME="$scratch/home" "$binary" library list)
-[[ "$listing" == *example* ]] || true)"
+listing=$(HOME="$scratch/home" "$binary" library list)
+[[ "$listing" != *example* ]]

@@ -8,6 +8,7 @@ export OPENSPEC_TELEMETRY=0
 cargo() { rustup run "${RUST_TOOLCHAIN:-1.97.1}" cargo "$@"; }
 policy_checks() {
   shellcheck scripts/*.sh
+  # The pinned actionlint release prints its bare version on the first line.
   actionlint -version | head -n 1 | rg -x "$ACTIONLINT_VERSION"
   actionlint
   okf --version | rg -F "okf $OKF_VERSION "

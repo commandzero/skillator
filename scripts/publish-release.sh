@@ -34,6 +34,7 @@ compare_downloads() {
     fi
   done
 }
+# gh accepts explicit boolean values; false also suppresses interactive defaults.
 prerelease=false
 [[ "$tag" != *-* ]] || prerelease=true
 if gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
