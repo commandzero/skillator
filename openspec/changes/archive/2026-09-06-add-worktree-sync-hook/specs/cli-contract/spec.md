@@ -2,7 +2,7 @@
 
 ### Requirement: The CLI exposes four entry points
 
-The MVP SHALL expose `skillator [OPTIONS] [DIRECTORY]`, `skillator library [OPTIONS]`, `skillator sync [OPTIONS] [DIRECTORY]`, and `skillator worktree sync [OPTIONS] [DIRECTORY]`, together with the non-interactive `skillator hook install`, `skillator hook status`, and `skillator hook uninstall` commands. The root command SHALL launch the Target TUI, `library` SHALL launch the user-scoped Library TUI from any directory, `sync` SHALL reconcile one existing local Target configuration, `worktree sync` SHALL project the primary worktree's local Target configuration into the current linked worktree, and `hook` SHALL manage the repository-local Git integration. The MVP MUST NOT expose aliases or command-line registration CRUD.
+The MVP SHALL expose `skillator [OPTIONS] [DIRECTORY]`, `skillator library [OPTIONS]`, `skillator sync [OPTIONS] [DIRECTORY]`, and the explicit `skillator sync target [OPTIONS] [DIRECTORY]` and `skillator sync worktree [OPTIONS] [DIRECTORY]` modes, together with the non-interactive `skillator hook install`, `skillator hook status`, and `skillator hook uninstall` commands. The root command SHALL launch the Target TUI, `library` SHALL launch the user-scoped Library TUI from any directory, bare `sync` SHALL select the discovered target or worktree mode, `sync target` SHALL reconcile one existing local Target configuration, `sync worktree` SHALL project the primary worktree's local Target configuration into the current linked worktree, and `hook` SHALL manage the repository-local Git integration. The MVP MUST NOT expose aliases or command-line registration CRUD.
 
 #### Scenario: Default root invocation
 
@@ -16,7 +16,7 @@ The MVP SHALL expose `skillator [OPTIONS] [DIRECTORY]`, `skillator library [OPTI
 
 #### Scenario: Worktree synchronization
 
-- **WHEN** the user runs `skillator worktree sync` from a registered linked worktree
+- **WHEN** the user runs `skillator sync worktree` from a registered linked worktree
 - **THEN** Skillator projects the primary worktree's local Target state and emits the selected report format
 
 #### Scenario: Hook commands do not require a terminal
