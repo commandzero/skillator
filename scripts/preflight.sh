@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source scripts/tool-versions.sh
+source scripts/tools-versions.sh
+source scripts/filenames-check.sh
 export PATH="$PWD/.tools/bin:$PWD/.tools/node_modules/.bin:$PATH"
 export OPENSPEC_TELEMETRY=0
 # Resolve via rustup even when a system Cargo precedes its shims on PATH.
@@ -12,15 +13,13 @@ policy_checks() {
   actionlint -version | head -n 1 | rg -x "$ACTIONLINT_VERSION"
   actionlint
   okf --version | rg -F "okf $OKF_VERSION "
-  if rg --files --hidden --no-ignore docs | LC_ALL=C rg '/[^/]*[A-Z][^/]*$'; then
-    echo 'All filenames under docs/ must be lowercase.' >&2
-    exit 1
-  fi
+  check_lowercase_filenames docs
+  bash scripts/filenames-test.sh
   okf validate docs/
   test "$(openspec --version)" = "$OPENSPEC_VERSION"
   # Open changes belong to individual PRs; unrelated drafts do not block CI.
   openspec validate --specs --strict --no-interactive
-  bash scripts/test-release.sh
+  bash scripts/release-test.sh
 }
 case "${1:-all}" in
   all)

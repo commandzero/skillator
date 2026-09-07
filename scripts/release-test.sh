@@ -5,7 +5,7 @@ repo=$PWD
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/scripts" "$scratch/bin" "$scratch/dist"
-cp scripts/publish-release.sh scripts/release-notes.sh "$scratch/scripts/"
+cp scripts/release-publish.sh scripts/release-notes-generate.sh "$scratch/scripts/"
 cat > "$scratch/Cargo.toml" <<'TOML'
 [package]
 version = "0.2.0"
@@ -52,7 +52,7 @@ chmod +x "$scratch/bin/gh"
 export PATH="$scratch/bin:$PATH" FIXTURE="$scratch" GITHUB_REPOSITORY=fixture/skillator CALLS="$scratch/calls"
 for mode in new same different partial network; do
   : > "$CALLS"
-  if CASE="$mode" bash "$scratch/scripts/publish-release.sh" v0.2.0 > "$scratch/output" 2>&1; then
+  if CASE="$mode" bash "$scratch/scripts/release-publish.sh" v0.2.0 > "$scratch/output" 2>&1; then
     [[ "$mode" = new || "$mode" = same ]] || { cat "$scratch/output"; exit 1; }
   else
     [[ "$mode" = different || "$mode" = partial || "$mode" = network ]] || { cat "$scratch/output"; exit 1; }
@@ -67,17 +67,17 @@ done
 # A dirty source or a checkout beyond the tag must fail before GitHub writes.
 : > "$CALLS"
 printf '\nUncommitted edit\n' >> "$scratch/CHANGELOG.md"
-if CASE=new bash "$scratch/scripts/publish-release.sh" v0.2.0 > "$scratch/output" 2>&1; then exit 1; fi
+if CASE=new bash "$scratch/scripts/release-publish.sh" v0.2.0 > "$scratch/output" 2>&1; then exit 1; fi
 test ! -s "$CALLS"
 git -C "$scratch" restore CHANGELOG.md
 git -C "$scratch" -c core.hooksPath=/dev/null commit --allow-empty --quiet -m 'test: later commit'
-if CASE=new bash "$scratch/scripts/publish-release.sh" v0.2.0 > "$scratch/output" 2>&1; then exit 1; fi
+if CASE=new bash "$scratch/scripts/release-publish.sh" v0.2.0 > "$scratch/output" 2>&1; then exit 1; fi
 test ! -s "$CALLS"
 git -C "$scratch" checkout --detach --quiet v0.2.0
 # An incomplete matrix must fail before contacting GitHub.
 rm "$scratch/dist/skillator-v0.2.0-aarch64-apple-darwin.tar.gz"
 : > "$CALLS"
-if CASE=new bash "$scratch/scripts/publish-release.sh" v0.2.0 > "$scratch/output" 2>&1; then exit 1; fi
+if CASE=new bash "$scratch/scripts/release-publish.sh" v0.2.0 > "$scratch/output" 2>&1; then exit 1; fi
 test ! -s "$CALLS"
 # Smoke validation must reject both a no-op removal and a failed list command.
 cat > "$scratch/bin/skillator" <<'MOCK'
@@ -96,7 +96,7 @@ esac
 MOCK
 chmod +x "$scratch/bin/skillator"
 for mode in valid noop list-failure; do
-  if SMOKE_CASE="$mode" bash "$repo/scripts/smoke-test.sh" "$scratch/bin/skillator" 0.2.0; then
+  if SMOKE_CASE="$mode" bash "$repo/scripts/release-smoke-test.sh" "$scratch/bin/skillator" 0.2.0; then
     [[ "$mode" = valid ]] || { echo "Smoke test accepted $mode" >&2; exit 1; }
   else
     [[ "$mode" != valid ]] || { echo 'Valid smoke fixture failed' >&2; exit 1; }
@@ -105,6 +105,6 @@ done
 # Invalid and mismatched tags must fail before notes are used.
 cd "$scratch"
 for tag in v0.2.1 bad v01.2.0; do
-  if bash "$repo/scripts/release-notes.sh" "$tag" >/dev/null 2>&1; then exit 1; fi
+  if bash "$repo/scripts/release-notes-generate.sh" "$tag" >/dev/null 2>&1; then exit 1; fi
 done
 echo 'Release safeguards passed: new, identical, differing, partial, network failure, wrong/dirty source, missing matrix, invalid tags.'

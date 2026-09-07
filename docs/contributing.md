@@ -12,7 +12,7 @@ Use one local entry point for the checks required by CI.
 Run the commands in this guide from the repository root.
 
 ```sh
-bash scripts/setup-tools.sh
+bash scripts/tools-setup.sh
 bash scripts/preflight.sh
 ```
 

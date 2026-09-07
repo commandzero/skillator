@@ -34,7 +34,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
-      - run: bash scripts/setup-tools.sh
+      - run: bash scripts/tools-setup.sh
       - name: Install policy check dependencies
         run: |
           sudo apt-get update
@@ -42,7 +42,7 @@ jobs:
       - run: bash scripts/preflight.sh
       - name: Validate release proposal and tag
         run: |
-          bash scripts/release-notes.sh "$RELEASE_TAG"
+          bash scripts/release-notes-generate.sh "$RELEASE_TAG"
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
       - name: Verify the minimum compiler
         run: |
@@ -91,7 +91,7 @@ jobs:
           rustflags="${rustflags} --remap-path-prefix=$(rustc --print sysroot)=/rustc"
           RUSTFLAGS="$rustflags" cargo build --release --locked --target "$RELEASE_TARGET"
       - name: Package and test extracted binaries
-        run: bash scripts/package-release.sh "$RELEASE_TAG" "$RELEASE_TARGET"
+        run: bash scripts/release-package.sh "$RELEASE_TAG" "$RELEASE_TARGET"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.target }}
@@ -117,4 +117,4 @@ jobs:
       - name: Verify complete matrix, stage draft, then publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/publish-release.sh "$RELEASE_TAG"
+        run: bash scripts/release-publish.sh "$RELEASE_TAG"

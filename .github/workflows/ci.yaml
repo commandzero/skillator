@@ -33,7 +33,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
-      - run: bash scripts/setup-tools.sh
+      - run: bash scripts/tools-setup.sh
       - name: Install policy check dependencies
         run: |
           sudo apt-get update
@@ -84,7 +84,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
-      - run: bash scripts/setup-tools.sh
+      - run: bash scripts/tools-setup.sh
       - name: Check title, archive and synchronization review
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}

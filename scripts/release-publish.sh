@@ -1,12 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-tag=${1:?Usage: publish-release.sh TAG [DIST]}
+tag=${1:?Usage: release-publish.sh TAG [DIST]}
 dist=${2:-dist}
 : "${GITHUB_REPOSITORY:?Missing release repository}"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
-bash scripts/release-notes.sh "$tag" > "$scratch/notes.md"
+bash scripts/release-notes-generate.sh "$tag" > "$scratch/notes.md"
 test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$tag^{commit}")" || {
   echo 'HEAD must be the selected release tag' >&2
   exit 1

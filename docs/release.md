@@ -93,7 +93,7 @@ This produces local files only, and does not claim compatibility on a different 
 
 ```sh
 rustup run 1.97.1 cargo build --release --locked --target aarch64-apple-darwin
-bash scripts/package-release.sh v0.1.0 aarch64-apple-darwin
+bash scripts/release-package.sh v0.1.0 aarch64-apple-darwin
 ```
 
 Replace the example tag with the checkout's manifest version.

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source scripts/tool-versions.sh
+source scripts/tools-versions.sh
 mkdir -p .tools/bin
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) platform=darwin_arm64; digest=a21ba7366d8329e7223faee0ed69eb13da27fe8acabb356bb7eb0b7f1e1cb6d8 ;;

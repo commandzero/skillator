@@ -136,7 +136,7 @@ git rm --cached -- .agents/skillator.yaml
 ## Development
 
 ```sh
-bash scripts/setup-tools.sh
+bash scripts/tools-setup.sh
 bash scripts/preflight.sh
 ```
 

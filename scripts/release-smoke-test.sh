@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-binary=${1:?Usage: smoke-test.sh BINARY VERSION}
+binary=${1:?Usage: release-smoke-test.sh BINARY VERSION}
 version=${2:?Missing version}
 binary="$(cd "$(dirname "$binary")" && pwd)/$(basename "$binary")"
 scratch=$(mktemp -d)
