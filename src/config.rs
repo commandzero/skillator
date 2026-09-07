@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const VERSION: u64 = 1;
@@ -545,10 +545,10 @@ pub struct TargetRegistry {
 impl TargetRegistry {
     pub fn new(mut targets: Vec<PathBuf>) -> Result<Self, Vec<ConfigIssue>> {
         let mut issues = Vec::new();
-        if targets.iter().any(|path| !path.is_absolute()) {
+        if targets.iter().any(|path| !is_canonical_absolute(path)) {
             issues.push(ConfigIssue {
                 path: "targets".to_owned(),
-                message: "registered Target paths must be absolute".to_owned(),
+                message: "registered Target paths must be canonical and absolute".to_owned(),
             });
         }
         targets.sort();
@@ -596,6 +596,20 @@ impl TargetRegistry {
                 .collect(),
         )
     }
+}
+
+fn is_canonical_absolute(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    let normalized: PathBuf = path.components().collect();
+    normalized.as_os_str() == path.as_os_str()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_)
+            )
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1627,5 +1641,13 @@ enablements:
             LoadResult::Invalid { .. }
         ));
         assert!(TargetRegistry::new(vec![PathBuf::from("relative")]).is_err());
+        assert!(matches!(
+            TargetRegistryCodec::parse(b"version: 1\ntargets: [/work/../a]\n"),
+            LoadResult::Invalid { .. }
+        ));
+        assert!(matches!(
+            TargetRegistryCodec::parse(b"version: 1\ntargets: [/work/./a]\n"),
+            LoadResult::Invalid { .. }
+        ));
     }
 }

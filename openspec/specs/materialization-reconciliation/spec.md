@@ -13,14 +13,12 @@ Skillator SHALL build an immutable Observed State for configured Skill Directori
 #### Scenario: Source unavailable for present copy
 - **WHEN** a copied directory is present but its Source cannot be resolved for comparison
 - **THEN** Skillator reports the Enablement as Unverifiable unless another fact proves Drift
-
 ### Requirement: Skill Directory roots and entries are inspected without unsafe traversal
 Skillator SHALL classify each configured root as absent, readable directory, inaccessible directory, symlink, or other object. It SHALL initially inspect only immediate children without following symlinks. An absent, symlinked, or non-directory root SHALL be Drifted; an inaccessible root SHALL be Unverifiable unless another mismatch is proven.
 
 #### Scenario: Symlinked Skill Directory root
 - **WHEN** the configured Skill Directory root is a symbolic link
 - **THEN** Skillator reports directory Drift and does not traverse it as a managed root
-
 ### Requirement: Expected Entry names come from valid Skill names
 For a non-root Skill, the Expected Entry SHALL be the final segment of `skill.path`, verified against frontmatter `name` when available. For `skill.path: .`, it SHALL be the validated frontmatter name. Names SHALL compare with exact case. Skillator MUST NOT invent a root-Skill name from the Source Key, repository name, or alias. Multiple Enablements in one directory resolving to the same Expected Entry SHALL form a Blocked collision group.
 
@@ -31,7 +29,6 @@ For a non-root Skill, the Expected Entry SHALL be the final segment of `skill.pa
 #### Scenario: Expected Entry collision
 - **WHEN** two Enablements in one Skill Directory resolve to the same Skill name
 - **THEN** Skillator marks the claimants Drifted and blocks all operations for that entry without blocking unrelated entries
-
 ### Requirement: Linked Materializations are canonical absolute symlinks
 A Linked Expected Entry SHALL be a symbolic link storing the canonical absolute path of its resolved Source Skill. Source changes SHALL be visible through the existing link without rewriting it. A noncanonical link reaching the correct Skill MAY be safely canonicalized. Capability failure MUST preserve `linked` desired state and MUST NOT silently create a copy.
 
@@ -42,7 +39,6 @@ A Linked Expected Entry SHALL be a symbolic link storing the canonical absolute 
 #### Scenario: Destination cannot create symlinks
 - **WHEN** the destination filesystem rejects symbolic-link creation
 - **THEN** Skillator reports a capability failure, preserves existing content, and does not fall back to Copied
-
 ### Requirement: Copied Materializations are self-contained verified snapshots
 Skillator SHALL copy a Skill through a physical recursive walk that includes hidden and Git-ignored content, excludes every exact `.git` entry at every depth, never traverses symlinks, and preserves executable file bits while clearing special permission bits. It SHALL preserve an internal symlink's exact relative text only when every resolution step and final existing target remain inside the Source Skill. Absolute, escaping, broken, cyclic, inaccessible, or unverifiable links and unsupported filesystem entry kinds SHALL make the Skill Copy-Ineligible.
 
@@ -53,7 +49,6 @@ Skillator SHALL copy a Skill through a physical recursive walk that includes hid
 #### Scenario: Escaping internal symlink
 - **WHEN** a Skill contains a symlink that escapes its tree
 - **THEN** Skillator blocks Copied materialization while allowing Linked to remain available
-
 ### Requirement: Copy equivalence compares meaningful content
 A copy SHALL be Equivalent only when relative filename bytes and case, entry kinds, regular-file bytes, symlink text, and executable state match the resolved Source Skill. Timestamps, ownership, other permission bits, ACLs, extended attributes, inode identity, and `.git` content SHALL be ignored. A difference SHALL be a Diverged Copy without attributing the edit to Source or Target.
 
@@ -64,7 +59,6 @@ A copy SHALL be Equivalent only when relative filename bytes and case, entry kin
 #### Scenario: File content changed
 - **WHEN** a copied file's bytes differ from the current Source
 - **THEN** Skillator reports a Diverged Copy and requires authorization before replacement
-
 ### Requirement: Unmanaged and duplicate content is reported conservatively
 An immediate child not reserved by Skillator and not claimed by an Expected Entry SHALL be Unmanaged and diagnostic-only. It SHALL remain Git-trackable, SHALL not contribute removal work, and SHALL not be removed by ordinary reconciliation. Skillator MAY associate it with current known Skills but MUST NOT infer that Skillator created it. Multiple entries associated with one Skill in the same directory SHALL be reported as Duplicate or Possible Duplicate; repetition across different directories SHALL not.
 
@@ -75,30 +69,44 @@ An immediate child not reserved by Skillator and not claimed by an Expected Entr
 #### Scenario: Repository-owned skill remains trackable
 - **WHEN** an unlisted repository-owned Skill is present beside managed entries
 - **THEN** Skillator leaves it unignored and performs no reconciliation action for it
-
 ### Requirement: Repository controls live beside, not inside, Skill Directories
-Every configured Repository Skill Directory SHALL use an exact UTF-8 generated `.gitignore` in the directory's parent (for example, `.agents/.gitignore` for `.agents/skills`), ending in a newline. Its generated content SHALL ignore only configured Skillator materializations and `.skillator-*` recovery artifacts. It MUST NOT use a catch-all rule, ignore an unlisted repository-owned Skill, merge user content, or modify the Git index. The parent control file SHALL be clone-local and hidden by the repository root rule `/.agents/.gitignore`. User Scope Skill Directories SHALL have no Skillator-managed `.gitignore` and no Git tracking requirement.
+Every configured Repository Skill Directory SHALL use a UTF-8 `.gitignore` in the directory's parent, ending in a newline. Skillator SHALL maintain a generated prefix containing `# Generated by Skillator`, entries that ignore the control file and clone-local configuration where applicable, a catch-all for each configured child Skill Directory, a blank line, and `# Exception list for repository tracking`. If an existing control file has no marker, Skillator SHALL prepend that generated block and retain the existing content beneath the marker. If the marker exists, Skillator SHALL preserve repository-owned lines after it when rebuilding the prefix. Selected repo Skills SHALL add exact directory exceptions without changing Repository Configuration. Skillator MUST NOT edit the repository root `.gitignore` or modify the Git index. User Scope Skill Directories SHALL have no Skillator-managed `.gitignore` and no Git tracking requirement.
 
 #### Scenario: Control file created
-- **WHEN** the control file is absent and the repository has the required root ignore rule
-- **THEN** Skillator creates it as a Safe Change and verifies configured materializations are ignored
+- **WHEN** the parent control file is absent
+- **THEN** Skillator creates it as a Safe Change and verifies clone-local state and configured Skill Directory entries are ignored
 
 #### Scenario: Managed skill is ignored locally
-- **WHEN** local Target configuration enables `release-checklist` in `.agents/skills`
-- **THEN** the generated `.agents/.gitignore` ignores `skills/release-checklist` without ignoring other entries in `skills`
+- **WHEN** `.agents/skills` is configured for a Target
+- **THEN** the generated `.agents/.gitignore` contains `skills/*` regardless of the current Enablements
 
 #### Scenario: Control file is local
-- **WHEN** the generated control file exists
-- **THEN** the root ignore rule hides it from Git status and Skillator never asks the user to stage it
+- **WHEN** the generated `.agents/.gitignore` exists
+- **THEN** its self-ignore entry leaves it out of Git status and Skillator never asks the user to stage it
+
+#### Scenario: Repository-owned tracking exception is preserved
+- **WHEN** the exception section contains `!skills/skillator/` and Skillator regenerates the control file
+- **THEN** the exception remains and `.agents/skills/skillator/` remains eligible for repository tracking
+
+#### Scenario: Existing parent ignore is prefixed
+- **WHEN** `.agents/.gitignore` exists without Skillator's exception-list marker
+- **THEN** initialization or synchronization places the generated block and marker before the existing content without discarding that content
+
+#### Scenario: Repo mode adds an exact exception
+- **WHEN** the Target TUI saves `skillator` as a repo Skill in `.agents/skills`
+- **THEN** the control file gains `!skills/skillator/` while Repository Configuration gains no Enablement
+
+#### Scenario: Root ignore remains repository-owned
+- **WHEN** Skillator initializes, saves, or synchronizes a Target
+- **THEN** the repository root `.gitignore` remains byte-for-byte unchanged
 
 #### Scenario: Tracked repository-owned entry
-- **WHEN** an Unmanaged Entry is Git-tracked
-- **THEN** Skillator preserves it, leaves it unignored, and leaves unrelated Git worktree changes untouched
+- **WHEN** an Unmanaged Entry is Git-tracked through a repository exception
+- **THEN** Skillator preserves it and leaves unrelated Git worktree changes untouched
 
 #### Scenario: Tracked expected entry
 - **WHEN** an Expected Entry is Git-tracked
 - **THEN** Skillator blocks its replacement even under force and leaves unrelated Git worktree changes untouched
-
 ### Requirement: Reconciliation plans classify every change
 Every planned mutation SHALL be exactly Safe, Guarded, or Blocked. Safe Changes SHALL be eligible for automatic apply. Guarded Changes SHALL require explicit TUI batch confirmation or invocation-wide `--force`. Blocked Changes SHALL remain unauthorized by either mechanism. Already conforming entries SHALL be No Change.
 
@@ -109,7 +117,6 @@ Every planned mutation SHALL be exactly Safe, Guarded, or Blocked. Safe Changes 
 #### Scenario: Forced mixed sync
 - **WHEN** the same plan runs with `--force`
 - **THEN** Skillator authorizes every viable Guarded Change but does not authorize Blocked work or Recovery Required
-
 ### Requirement: Safety boundaries protect uncertain or unrecoverable content
 Missing roots and Materializations, canonicalization of a correct link, replacement of a broken link after Source verification, conversion of an In-Sync Materialization, and reviewed removal of an In-Sync disabled Materialization SHALL be Safe. Replacement of recoverable conflicting content, Diverged Copies, or modified control files SHALL be Guarded. Unmanaged Entries SHALL be preserved. Invalid configuration, containment violations, unresolved required content, Copy-Ineligible Skills, inaccessible entries, unsupported capabilities, changed preconditions, tracked expected occupants, collisions, ambiguous recovery, or inability to preserve content SHALL be Blocked.
 
@@ -120,7 +127,6 @@ Missing roots and Materializations, canonicalization of a correct link, replacem
 #### Scenario: Unverifiable occupant
 - **WHEN** an occupant cannot be inspected enough to preserve or replace it safely
 - **THEN** Skillator classifies the operation as Blocked regardless of confirmation or force
-
 ### Requirement: Mutation is coordinated and preconditions are revalidated
 Save and sync SHALL acquire one exclusive Target mutation lock before planning and retain it through final observation. Worktree sync SHALL acquire the primary and destination locks in stable canonical-path order. An active owner SHALL produce Target Busy without writes. Check mode SHALL also return Target Busy rather than inspect transitional state. Immediately before every mutation, Skillator SHALL revalidate relevant Source and destination facts; changed facts SHALL block only the affected operation and MUST NOT trigger silent replanning.
 
@@ -131,7 +137,6 @@ Save and sync SHALL acquire one exclusive Target mutation lock before planning a
 #### Scenario: Source changes after staging
 - **WHEN** a Source changes while a copy candidate is staged
 - **THEN** Skillator discards the candidate when possible, leaves the existing destination untouched, and reports changed-during-reconciliation
-
 ### Requirement: Publication preserves recoverable content
 Every new link or copy SHALL be completely staged and validated as a sibling inside its destination directory before publication. When rename cannot replace the existing kind or non-empty directory portably, Skillator SHALL move the existing occupant to an operation-specific backup, install the staged candidate, verify it, and then remove the backup. Installation failure SHALL trigger rollback. Skillator MUST NOT promise transaction-wide atomicity or power-loss durability.
 
@@ -142,7 +147,6 @@ Every new link or copy SHALL be completely staged and validated as a sibling ins
 #### Scenario: Installation fails and rollback succeeds
 - **WHEN** publication fails after displacing the old occupant and restoration succeeds
 - **THEN** Skillator reports Failed — Rolled Back and retains the original destination state
-
 ### Requirement: Recovery Artifacts are never guessed away
 Immediate children beginning `.skillator-` SHALL be reserved for stages and backups. After acquiring the lock, Skillator MAY delete a validated abandoned stage after restoring any safely paired backup, and SHALL restore exactly one valid backup when its encoded original destination is absent. Ambiguous, malformed, inaccessible, or multiple backups, or coexistence of destination and backup, SHALL produce Recovery Required or Blocked with exact paths. Neither confirmation, force, nor file age SHALL authorize ambiguous deletion.
 
@@ -153,17 +157,29 @@ Immediate children beginning `.skillator-` SHALL be reserved for stages and back
 #### Scenario: Destination and backup coexist
 - **WHEN** both a destination and its abandoned backup are present
 - **THEN** Skillator preserves both and requires manual recovery
-
 ### Requirement: Partial apply keeps desired state authoritative
 A TUI save SHALL write the complete valid Repository Configuration before applying its prepared reconciliation. If configuration writing fails, no reconciliation mutation SHALL occur. After a successful configuration write, later filesystem failure MUST NOT roll desired state back. Independent viable operations SHALL continue, pure removals SHALL run last, and Skillator SHALL always perform fresh final observation and report every remaining Drift, Unverifiable state, and recovery action.
 
 #### Scenario: Filesystem failure after configuration save
 - **WHEN** valid desired state is written and a later Materialization operation fails
 - **THEN** the new Repository Configuration remains authoritative and the final result reports partial convergence for a later sync
-
 ### Requirement: Successful reconciliation is idempotent
 An In-Sync save, sync, or check SHALL perform no configuration or Materialization writes. An Equivalent Copy SHALL not be refreshed, and incidental filesystem metadata SHALL remain untouched. Repeated successful reconciliation SHALL converge on the same observable Materializations.
 
 #### Scenario: Repeated sync
 - **WHEN** a Target is fully In Sync and sync runs again
 - **THEN** Skillator reports In Sync and performs no filesystem or configuration writes
+### Requirement: CLI desired-state changes and reconciliation use one prepared operation
+A CLI command that changes an Enablement SHALL prepare configuration, control-file, and Materialization changes from one observed snapshot. Before the first write it SHALL validate every precondition and verify that loaded configuration has not changed. Application SHALL either publish the requested configuration with every authorized change, roll back recoverable work on failure, or report Recovery Required without claiming convergence.
+
+#### Scenario: Configuration changes during preparation
+- **WHEN** a configuration fingerprint differs immediately before a CLI mutation begins writing
+- **THEN** Skillator reports stale state and performs none of the prepared writes
+
+#### Scenario: Materialization fails after staging
+- **WHEN** a staged Materialization cannot be published during a CLI mutation
+- **THEN** Skillator rolls back the batch where recovery is verifiable and reports the failed operation
+
+#### Scenario: Independent blocked work
+- **WHEN** the requested Enablement change includes a Blocked Materialization change
+- **THEN** Skillator does not publish desired state that falsely claims the blocked result was achieved
