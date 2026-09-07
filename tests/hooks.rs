@@ -654,6 +654,7 @@ fn chained_predecessor_failure_is_forwarded() {
         .args([ZERO_REF, "new", "1"])
         .current_dir(&repository)
         .env("SKILLATOR_NO_AUTO_SYNC", "1")
+        .env("PATH", home.path().join("empty-path"))
         .output()
         .unwrap();
     assert_eq!(result.status.code(), Some(23));
