@@ -29,7 +29,7 @@ compare_downloads() {
   for asset in "${assets[@]}"; do
     name=$(basename "$asset")
     if ! test -f "$scratch/remote/$name" || ! cmp -s "$asset" "$scratch/remote/$name"; then
-      echo "Existing release is missing or differs at $name; no assets were replaced. See docs/release.md." >&2
+      echo "Release asset $name is missing or differs from the local file; no assets were replaced. See docs/release.md." >&2
       return 1
     fi
   done
