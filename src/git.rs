@@ -36,6 +36,7 @@ pub struct PathFacts {
 pub struct GitRepository {
     root: PathBuf,
     git_dir: PathBuf,
+    common_dir: PathBuf,
     bare: bool,
     superproject: Option<PathBuf>,
 }
@@ -80,6 +81,8 @@ impl GitRepository {
             });
         }
         let git_dir = PathBuf::from(stdout(&git_dir_output)?.trim());
+        let common_dir_output = git_at(&root, ["rev-parse", "--git-common-dir"])?;
+        let common_dir = resolve_common_dir(&root, &git_dir, &common_dir_output);
         let super_output = git_at(&root, ["rev-parse", "--show-superproject-working-tree"])?;
         let superproject = super_output
             .status
@@ -91,6 +94,7 @@ impl GitRepository {
         Ok(Self {
             root,
             git_dir,
+            common_dir,
             bare: false,
             superproject,
         })
@@ -102,6 +106,20 @@ impl GitRepository {
 
     pub fn git_dir(&self) -> &Path {
         &self.git_dir
+    }
+
+    pub fn common_dir(&self) -> &Path {
+        &self.common_dir
+    }
+
+    pub fn is_linked_worktree(&self) -> bool {
+        self.git_dir != self.common_dir
+    }
+
+    pub fn hooks_path(&self) -> Result<PathBuf, GitError> {
+        let output = self.command(["rev-parse", "--git-path", "hooks"])?;
+        require_success(&output, "git rev-parse --git-path hooks")?;
+        Ok(resolve_git_path(&self.root, stdout(&output)?.trim()))
     }
 
     pub fn is_bare(&self) -> bool {
@@ -333,6 +351,25 @@ where
     Ok(git_command(path).args(args).output()?)
 }
 
+fn resolve_git_path(root: &Path, path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+
+fn resolve_common_dir(root: &Path, git_dir: &Path, output: &Output) -> PathBuf {
+    if output.status.success()
+        && let Ok(path) = stdout(output)
+        && !path.trim().is_empty()
+    {
+        return resolve_git_path(root, path.trim());
+    }
+    git_dir.to_owned()
+}
+
 fn git_command(path: &Path) -> Command {
     let mut command = Command::new("git");
     command.arg("-C").arg(path).env("GIT_CONFIG_NOSYSTEM", "1");
@@ -360,5 +397,32 @@ fn command_error(output: &Output, command: &'static str, status: i32) -> GitErro
         command,
         status,
         message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn common_dir_falls_back_to_git_dir_when_git_lacks_common_dir_support() {
+        let output = Command::new("sh").args(["-c", "exit 1"]).output().unwrap();
+        let root = Path::new("/repo");
+        let git_dir = Path::new("/repo/.git");
+        assert_eq!(resolve_common_dir(root, git_dir, &output), git_dir);
+    }
+
+    #[test]
+    fn common_dir_resolves_successful_relative_output() {
+        let output = Command::new("sh")
+            .args(["-c", "printf %s .git"])
+            .output()
+            .unwrap();
+        let root = Path::new("/repo");
+        let git_dir = Path::new("/repo/.git");
+        assert_eq!(
+            resolve_common_dir(root, git_dir, &output),
+            PathBuf::from("/repo/.git")
+        );
     }
 }

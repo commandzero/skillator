@@ -8,6 +8,7 @@ use crate::app::{
 };
 use crate::domain::MaterializationKind;
 use crate::git::GitRepository;
+use crate::hooks::{HookReport, HookState, HookWorkflow};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use crossterm::style::Stylize;
 use serde_json::Value;
@@ -20,7 +21,7 @@ use std::process::ExitCode;
     name = "skillator",
     version,
     about = "Manage agent skills in your library, user account, and Git repositories",
-    after_help = "Examples:\n  skillator\n  skillator library\n  skillator init\n  skillator sync\n  skillator sync target --check --format=json"
+    after_help = "Examples:\n  skillator\n  skillator library\n  skillator init\n  skillator sync\n  skillator sync target --check --format=json\n  skillator hook install"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -52,6 +53,11 @@ enum Commands {
     User {
         #[command(subcommand)]
         command: UserCommand,
+    },
+    /// Install or inspect the optional Git worktree sync hook.
+    Hook {
+        #[command(subcommand)]
+        command: HookCommand,
     },
     /// Update installed skills to match saved configuration.
     ///
@@ -118,6 +124,40 @@ enum UserCommand {
     Copy(UserMutationArgs),
     /// Remove one managed skill for the current user.
     Remove(UserMutationArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum HookCommand {
+    /// Install the repository-local post-checkout hook.
+    Install(HookInstallArgs),
+    /// Inspect the repository-local post-checkout hook.
+    Status(HookStatusArgs),
+    /// Remove an unchanged Skillator-managed post-checkout hook.
+    Uninstall(HookUninstallArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct HookInstallArgs {
+    #[arg(value_name = "REPOSITORY")]
+    repository: Option<PathBuf>,
+    #[command(flatten)]
+    output: GuardedMutationOutputArgs,
+}
+
+#[derive(Debug, clap::Args)]
+struct HookStatusArgs {
+    #[arg(value_name = "REPOSITORY")]
+    repository: Option<PathBuf>,
+    #[command(flatten)]
+    output: OutputArgs,
+}
+
+#[derive(Debug, clap::Args)]
+struct HookUninstallArgs {
+    #[arg(value_name = "REPOSITORY")]
+    repository: Option<PathBuf>,
+    #[command(flatten)]
+    output: MutationOutputArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -297,6 +337,7 @@ pub fn run() -> ExitCode {
         Some(Commands::Target { command }) => run_target_command(&paths, command),
         Some(Commands::Targets { command }) => run_targets_command(&paths, command),
         Some(Commands::User { command }) => run_user_command(&paths, command),
+        Some(Commands::Hook { command }) => run_hook_command(command),
         None => {
             if !interactive_terminal() {
                 return diagnostic(
@@ -528,6 +569,103 @@ fn run_user_command(paths: &AppPaths, command: UserCommand) -> ExitCode {
         ),
         &arguments.output.output,
     )
+}
+
+fn run_hook_command(command: HookCommand) -> ExitCode {
+    match command {
+        HookCommand::Install(arguments) => {
+            if let Err(code) = validate_output(&arguments.output.output) {
+                return code;
+            }
+            finish_hook_report(
+                HookWorkflow::install(
+                    arguments.repository.unwrap_or_else(|| PathBuf::from(".")),
+                    mutation_mode(arguments.output.check, arguments.output.force),
+                ),
+                &arguments.output.output,
+            )
+        }
+        HookCommand::Status(arguments) => {
+            if let Err(code) = validate_output(&arguments.output) {
+                return code;
+            }
+            match HookWorkflow::status(arguments.repository.unwrap_or_else(|| PathBuf::from("."))) {
+                Ok(report) => render_hook_report(report, &arguments.output),
+                Err(error) => diagnostic(error.exit_status(), &error.to_string()),
+            }
+        }
+        HookCommand::Uninstall(arguments) => {
+            if let Err(code) = validate_output(&arguments.output.output) {
+                return code;
+            }
+            finish_hook_report(
+                HookWorkflow::uninstall(
+                    arguments.repository.unwrap_or_else(|| PathBuf::from(".")),
+                    mutation_mode(arguments.output.check, false),
+                ),
+                &arguments.output.output,
+            )
+        }
+    }
+}
+
+fn finish_hook_report(
+    report: Result<HookReport, crate::hooks::HookError>,
+    output: &OutputArgs,
+) -> ExitCode {
+    match report {
+        Ok(report) => render_hook_report(report, output),
+        Err(error) => diagnostic(error.exit_status(), &error.to_string()),
+    }
+}
+
+fn render_hook_report(report: HookReport, arguments: &OutputArgs) -> ExitCode {
+    let rendered = match arguments.format {
+        OutputFormat::Text => {
+            let mut text = format!("{}\t{}\n", hook_state_name(report.state), report.hook_path);
+            for change in &report.changes {
+                text.push_str(&format!(
+                    "{}\t{}\t{}\n",
+                    hook_outcome_name(change.outcome),
+                    change.path,
+                    change.action
+                ));
+            }
+            for diagnostic in &report.diagnostics {
+                text.push_str(&format!(
+                    "{}\t{}\n",
+                    diagnostic.severity, diagnostic.message
+                ));
+            }
+            Ok(text)
+        }
+        OutputFormat::Json => render_json(&report),
+        OutputFormat::Yaml => render_serialized_yaml(&report),
+    };
+    write_rendered(rendered, report.exit_status)
+}
+
+fn hook_state_name(state: HookState) -> &'static str {
+    match state {
+        HookState::Absent => "absent",
+        HookState::Installed => "installed",
+        HookState::Modified => "modified",
+        HookState::Conflict => "conflict",
+        HookState::Blocked => "blocked",
+    }
+}
+
+fn hook_outcome_name(outcome: crate::app::ReportOutcome) -> &'static str {
+    match outcome {
+        crate::app::ReportOutcome::WouldApply => "would_apply",
+        crate::app::ReportOutcome::WouldRequireForce => "would_require_force",
+        crate::app::ReportOutcome::Applied => "applied",
+        crate::app::ReportOutcome::NotAuthorized => "not_authorized",
+        crate::app::ReportOutcome::Blocked => "blocked",
+        crate::app::ReportOutcome::Failed => "failed",
+        crate::app::ReportOutcome::RolledBack => "rolled_back",
+        crate::app::ReportOutcome::RecoveryRequired => "recovery_required",
+    }
 }
 
 fn finish_report(

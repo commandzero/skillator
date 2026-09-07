@@ -67,11 +67,20 @@ skillator targets prune --check
 # Preview and update installed skills from saved settings.
 skillator sync --check
 skillator sync
+
+# Optional: sync newly created linked worktrees automatically.
+skillator hook install
+skillator hook status
+git worktree add -b feature ../feature
 ```
 
 Clone remote skill repositories with Git, then add their local folders to the Library. Use `skillator user` to manage skills for your account.
 
 In a linked Git worktree, `skillator sync` applies the primary worktree's skill choices. Elsewhere, it applies the current checkout's saved choices. Use `sync target [directory]` or `sync worktree [directory]` to choose explicitly. Sync requires existing configuration; set it up through the interface or `skillator init` first.
+
+`skillator hook install` enables an optional repository-local Git `post-checkout` hook. It runs `skillator sync worktree .` after a populated linked worktree is created. Use `skillator hook install --check` to preview installation, `--force` only when an existing hook should be preserved and chained, and `skillator hook uninstall` to remove an unchanged Skillator hook. The hook does not run for `git clone`, ordinary checkouts, or `git worktree add --no-checkout`. Set `SKILLATOR_NO_AUTO_SYNC=1` for one Git operation. Hook failures leave the worktree available; retry with `skillator sync worktree <directory>`.
+
+Hooks are optional and local to each repository. Agents and CI should keep the explicit sequence `git worktree add ...` followed by `skillator sync worktree <directory>` because it works whether or not a hook is installed.
 
 Every command has `--help`. Use `--check` to preview changes and `--format json` for scripts. Review affected paths before using `--force` to replace or remove existing content. Items marked "Cannot change" are skipped even with `--force`.
 
