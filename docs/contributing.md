@@ -33,7 +33,7 @@ RUST_TOOLCHAIN=1.97.0 bash scripts/preflight.sh test
 ## Scope and source safety
 
 This repository follows the selected CommandZero standards.
-In the team workspace, the bundle starts at [repo-man](../../repo-man/index.md); the workspace AGENTS.md supplies the applicable local pointer.
+In the team workspace, AGENTS.md supplies the local pointer to the repo-man standards bundle.
 
 The repository rules in this document make the adopted validation contract explicit.
 Changes to broader draft standards do not silently change this contract.

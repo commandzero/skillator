@@ -84,10 +84,13 @@ fn conventional_titles_and_association_fields_are_checked() {
     ] {
         assert!(title_check(title).is_err(), "{title}");
     }
+    assert!(!valid_id("none"));
     let repo = Repo::new();
     for body in [
         "",
         "OpenSpec changes: ../escape",
+        "OpenSpec changes: none, feature",
+        "OpenSpec changes: feature, none",
         "OpenSpec changes: none",
         "OpenSpec changes: none\nOpenSpec changes: none",
         "OpenSpec changes: none\nOpenSpec reason: Replace this placeholder",

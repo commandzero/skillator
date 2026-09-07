@@ -17,7 +17,8 @@ fn git(root: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn valid_id(id: &str) -> bool {
-    !id.is_empty()
+    id != "none"
+        && !id.is_empty()
         && id.as_bytes()[0].is_ascii_lowercase()
         && id
             .bytes()
