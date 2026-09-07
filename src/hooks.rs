@@ -212,15 +212,38 @@ impl HookWorkflow {
                         )],
                     ));
                 }
-                chain_existing_hook(&context, &original)?;
-                Ok(report(
-                    &context,
-                    action_mode,
-                    HookState::Installed,
-                    false,
-                    changes,
-                    Vec::new(),
-                ))
+                match chain_existing_hook(&context, &original) {
+                    Ok(()) => Ok(report(
+                        &context,
+                        action_mode,
+                        HookState::Installed,
+                        false,
+                        changes,
+                        Vec::new(),
+                    )),
+                    Err(HookError::InvalidInput { message }) => Ok(report(
+                        &context,
+                        action_mode,
+                        HookState::Blocked,
+                        true,
+                        vec![
+                            change(
+                                &context.predecessor_path,
+                                "preserve_hook",
+                                "blocked",
+                                ReportOutcome::Blocked,
+                            ),
+                            change(
+                                &context.hook_path,
+                                "install_hook",
+                                "blocked",
+                                ReportOutcome::Blocked,
+                            ),
+                        ],
+                        vec![diagnostic("hook_install_blocked", message)],
+                    )),
+                    Err(error) => Err(error),
+                }
             }
             HookState::Modified | HookState::Blocked => {
                 let message = inspection.reason.unwrap_or_else(|| {
@@ -1051,8 +1074,10 @@ mod tests {
         std::fs::write(&hook, b"#!/bin/sh\nexit 0\n").unwrap();
         std::fs::write(&predecessor, b"reserved\n").unwrap();
 
-        let result = HookWorkflow::install(directory.path(), SyncMode::Apply { force: true });
-        assert!(result.is_err());
+        let report =
+            HookWorkflow::install(directory.path(), SyncMode::Apply { force: true }).unwrap();
+        assert_eq!(report.state, HookState::Blocked);
+        assert_eq!(report.exit_status, 1);
         assert_eq!(std::fs::read(&hook).unwrap(), b"#!/bin/sh\nexit 0\n");
         assert_eq!(std::fs::read(&predecessor).unwrap(), b"reserved\n");
     }

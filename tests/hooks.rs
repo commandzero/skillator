@@ -127,6 +127,34 @@ fn hook_status_reports_an_unrelated_conflict() {
 }
 
 #[test]
+fn forced_install_blockers_use_structured_reports() {
+    let home = support::TestHome::new();
+    let repository = home.git_repo("target");
+    let hook = GitRepository::discover(&repository)
+        .unwrap()
+        .hooks_path()
+        .unwrap()
+        .join("post-checkout");
+    let predecessor = hook
+        .parent()
+        .unwrap()
+        .join("post-checkout.skillator-original");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(&predecessor, b"reserved\n").unwrap();
+
+    Command::cargo_bin("skillator")
+        .unwrap()
+        .args(["hook", "install", "--force", "--format=json"])
+        .current_dir(&repository)
+        .env("HOME", home.path())
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("\"state\": \"blocked\""))
+        .stdout(predicate::str::contains("hook_install_blocked"));
+}
+
+#[test]
 fn non_regular_hook_path_is_blocked_without_replacement() {
     let home = support::TestHome::new();
     let repository = home.git_repo("target");

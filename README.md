@@ -59,7 +59,7 @@ skillator sync
 # Optional: sync newly created linked worktrees automatically.
 skillator hook install
 skillator hook status
-git worktree add ../feature -b feature
+git worktree add -b feature ../feature
 ```
 
 Clone remote skill repositories with Git, then add their local folders to the Library. Use `skillator user` to manage skills for your account.
