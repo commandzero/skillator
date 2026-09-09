@@ -346,7 +346,7 @@ fn run() -> Result<()> {
             for id in &ids {
                 match check_review(&root, head.trim(), id) {
                     Ok(archive) => archives.push(archive),
-                    Err(error) => failures.push(format!("{id}: {error}")),
+                    Err(error) => failures.push(error.to_string()),
                 }
             }
             if !failures.is_empty() { return Err(failures.join("\n").into()); }
