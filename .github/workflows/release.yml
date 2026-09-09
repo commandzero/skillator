@@ -2,100 +2,119 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build and release"
+        description: Existing reviewed release tag
         required: true
-        default: "v0.1.0"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: 1.97.1
+          components: clippy,rustfmt
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - run: bash scripts/tools-setup.sh
+      - name: Install policy check dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep shellcheck
+      - run: bash scripts/preflight.sh
+      - name: Validate release proposal and tag
+        run: |
+          bash scripts/release-notes-generate.sh "$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+      - name: Verify the minimum compiler
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          RUST_TOOLCHAIN=1.97.0 bash scripts/preflight.sh test
+
   build:
-    name: Build ${{ matrix.target }}
+    needs: preflight
+    name: Build and test ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-          - os: macos-latest
+          - os: macos-14
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
     steps:
-      - name: Check out the release tag
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.97.1
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
+          toolchain: 1.97.1
           targets: ${{ matrix.target }}
-
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: release-${{ runner.os }}-${{ runner.arch }}-1.97.1-${{ hashFiles('Cargo.lock') }}
+      - run: bash scripts/preflight.sh test
       - name: Build
         shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           rustflags="--remap-path-prefix=${GITHUB_WORKSPACE}=."
           rustflags="${rustflags} --remap-path-prefix=${HOME}/.cargo=/cargo"
           rustflags="${rustflags} --remap-path-prefix=$(rustc --print sysroot)=/rustc"
-          RUSTFLAGS="${rustflags}" cargo build --release --locked --target "${{ matrix.target }}"
-
-      - name: Package
-        shell: bash
-        env:
-          ARTIFACT: skillator-${{ env.RELEASE_TAG }}-${{ matrix.target }}
-        run: |
-          set -eu
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/skillator" "dist/${ARTIFACT}"
-          tar -C dist -czf "dist/${ARTIFACT}.tar.gz" "${ARTIFACT}"
-          (
-            cd dist
-            shasum -a 256 "${ARTIFACT}.tar.gz"
-          ) > "dist/${ARTIFACT}.tar.gz.sha256"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          RUSTFLAGS="$rustflags" cargo build --release --locked --target "$RELEASE_TARGET"
+      - name: Package and test extracted binaries
+        run: bash scripts/release-package.sh "$RELEASE_TAG" "$RELEASE_TARGET"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.target }}
+          if-no-files-found: error
           path: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
 
   release:
-    name: Publish GitHub release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
-
-      - name: Create or update release
+      - name: Verify complete matrix, stage draft, then publish
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -eu
-          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" dist/* --repo "${GITHUB_REPOSITORY}" --clobber
-          else
-            gh release create "${RELEASE_TAG}" dist/* \
-              --repo "${GITHUB_REPOSITORY}" \
-              --verify-tag \
-              --title "Skillator ${RELEASE_TAG}" \
-              --generate-notes
-          fi
+        run: bash scripts/release-publish.sh "$RELEASE_TAG"
