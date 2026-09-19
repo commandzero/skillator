@@ -119,6 +119,8 @@ Each checkout stores its choices in `.agents/skillator.yaml`. Saving or syncing 
 
 To track a project-owned skill in Git, select its row and press `m` to mark it as `[r] repo`, then save. Skillator adds an ignore exception for that folder. Skills marked `[u] user` are managed in the User tab.
 
+If an agent does not discover a user skill, select its `[u] user` row in a Repository tab and press `m` to stage a repository link, then save. The link points to the Library skill. Press Space on the override and save to remove only the repository link and return to `[u] user`. User Scope stays unchanged.
+
 If an older checkout already tracks the local configuration, keep the file while removing it from Git:
 
 ```sh

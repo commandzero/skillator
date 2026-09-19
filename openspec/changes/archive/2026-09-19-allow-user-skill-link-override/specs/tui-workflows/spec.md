@@ -58,4 +58,5 @@ All edits SHALL remain staged until save and SHALL obey existing reconciliation 
 #### Scenario: Occupied repository destination
 
 - **WHEN** saving an override encounters unmanaged content at the expected repository entry
-- **THEN** existing reconciliation rules block replacement and preserve both that content and the User Scope Skill
+- **THEN** existing reconciliation rules require explicit confirmation before replacing recoverable conflicting content and preserve it if confirmation is declined
+- **AND** Blocked conflicts remain blocked even with confirmation, and User Scope stays unchanged

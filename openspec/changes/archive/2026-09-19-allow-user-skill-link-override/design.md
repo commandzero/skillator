@@ -9,7 +9,7 @@ The current TUI treats inherited rows as read-only, while the existing target li
 2. Retain inheritance information while an explicit override is staged or saved. Space removes only the repository Enablement and restores `[u] user`; it cannot disable User Scope.
 3. Keep ordinary link/copy mode behavior once an explicit override exists. This change adds only the entry from inherited state and the return to it.
 4. Require the same valid, registered, available Library skill as any new repository Enablement. An unresolved inherited row stays unchanged and explains why a link cannot be staged.
-5. Reuse existing staged-save, containment, collision, confirmation, and removal rules. An override does not authorize replacement of unmanaged content.
+5. Reuse existing staged-save, containment, collision, confirmation, and removal rules. Replacing recoverable conflicting content requires explicit confirmation; Blocked conflicts remain blocked even with confirmation. Staging an override alone does not authorize replacement.
 
 ## Validation
 

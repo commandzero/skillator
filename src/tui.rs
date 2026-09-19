@@ -110,6 +110,7 @@ pub struct Row {
     acquisition_pending: bool,
     acquisition_source: Option<std::path::PathBuf>,
     acquisition_source_root_git: bool,
+    inherited_user: bool,
     repository_candidate: bool,
     repository_name: Option<String>,
 }
@@ -159,6 +160,7 @@ impl Row {
             acquisition_pending: false,
             acquisition_source: None,
             acquisition_source_root_git: false,
+            inherited_user: false,
             repository_candidate: false,
             repository_name: None,
         }
@@ -209,6 +211,7 @@ impl Row {
             acquisition_pending: false,
             acquisition_source: None,
             acquisition_source_root_git: false,
+            inherited_user: false,
             repository_candidate: false,
             repository_name: None,
         }
@@ -231,6 +234,7 @@ impl Row {
             MaterializationKind::Linked,
             state,
         );
+        row.inherited_user = true;
         row.check = Some(CheckState::User);
         row.initial_check = Some(CheckState::User);
         row.mode = None;
@@ -267,6 +271,7 @@ impl Row {
             acquisition_pending: false,
             acquisition_source: None,
             acquisition_source_root_git: false,
+            inherited_user: false,
             repository_candidate: false,
             repository_name: None,
         }
@@ -301,6 +306,7 @@ impl Row {
             acquisition_pending: false,
             acquisition_source: None,
             acquisition_source_root_git: false,
+            inherited_user: false,
             repository_candidate: false,
             repository_name: None,
         }
@@ -914,9 +920,23 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
             let mut changed_group = None;
             if let Some(row) = model.rows.get_mut(model.selected)
                 && row.kind == RowKind::Skill
-                && row.available
             {
-                if model.workspace == Workspace::Target && row.repository_candidate {
+                if model.workspace == Workspace::Target && row.check == Some(CheckState::User) {
+                    if row.available && row.valid {
+                        row.check = Some(CheckState::Checked);
+                        row.mode = Some(MaterializationKind::Linked);
+                        refresh_staged_state(row);
+                        changed_group = row_identity(row).map(str::to_owned);
+                        model.dirty = true;
+                    } else {
+                        model.overlay = Overlay::Notice(
+                            "Cannot link this skill: it is not available as a valid, registered Library skill."
+                                .to_owned(),
+                        );
+                    }
+                } else if !row.available {
+                    return Vec::new();
+                } else if model.workspace == Workspace::Target && row.repository_candidate {
                     if row.check == Some(CheckState::Repository) {
                         model.overlay = Overlay::Notice(
                             "This Skill is repository-owned. Manage its tracking exception in the parent .gitignore."
@@ -1160,8 +1180,7 @@ fn toggle_selected(model: &mut Model) {
         }
         RowKind::Skill if row.check == Some(CheckState::User) => {
             model.overlay = Overlay::Notice(
-                "This skill is enabled for your user account. Change it in the User tab."
-                    .to_owned(),
+                "Edit in the User tab, or press `m` to link in this repository.".to_owned(),
             );
         }
         RowKind::Skill if row.repository_candidate => {
@@ -1202,6 +1221,9 @@ fn update_target_materialization_mode(row: &mut Row) {
             .or(Some(MaterializationKind::Linked));
     } else {
         row.mode = None;
+        if row.inherited_user {
+            row.check = Some(CheckState::User);
+        }
     }
 }
 
@@ -1938,6 +1960,11 @@ fn render_help(frame: &mut Frame<'_>, workspace: Workspace, scroll: u16) {
             ("Skills", None),
             ("Space", Some("Enable / disable")),
             ("m", Some("Cycle modes: link / copy / repo")),
+            ("m on user", Some("Stage a repository link")),
+            (
+                "Space on override",
+                Some("Remove override; keep user skill"),
+            ),
             ("Skill tabs", None),
             ("Ctrl+T", Some("Add skill tab")),
             ("t", Some("Change repository")),
@@ -3655,7 +3682,9 @@ fn rows_for_directory(
             );
             row.initial_action = row.action.clone();
         }
-        if inherited && desired.is_some() {
+        row.inherited_user = inherited;
+        if inherited {
+            row.available = available && library.resolve(&skill_key).is_some();
             row.details
                 .push_str(" · also enabled for your user account");
         }
@@ -4147,6 +4176,209 @@ fn fatal(error: impl std::fmt::Display) -> WorkflowError {
 #[cfg(test)]
 mod internal_tests {
     use super::*;
+
+    #[test]
+    fn inherited_override_modes_and_cancellation_remain_staged() {
+        let row = Row::inherited_user("local/library", "demo", "Demo", true, "User account");
+        let mut model = Model::new(Workspace::Target, vec![row.clone()]);
+
+        reduce(&mut model, Action::SwitchMode);
+        assert_eq!(model.rows[0].check, Some(CheckState::Checked));
+        assert_eq!(model.rows[0].mode, Some(MaterializationKind::Linked));
+        assert_eq!(model.rows[0].action, "Enable link");
+        assert_eq!(reduce(&mut model, Action::Undo), vec![Effect::Undo]);
+
+        reduce(&mut model, Action::SwitchMode);
+        assert_eq!(model.rows[0].mode, Some(MaterializationKind::Copied));
+        assert_eq!(model.rows[0].action, "Enable copy");
+        reduce(&mut model, Action::SwitchMode);
+        assert_eq!(model.rows[0].mode, Some(MaterializationKind::Linked));
+
+        reduce(&mut model, Action::Toggle);
+        assert_eq!(model.rows[0], row);
+    }
+
+    #[test]
+    fn unavailable_inherited_skill_explains_why_linking_is_blocked() {
+        let row = Row::inherited_user("missing/source", "demo", "Demo", false, "User account");
+        let mut model = Model::new(Workspace::Target, vec![row.clone()]);
+        reduce(&mut model, Action::SwitchMode);
+        assert_eq!(model.rows[0], row);
+        assert!(!model.dirty);
+        assert!(
+            matches!(model.overlay, Overlay::Notice(ref message) if message.contains("not available"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_override_save_reload_remove_and_conflict_preserve_user_scope() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().to_owned());
+        let skill = home.path().join(".skillator/library/demo");
+        std::fs::create_dir_all(&skill).unwrap();
+        let document = "---\nname: demo\ndescription: Demo skill\n---\n";
+        std::fs::write(skill.join("SKILL.md"), document).unwrap();
+        let session = LibraryWorkflow::load(&paths).unwrap();
+        LibraryWorkflow::save(&paths, &session, &session.config, true).unwrap();
+        let selector = crate::app::SkillSelector::parse("local/library:demo").unwrap();
+        let report = UserScopeWorkflow::mutate_enablement(
+            &paths,
+            &selector,
+            Some(MaterializationKind::Copied),
+            crate::app::SyncMode::Apply { force: false },
+        )
+        .unwrap();
+        assert_eq!(report.exit_status, 0);
+        let user_bytes = std::fs::read(paths.user_config()).unwrap();
+        let user_skill = home.path().join(".agents/skills/demo");
+        let repository = home.path().join("project");
+        std::fs::create_dir(&repository).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .arg(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let load = || {
+            let library_config = LibraryWorkflow::load(&paths).unwrap().config;
+            let library = LibraryWorkflow::snapshot(&paths, &library_config);
+            build_target_state(
+                UserScopeWorkflow::load(&paths).unwrap(),
+                TargetWorkflow::load(&repository).unwrap(),
+                &library,
+                &library_config,
+            )
+        };
+        let select = |state: &LoadedTargetState| {
+            let mut model = initial_target_model(&state.tabs);
+            model.selected = model
+                .rows
+                .iter()
+                .position(|row| row.is_skill() && row.name == "demo")
+                .unwrap();
+            model
+        };
+        let mut state = load();
+        let mut model = select(&state);
+        assert_eq!(model.rows[model.selected].check, Some(CheckState::User));
+        reduce(&mut model, Action::SwitchMode);
+        assert!(!repository.join(".agents/skillator.yaml").exists());
+        // Discard rebuilds from saved state, without a repository declaration.
+        let discarded = select(&load());
+        assert_eq!(
+            discarded.rows[discarded.selected].check,
+            Some(CheckState::User)
+        );
+        store_active_target_tab(&model, &mut state.tabs);
+        let prepared =
+            prepare_scope_save(&paths, &state, &state.tabs, TargetTabScope::Repository).unwrap();
+        let report = commit_scope_save(&paths, prepared).unwrap();
+        assert_eq!(report.exit_status, 0);
+        let destination = repository.join(".agents/skills/demo");
+        assert!(
+            destination
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            destination.canonicalize().unwrap(),
+            skill.canonicalize().unwrap()
+        );
+
+        let mut state = load();
+        let mut model = select(&state);
+        assert_eq!(model.rows[model.selected].check, Some(CheckState::Checked));
+        assert_eq!(
+            model.rows[model.selected].mode,
+            Some(MaterializationKind::Linked)
+        );
+        assert!(
+            model.rows[model.selected]
+                .details
+                .contains("also enabled for your user account")
+        );
+        reduce(&mut model, Action::Toggle);
+        assert_eq!(model.rows[model.selected].check, Some(CheckState::User));
+        assert_eq!(model.rows[model.selected].action, "Disable");
+        store_active_target_tab(&model, &mut state.tabs);
+        let prepared =
+            prepare_scope_save(&paths, &state, &state.tabs, TargetTabScope::Repository).unwrap();
+        assert_eq!(commit_scope_save(&paths, prepared).unwrap().exit_status, 0);
+        assert!(destination.symlink_metadata().is_err());
+        assert!(load().repository.config.enablements().is_empty());
+
+        // Canceling a new override produces no declaration or materialization.
+        let mut state = load();
+        let mut model = select(&state);
+        reduce(&mut model, Action::SwitchMode);
+        reduce(&mut model, Action::Toggle);
+        store_active_target_tab(&model, &mut state.tabs);
+        assert!(
+            scope_config(&state.tabs, TargetTabScope::Repository)
+                .unwrap()
+                .enablements()
+                .is_empty()
+        );
+        let prepared =
+            prepare_scope_save(&paths, &state, &state.tabs, TargetTabScope::Repository).unwrap();
+        assert_eq!(commit_scope_save(&paths, prepared).unwrap().exit_status, 0);
+        assert!(destination.symlink_metadata().is_err());
+
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("keep.txt"), "unmanaged").unwrap();
+        let mut state = load();
+        let mut model = select(&state);
+        reduce(&mut model, Action::SwitchMode);
+        store_active_target_tab(&model, &mut state.tabs);
+        let prepared =
+            prepare_scope_save(&paths, &state, &state.tabs, TargetTabScope::Repository).unwrap();
+        assert!(
+            prepared
+                .plan()
+                .items()
+                .iter()
+                .any(|item| item.safety() == crate::reconcile::Safety::Guarded)
+        );
+        model.overlay = save_review_overlay(prepared.plan());
+        assert!(matches!(model.overlay, Overlay::GuardedConfirmation(_)));
+        assert_eq!(reduce(&mut model, Action::Escape), vec![Effect::CancelSave]);
+        drop(prepared);
+        assert_eq!(
+            std::fs::read_to_string(destination.join("keep.txt")).unwrap(),
+            "unmanaged"
+        );
+        assert!(load().repository.config.enablements().is_empty());
+        let prepared =
+            prepare_scope_save(&paths, &state, &state.tabs, TargetTabScope::Repository).unwrap();
+        model.overlay = save_review_overlay(prepared.plan());
+        assert_eq!(
+            reduce(&mut model, Action::Confirm),
+            vec![Effect::CommitSave]
+        );
+        assert_eq!(commit_scope_save(&paths, prepared).unwrap().exit_status, 0);
+        assert_eq!(
+            destination.canonicalize().unwrap(),
+            skill.canonicalize().unwrap()
+        );
+        assert_eq!(std::fs::read(paths.user_config()).unwrap(), user_bytes);
+        assert!(
+            !user_skill
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(user_skill.join("SKILL.md")).unwrap(),
+            document
+        );
+    }
 
     fn inventory_skill(inventory_id: &str, path: &str, check: CheckState) -> Row {
         Row::skill_inventory(SkillInventoryRow {
