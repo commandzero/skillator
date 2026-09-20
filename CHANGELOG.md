@@ -10,6 +10,8 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ### Changed
 
+- Allow `m` on an inherited user skill to stage a repository link, and Space to remove the override while keeping User Scope enabled.
+
 - Release archives gain a versionless executable, MIT license, and build details. The legacy executable name remains as a hard link for the current Homebrew formula.
 - Release publication verifies the complete platform matrix and uploaded bytes before publishing a draft. Reruns preserve existing assets and fail on differences.
 - Document the next release's macOS 14 and Ubuntu 24.04 binary baselines, compatibility policy, and interrupted-command behavior.

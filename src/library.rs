@@ -184,6 +184,15 @@ impl LibrarySnapshot {
     }
 
     pub fn resolve(&self, key: &SkillKey) -> Option<&LibrarySkill> {
+        if self
+            .sources
+            .values()
+            .filter(|source| source.key() == key.source())
+            .count()
+            != 1
+        {
+            return None;
+        }
         self.source(key.source().as_str())
             .and_then(|source| source.skill(key.path().as_str()))
             .filter(|skill| skill.available && skill.validity == SkillValidity::Valid)
