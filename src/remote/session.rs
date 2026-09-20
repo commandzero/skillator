@@ -406,6 +406,16 @@ impl Session {
             })
             .max_by_key(|source| source.root.len())
         {
+            state::home_relative(
+                self.paths.home(),
+                &state::contained(self.paths.home(), &source.root)?,
+            )?;
+            for skill in &source.skills {
+                let boundary = Path::new(&source.root).join(skill);
+                if Path::new(path).starts_with(&boundary) {
+                    state::home_relative(self.paths.home(), &self.paths.home().join(boundary))?;
+                }
+            }
             if let Some(reference) = &source.git {
                 let root = state::contained(self.paths.home(), &source.root)?;
                 if snapshot::git_ref(&root)? != *reference
@@ -523,9 +533,9 @@ impl Session {
                 return Err(Error::input("incoming library location is unavailable"));
             }
             let physical = destination.canonicalize().map_err(Error::input_display)?;
-            if !physical.starts_with(&home) {
+            if physical == home || !physical.starts_with(&home) {
                 return Err(Error::input(
-                    "incoming library location resolves outside user home",
+                    "incoming library location must resolve below the user home, not to or outside user home",
                 ));
             }
             destinations.push((destination, physical.clone()));
@@ -1109,6 +1119,13 @@ mod tests {
         );
         assert_eq!(fs::read(&config).unwrap(), original);
         assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+        std::os::unix::fs::symlink(home.path(), home.path().join("home-alias")).unwrap();
+        assert!(
+            session
+                .register(&[incoming("home-alias")], hash_optional(&config).unwrap())
+                .is_err()
+        );
+        assert_eq!(fs::read(&config).unwrap(), original);
         std::os::unix::fs::symlink(
             home.path().join(".skillator/library"),
             home.path().join("library-alias"),
@@ -1149,6 +1166,24 @@ mod tests {
         fs::write(&config, intervening).unwrap();
         assert!(save_library(&config, &desired, &fingerprint).is_err());
         assert_eq!(fs::read_to_string(config).unwrap(), intervening);
+    }
+
+    #[test]
+    fn an_observed_skill_cannot_be_redirected_to_the_home_root() {
+        let (home, session, _) = setup();
+        let skill = home.path().join(".skillator/library/demo");
+        fs::rename(&skill, home.path().join("retained-skill")).unwrap();
+        std::os::unix::fs::symlink(home.path(), &skill).unwrap();
+        fs::write(home.path().join("data"), "original").unwrap();
+        assert!(
+            session
+                .authorize_path(".skillator/library/demo/data")
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(home.path().join("data")).unwrap(),
+            "original"
+        );
     }
 
     #[test]

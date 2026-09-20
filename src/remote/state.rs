@@ -241,6 +241,19 @@ fn resolve(home: &Path, value: &str, observation: bool) -> Result<Option<PathBuf
 
 pub(super) fn home_relative(home: &Path, path: &Path) -> Result<String> {
     let canonical_home = home.canonicalize().map_err(Error::input_display)?;
+    if path.exists() {
+        let physical = path.canonicalize().map_err(Error::input_display)?;
+        if physical == canonical_home {
+            return Err(Error::input(
+                "home-rooted locations and skills are unsupported; register directories below the user home",
+            ));
+        }
+        if !physical.starts_with(&canonical_home) {
+            return Err(Error::input(
+                "library location resolves outside the user home",
+            ));
+        }
+    }
     let value = path
         .strip_prefix(home)
         .or_else(|_| path.strip_prefix(&canonical_home))
@@ -254,17 +267,6 @@ pub(super) fn home_relative(home: &Path, path: &Path) -> Result<String> {
         .to_str()
         .ok_or_else(|| Error::input("non-UTF-8 path cannot be synchronized"))?;
     relative(value)?;
-    // Include the final location in containment checks when it exists.
-    if path.exists()
-        && !path
-            .canonicalize()
-            .map_err(Error::input_display)?
-            .starts_with(home.canonicalize().map_err(Error::input_display)?)
-    {
-        return Err(Error::input(
-            "library location resolves outside the user home",
-        ));
-    }
     contained(home, value)?;
     Ok(value.to_owned())
 }

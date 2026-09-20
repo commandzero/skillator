@@ -259,7 +259,9 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
         })
         .collect();
     for incoming in extra {
-        state::relative(&incoming.root)?;
+        for path in [&incoming.root, &incoming.location] {
+            state::home_relative(paths.home(), &state::contained(paths.home(), path)?)?;
+        }
         if let Some(found) = sources
             .iter_mut()
             .find(|s| s.root == incoming.root && s.key == incoming.key)
@@ -409,7 +411,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
                 continue;
             }
             let real = logical.canonicalize().map_err(Error::input_display)?;
-            if !real.starts_with(paths.home().canonicalize().map_err(Error::input_display)?) {
+            if real == home || !real.starts_with(&home) {
                 return Err(Error::input("skill resolves outside user home"));
             }
             if exclusions
@@ -699,6 +701,44 @@ mod tests {
             );
             assert!(!home.path().join(".skillator/rsync").exists());
         }
+    }
+
+    #[test]
+    fn incoming_source_and_location_aliases_cannot_resolve_to_or_outside_home() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(home.path(), home.path().join("home-alias")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join("outside-alias")).unwrap();
+        fs::create_dir(home.path().join("library")).unwrap();
+        let source = Source {
+            key: "local/library".into(),
+            root: "library".into(),
+            location: "library".into(),
+            exclusions: vec![],
+            git: None,
+            branch: None,
+            skills: BTreeSet::new(),
+            files: BTreeMap::new(),
+            committed: BTreeMap::new(),
+            problems: vec![],
+        };
+        let paths = AppPaths::new(home.path().into());
+        for alias in ["home-alias", "outside-alias"] {
+            for location in [false, true] {
+                let mut incoming = source.clone();
+                if location {
+                    incoming.location = alias.into();
+                } else {
+                    incoming.root = alias.into();
+                }
+                assert!(
+                    inspect(&paths, &[incoming]).is_err(),
+                    "{alias} location={location}"
+                );
+            }
+        }
+        assert!(!home.path().join(".skillator").exists());
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
     fn repository(root: &Path) {
