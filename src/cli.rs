@@ -418,7 +418,9 @@ fn run_library_command(paths: &AppPaths, command: LibraryCommand) -> ExitCode {
             match crate::remote::run(paths, options) {
                 Ok(report) => {
                     let rendered = match arguments.output.format {
-                        OutputFormat::Text => Ok(report.text()),
+                        OutputFormat::Text => Ok(report.text_with_color(color_enabled(
+                            arguments.output.color.unwrap_or(ColorPolicy::Auto),
+                        ))),
                         OutputFormat::Json => render_json(&report),
                         OutputFormat::Yaml => render_serialized_yaml(&report),
                     };
@@ -978,8 +980,8 @@ fn diagnostic(code: u8, message: &str) -> ExitCode {
     ExitCode::from(code)
 }
 
-pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
-    let color = match color {
+fn color_enabled(color: ColorPolicy) -> bool {
+    match color {
         ColorPolicy::Always => true,
         ColorPolicy::Never => false,
         ColorPolicy::Auto => {
@@ -987,7 +989,11 @@ pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
                 && std::env::var_os("TERM").is_none_or(|term| term != "dumb")
                 && std::env::var_os("NO_COLOR").is_none()
         }
-    };
+    }
+}
+
+pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
+    let color = color_enabled(color);
     if report.status == ReportStatus::InSync
         && report.changes.is_empty()
         && report.diagnostics.is_empty()

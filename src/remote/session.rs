@@ -434,10 +434,7 @@ impl Session {
         }) {
             return Err(Error::input("Git source was not included in preflight"));
         }
-        if git.origin.is_empty()
-            || git.origin.starts_with('-')
-            || git.origin.contains('\0')
-            || git.origin.contains("::")
+        if !valid_origin(&git.origin)
             || !matches!(git.commit.len(), 40 | 64)
             || !git.commit.bytes().all(|b| b.is_ascii_hexdigit())
         {
@@ -490,11 +487,28 @@ impl Session {
     }
 
     fn register(&self, locations: &[Location], expected: Option<String>) -> Result<()> {
-        if hash_optional(&self.paths.library_config())? != expected {
+        if let Some((desired, fingerprint)) = self.prepare_registration(locations, expected)? {
+            save_library(&self.paths.library_config(), &desired, &fingerprint)
+                .map_err(Error::input_display)?;
+        }
+        Ok(())
+    }
+
+    fn prepare_registration(
+        &self,
+        locations: &[Location],
+        expected: Option<String>,
+    ) -> Result<Option<(crate::config::LibraryConfig, Fingerprint)>> {
+        let bytes = state::read_optional(&self.paths.library_config())?;
+        if bytes.as_ref().map(|bytes| state::digest(bytes)) != expected {
             return Err(Error::input(
                 "library configuration changed after observation",
             ));
         }
+        let fingerprint = bytes
+            .as_deref()
+            .map(Fingerprint::for_bytes)
+            .unwrap_or(Fingerprint::Absent);
         let config = snapshot::library(&self.paths)?;
         let mut desired = config.locations().to_vec();
         let home = self
@@ -542,7 +556,7 @@ impl Session {
             .with_locations(desired)
             .map_err(|issues| Error::input(format!("invalid locations: {issues:?}")))?;
         if desired == config {
-            return Ok(());
+            return Ok(None);
         }
         let scanned = crate::library::scan_library(
             &desired,
@@ -559,7 +573,6 @@ impl Session {
                 "library locations overlap; align registrations explicitly",
             ));
         }
-        let fingerprint = state::fingerprint(&self.paths.library_config())?;
         for (destination, expected) in destinations {
             if destination.canonicalize().map_err(Error::input_display)? != expected {
                 return Err(Error::input(
@@ -569,9 +582,7 @@ impl Session {
         }
         fs::create_dir_all(self.paths.library_config().parent().unwrap())
             .map_err(Error::input_display)?;
-        save_library(&self.paths.library_config(), &desired, &fingerprint)
-            .map_err(Error::input_display)?;
-        Ok(())
+        Ok(Some((desired, fingerprint)))
     }
 
     fn publish(
@@ -868,6 +879,18 @@ pub(super) fn reserved_temporary(name: &str) -> bool {
         .any(|prefix| name.strip_prefix(prefix).is_some_and(state::valid_id))
 }
 
+fn valid_origin(origin: &str) -> bool {
+    !origin.is_empty()
+        && !origin.starts_with('-')
+        && !origin.contains('\0')
+        && !origin.split_once("::").is_some_and(|(transport, _)| {
+            !transport.is_empty()
+                && transport
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"+.-".contains(&byte))
+        })
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.finish();
@@ -1103,6 +1126,50 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(fs::read_to_string(&config).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn registration_keeps_the_observed_fingerprint_until_publication() {
+        let (home, session, _) = setup();
+        fs::create_dir(home.path().join("incoming")).unwrap();
+        let config = home.path().join(".skillator/library.yaml");
+        let (desired, fingerprint) = session
+            .prepare_registration(
+                &[Location {
+                    path: "incoming".into(),
+                    exclusions: vec![],
+                    allow_overlap: false,
+                }],
+                hash_optional(&config).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        let intervening = "# concurrent edit\nversion: 1\nlocations: [{path: './library'}]\n";
+        fs::write(&config, intervening).unwrap();
+        assert!(save_library(&config, &desired, &fingerprint).is_err());
+        assert_eq!(fs::read_to_string(config).unwrap(), intervening);
+    }
+
+    #[test]
+    fn git_origins_allow_ipv6_but_reject_external_helpers() {
+        for origin in [
+            "ssh://git@[2001:db8::1]/repo",
+            "https://[::1]/repo.git",
+            "git@[2001:db8::1]:org/repo",
+            "/tmp/local-repo",
+            "git@example.test:org/repo",
+        ] {
+            assert!(valid_origin(origin), "{origin}");
+        }
+        for origin in [
+            "",
+            "--upload-pack=evil",
+            "ext::sh -c evil",
+            "helper::address",
+            "bad\0origin",
+        ] {
+            assert!(!valid_origin(origin), "{origin}");
         }
     }
 

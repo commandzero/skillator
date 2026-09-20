@@ -83,18 +83,41 @@ impl Report {
             self.exit_status = 1;
         }
     }
+    #[cfg(test)]
     pub fn text(&self) -> String {
+        self.text_with_color(false)
+    }
+
+    pub fn text_with_color(&self, color: bool) -> String {
         if self.changes.is_empty() && self.diagnostics.is_empty() {
             return "In sync.\n".into();
         }
         let mut text = String::new();
         for change in &self.changes {
+            let action = if color {
+                format!("\x1b[36m{}\x1b[0m", change.action)
+            } else {
+                change.action.clone()
+            };
             text.push_str(&format!(
                 "{}: {} {} ({:?})\n",
-                change.host, change.action, change.path, change.outcome
+                change.host, action, change.path, change.outcome
             ));
         }
         for diagnostic in &self.diagnostics {
+            let message = if color {
+                format!(
+                    "\x1b[{}m{}\x1b[0m",
+                    if diagnostic.severity == "error" {
+                        "31"
+                    } else {
+                        "33"
+                    },
+                    diagnostic.message
+                )
+            } else {
+                diagnostic.message.clone()
+            };
             let data = diagnostic.data.as_ref();
             text.push_str(&format!(
                 "{}: {}: {}\n",
@@ -104,7 +127,7 @@ impl Report {
                 data.and_then(|d| d.get("path"))
                     .map(String::as_str)
                     .unwrap_or(""),
-                diagnostic.message
+                message
             ));
         }
         text

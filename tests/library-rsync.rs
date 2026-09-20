@@ -194,6 +194,36 @@ fn machine_previews_are_equivalent_and_global_preflight_is_write_free() {
     let json: Value = serde_json::from_slice(&invoke("json")).unwrap();
     let yaml: Value = serde_saphyr::from_slice(&invoke("yaml")).unwrap();
     assert_eq!(json, yaml);
+    for (color, ansi) in [("always", true), ("never", false), ("auto", false)] {
+        let output = Command::cargo_bin("skillator")
+            .unwrap()
+            .env("HOME", local.path())
+            .env("PATH", &path)
+            .env("TERM", "xterm")
+            .env_remove("NO_COLOR")
+            .args([
+                "library", "rsync", "--hosts", "a", "--check", "--color", color,
+            ])
+            .assert()
+            .code(1)
+            .stderr("")
+            .get_output()
+            .stdout
+            .clone();
+        assert_eq!(output.contains(&0x1b), ansi, "color={color}");
+    }
+    let output = Command::cargo_bin("skillator")
+        .unwrap()
+        .env("HOME", local.path())
+        .env("PATH", &path)
+        .env("NO_COLOR", "1")
+        .args(["library", "rsync", "--hosts", "a", "--check"])
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!output.contains(&0x1b));
     assert_eq!(json["mode"], "library_rsync");
     assert!(
         json["changes"]
