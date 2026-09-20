@@ -497,11 +497,24 @@ impl Session {
         }
         let config = snapshot::library(&self.paths)?;
         let mut desired = config.locations().to_vec();
+        let home = self
+            .paths
+            .home()
+            .canonicalize()
+            .map_err(Error::input_display)?;
+        let mut destinations = Vec::new();
         for location in locations {
             let destination = state::contained(self.paths.home(), &location.path)?;
             if !destination.is_dir() {
                 return Err(Error::input("incoming library location is unavailable"));
             }
+            let physical = destination.canonicalize().map_err(Error::input_display)?;
+            if !physical.starts_with(&home) {
+                return Err(Error::input(
+                    "incoming library location resolves outside user home",
+                ));
+            }
+            destinations.push((destination, physical.clone()));
             let found = desired.iter().find(|existing| {
                 crate::library::expand_location(
                     existing.path(),
@@ -509,7 +522,7 @@ impl Session {
                     self.paths.home(),
                     self.paths.environment(),
                 )
-                .is_ok_and(|path| path == self.paths.home().join(&location.path))
+                .is_ok_and(|path| path.canonicalize().is_ok_and(|path| path == physical))
             });
             if let Some(found) = found {
                 if found.exclusions() != location.exclusions
@@ -547,6 +560,13 @@ impl Session {
             ));
         }
         let fingerprint = state::fingerprint(&self.paths.library_config())?;
+        for (destination, expected) in destinations {
+            if destination.canonicalize().map_err(Error::input_display)? != expected {
+                return Err(Error::input(
+                    "incoming library location changed before registration",
+                ));
+            }
+        }
         fs::create_dir_all(self.paths.library_config().parent().unwrap())
             .map_err(Error::input_display)?;
         save_library(&self.paths.library_config(), &desired, &fingerprint)
@@ -796,6 +816,21 @@ fn recover_pending(home: &Path) -> Result<usize> {
         }
         let actual = state::observe(&destination)?;
         let backup = state::observe(&recovery.sibling)?;
+        // Published and removed directory entries are empty at the journal boundary.
+        // A type-only observation cannot prove that later children are ours to move.
+        for (path, entry) in [(&destination, &actual), (&recovery.sibling, &backup)] {
+            if matches!(entry, Some(Entry::Directory))
+                && fs::read_dir(path)
+                    .map_err(Error::input_display)?
+                    .next()
+                    .is_some()
+            {
+                return Err(Error::input(format!(
+                    "{} contains entries added after interruption; preserve the directory and backup for manual recovery",
+                    path.display()
+                )));
+            }
+        }
         if actual == recovery.expected {
             // Publication never happened, or the earlier rollback completed.
             if backup.is_some() && backup != recovery.desired {
@@ -1027,6 +1062,102 @@ mod tests {
                 "{path}"
             );
             assert!(session.authorize_path(path).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn registration_rejects_escaping_final_links_and_preserves_equivalent_expressions() {
+        let (home, session, _) = setup();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join("escape")).unwrap();
+        let config = home.path().join(".skillator/library.yaml");
+        let original = fs::read(&config).unwrap();
+        let incoming = |path: &str| Location {
+            path: path.into(),
+            exclusions: vec![],
+            allow_overlap: false,
+        };
+        assert!(
+            session
+                .register(&[incoming("escape")], hash_optional(&config).unwrap())
+                .unwrap_err()
+                .message
+                .contains("outside user home")
+        );
+        assert_eq!(fs::read(&config).unwrap(), original);
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+        std::os::unix::fs::symlink(
+            home.path().join(".skillator/library"),
+            home.path().join("library-alias"),
+        )
+        .unwrap();
+        for expression in ["~/library-alias", "~/.skillator/../.skillator/library"] {
+            let bytes = format!(
+                "# preserve this expression\nversion: 1\nlocations: [{{path: '{expression}'}}]\n"
+            );
+            fs::write(&config, &bytes).unwrap();
+            session
+                .register(
+                    &[incoming(".skillator/library")],
+                    hash_optional(&config).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(fs::read_to_string(&config).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_children_added_to_a_published_directory() {
+        for backup_directory in [false, true] {
+            let (home, session, stage) = setup();
+            let path = ".skillator/library/demo/data";
+            let destination = state::contained(home.path(), path).unwrap();
+            let expected = state::observe(&destination).unwrap();
+            let sibling = destination
+                .parent()
+                .unwrap()
+                .join(format!(".skillator-rsync-{}", state::new_id().unwrap()));
+            fs::create_dir(&sibling).unwrap();
+            let desired = state::observe(&sibling).unwrap();
+            rename_exchange(&sibling, &destination).unwrap();
+            let journal = stage.join("recovery-directory.json");
+            state::write_new(
+                &journal,
+                &serde_json::to_vec(&Recovery {
+                    path: path.into(),
+                    expected,
+                    desired,
+                    sibling: sibling.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let directory = if backup_directory {
+                // The destination's type changed again; keep both the new backup
+                // children and the live replacement rather than guessing ownership.
+                fs::remove_file(&sibling).unwrap();
+                fs::create_dir(&sibling).unwrap();
+                &sibling
+            } else {
+                &destination
+            };
+            fs::write(directory.join("later.txt"), "later user edit").unwrap();
+            drop(session);
+            assert!(
+                recover_pending(home.path())
+                    .unwrap_err()
+                    .message
+                    .contains("manual recovery")
+            );
+            assert_eq!(
+                fs::read_to_string(directory.join("later.txt")).unwrap(),
+                "later user edit"
+            );
+            assert!(destination.is_dir());
+            assert!(journal.exists());
+            if !backup_directory {
+                assert_eq!(fs::read_to_string(sibling).unwrap(), "original");
+            }
         }
     }
 

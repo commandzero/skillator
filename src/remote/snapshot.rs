@@ -164,6 +164,21 @@ pub(super) fn user_from_entries(entries: &BTreeMap<String, String>) -> Result<Re
 
 pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
     let config = library(paths)?;
+    let home = paths.home().canonicalize().map_err(Error::input_display)?;
+    for location in config.locations() {
+        let expanded = crate::library::expand_location(
+            location.path(),
+            paths.library_config().parent().unwrap(),
+            paths.home(),
+            paths.environment(),
+        )
+        .map_err(Error::input_display)?;
+        if expanded.canonicalize().is_ok_and(|path| path == home) {
+            return Err(Error::input(
+                "library rsync does not support a home-rooted location; register directories below the user home instead of ~",
+            ));
+        }
+    }
     let user_config = user(paths)?;
     let mut user_directories = user_directories(paths.home(), &user_config)?;
     let history = History::load(paths.home())?;
@@ -662,6 +677,29 @@ pub(super) fn outside_user_directories(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_rooted_locations_fail_with_specific_guidance_before_observation() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        fs::create_dir(home.path().join(".skillator")).unwrap();
+        std::os::unix::fs::symlink(home.path(), home.path().join("home-alias")).unwrap();
+        for expression in ["~", "~/home-alias"] {
+            fs::write(
+                paths.library_config(),
+                format!("version: 1\nlocations: [{{path: '{expression}'}}]\n"),
+            )
+            .unwrap();
+            let error = inspect(&paths, &[]).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("register directories below the user home"),
+                "{error}"
+            );
+            assert!(!home.path().join(".skillator/rsync").exists());
+        }
+    }
 
     fn repository(root: &Path) {
         fs::create_dir_all(root.join("demo")).unwrap();

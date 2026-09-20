@@ -47,7 +47,7 @@ skillator library rsync --format json
 
 Skillator includes all discovered skills, including hidden and unselected skills, and their supporting files. Location exclusions still apply. Invalid skills retain their diagnostics and do not become enabled. File identity includes content, type, and executable mode.
 
-The central library and external locations keep their paths relative to each user's home. For example, `~/Development/acme/skills` maps to `/home/developer/Development/acme/skills` on a host whose home is `/home/developer`. Locations outside the home, including links that escape it, fail validation. Existing receiving registrations and equivalent path expressions remain intact; missing registrations use portable `~/...` paths. Conflicting exclusions or overlap settings block the affected location.
+The central library and external locations keep their paths relative to each user's home. For example, `~/Development/acme/skills` maps to `/home/developer/Development/acme/skills` on a host whose home is `/home/developer`. Locations must be directories below the home. Registering the home itself as `~` is unsupported by `library rsync`; choose its skill-containing subdirectories instead. Locations outside the home, including links that escape it, fail validation. Existing receiving registrations and equivalent path expressions remain intact; missing registrations use portable `~/...` paths. Conflicting exclusions or overlap settings block the affected location.
 
 Library acquisition links retain their originating link and transfer the skill content to receivers. Internal skill links must be relative and remain inside their skill directory. User materialization links are rebuilt against each receiving library.
 
