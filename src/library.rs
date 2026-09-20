@@ -245,17 +245,34 @@ pub fn scan_library(
                 continue;
             }
         };
-        let canonical = match expanded.canonicalize() {
-            Ok(path) if path.is_dir() => path,
-            _ => {
+        let canonical_result = expanded.canonicalize().and_then(|path| {
+            if fs::metadata(&path)?.is_dir() {
+                Ok(path)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "location is not a directory",
+                ))
+            }
+        });
+        let canonical = match canonical_result {
+            Ok(path) => path,
+            Err(error) => {
                 snapshot.locations.push(LibraryLocation {
                     expression: location_config.path().to_owned(),
                     resolved: Some(expanded.clone()),
                     available: false,
                 });
                 snapshot.diagnostics.push(LibraryDiagnostic {
-                    code: "location_unavailable",
-                    message: format!("library folder is unavailable: {}", expanded.display()),
+                    code: if error.kind() == std::io::ErrorKind::NotFound {
+                        "location_unavailable"
+                    } else {
+                        "discovery_failed"
+                    },
+                    message: format!(
+                        "library folder is unavailable: {}: {error}",
+                        expanded.display()
+                    ),
                     path: Some(expanded),
                 });
                 continue;

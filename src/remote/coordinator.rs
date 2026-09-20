@@ -900,12 +900,17 @@ fn sync_files(
                 }
             }
             Decision::Unmatched => {
-                report.problem(
-                    "local",
-                    &group[0],
-                    "missing_history",
-                    "remove needs verified prior presence; unmatched entry preserved",
-                );
+                for ((index, path), observation) in addresses.iter().zip(&observations) {
+                    if observation.value.is_none() {
+                        continue;
+                    }
+                    report.problem(
+                        &peers[*index].alias,
+                        path,
+                        "missing_history",
+                        "remove needs verified prior presence; unmatched entry preserved",
+                    );
+                }
                 failed.extend(roots);
             }
             Decision::Conflict => {
@@ -1475,6 +1480,35 @@ mod tests {
             check,
             interactive: false,
         }
+    }
+
+    #[test]
+    fn unmatched_remote_content_is_attributed_to_its_host() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        for home in &homes {
+            configure(home.path(), ".skillator/library");
+        }
+        skill(homes[1].path(), ".skillator/library/demo", "remote only");
+        let mut policy = options(false);
+        policy.missing = MissingPolicy::Remove;
+        let report = sync(&homes, policy);
+        let diagnostics: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "missing_history")
+            .collect();
+        assert!(!diagnostics.is_empty());
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.data.as_ref().unwrap()["host"] == "host1")
+        );
+        assert!(
+            homes[1]
+                .path()
+                .join(".skillator/library/demo/SKILL.md")
+                .exists()
+        );
     }
 
     #[test]

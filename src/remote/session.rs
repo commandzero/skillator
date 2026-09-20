@@ -476,14 +476,19 @@ impl Session {
                         &git.origin,
                     ])
                     .arg(&stage),
-            )?;
+            ).map_err(|error| Error::input(format!(
+                "cannot clone Git source {}; verify the configured origin, repository access, credentials, and network connectivity: {error}", source.root
+            )))?;
             if process::git(
                 &stage,
                 &["cat-file", "-e", &format!("{}^{{commit}}", git.commit)],
             )
             .is_err()
             {
-                process::git(&stage, &["fetch", "--", "origin", &git.commit])?;
+                process::git(&stage, &["fetch", "--", "origin", &git.commit])
+                    .map_err(|error| Error::input(format!(
+                        "cannot fetch exact commit {} for Git source {}; ensure the commit is published and accessible from this host: {error}", git.commit, source.root
+                    )))?;
             }
             process::git(&stage, &["checkout", "--detach", &git.commit, "--"])?;
             if snapshot::git_ref(&stage)? != *git {
@@ -1460,7 +1465,17 @@ mod tests {
             panic!()
         };
         session.handle(Request::Begin { token }).unwrap();
-        assert!(session.handle(Request::Bootstrap { source }).is_err());
+        let error = session.handle(Request::Bootstrap { source }).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("cannot fetch exact commit 1234567890abcdef1234567890abcdef12345678"),
+            "{error}"
+        );
+        assert!(
+            error.message.contains("published and accessible"),
+            "{error}"
+        );
         assert!(!home.path().join("Development/acme/skills").exists());
         assert!(
             fs::read_dir(home.path().join("Development/acme"))

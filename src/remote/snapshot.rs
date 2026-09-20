@@ -688,6 +688,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inaccessible_location_parent_is_not_treated_as_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        let parent = home.path().join("restricted");
+        let root = parent.join("skills");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(home.path().join(".skillator")).unwrap();
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/restricted/skills'}]\n",
+        )
+        .unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).unwrap();
+        let inaccessible = root.canonicalize().is_err();
+        let observed = inspect(&paths, &[]);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        if inaccessible {
+            assert!(
+                observed
+                    .unwrap_err()
+                    .message
+                    .contains("library folder is unavailable")
+            );
+        }
+        fs::remove_dir(&root).unwrap();
+        assert!(inspect(&paths, &[]).is_ok());
+        fs::write(&root, "not a directory").unwrap();
+        assert!(inspect(&paths, &[]).is_err());
+        assert!(!home.path().join(".skillator/rsync").exists());
+    }
+
+    #[test]
     fn unreadable_discovery_fails_preflight_unless_excluded() {
         use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir().unwrap();
