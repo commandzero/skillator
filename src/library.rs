@@ -419,6 +419,7 @@ struct DiscoveredSource {
     kind: SourceKind,
     origin: Option<String>,
     skills: Vec<LibrarySkill>,
+    diagnostics: Vec<LibraryDiagnostic>,
 }
 
 impl DiscoveredSource {
@@ -436,6 +437,7 @@ impl DiscoveredSource {
             kind,
             origin,
             skills: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -484,18 +486,34 @@ fn discover_tree(
             .skills
             .push(read_skill(directory, relative_to_source));
     }
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            discovery_error(current, directory, error);
+            return;
+        }
     };
-    let mut entries: Vec<_> = entries.flatten().collect();
+    let mut entries: Vec<_> = entries
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                discovery_error(current, directory, error);
+                None
+            }
+        })
+        .collect();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         if entry.file_name() == OsStr::new(".git") {
             continue;
         }
         let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                discovery_error(current, &path, error);
+                continue;
+            }
         };
         if file_type.is_symlink()
             && follow_root_skill_links
@@ -534,6 +552,14 @@ fn discover_tree(
             );
         }
     }
+}
+
+fn discovery_error(source: &mut DiscoveredSource, path: &Path, error: std::io::Error) {
+    source.diagnostics.push(LibraryDiagnostic {
+        code: "discovery_failed",
+        message: format!("cannot discover skills at {}: {error}", path.display()),
+        path: Some(path.to_owned()),
+    });
 }
 
 fn is_git_root(path: &Path) -> bool {
@@ -668,6 +694,7 @@ fn insert_discovered_source(
     source: DiscoveredSource,
 ) {
     let suggested = suggest_source_key(&source);
+    snapshot.diagnostics.extend(source.diagnostics);
     let key_text = suggested.as_str().to_owned();
     let relative_path = path_text(&source.relative);
     if snapshot.sources.contains_key(&key_text) {

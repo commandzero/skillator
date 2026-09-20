@@ -2653,10 +2653,16 @@ impl UserScopeWorkflow {
     pub(crate) fn save_remote(
         paths: &AppPaths,
         staged: RepositoryConfig,
+        expected: Fingerprint,
         locks: TargetLocks,
         check: bool,
     ) -> Result<CommandReport, WorkflowError> {
         let session = Self::load(paths)?;
+        if session.fingerprint != expected {
+            return Err(WorkflowError::InvalidInput {
+                message: "user configuration changed after observation".into(),
+            });
+        }
         let (library, diagnostics) = load_library_snapshot(paths)?;
         let prepared = crate::reconcile::prepare_transition_with_locks(
             &session.target,
@@ -2668,7 +2674,7 @@ impl UserScopeWorkflow {
         let mut prepared = PreparedUserScopeSave {
             target: session.target,
             staged,
-            expected: session.fingerprint,
+            expected,
             library,
             prepared,
             diagnostics,

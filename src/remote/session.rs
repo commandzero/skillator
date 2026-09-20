@@ -178,9 +178,14 @@ impl Session {
                 check,
             } => {
                 let path = state::contained(self.paths.home(), ".agents/skillator.yaml")?;
-                if hash_optional(&path)? != expected {
+                let bytes = state::read_optional(&path)?;
+                if bytes.as_ref().map(|bytes| state::digest(bytes)) != expected {
                     return Err(Error::input("user configuration changed after observation"));
                 }
+                let fingerprint = bytes
+                    .as_deref()
+                    .map(Fingerprint::for_bytes)
+                    .unwrap_or(Fingerprint::Absent);
                 let desired = snapshot::user_from_entries(&entries)?;
                 let target = Target::user(self.paths.home()).map_err(Error::input_display)?;
                 let locks = if check {
@@ -191,8 +196,9 @@ impl Session {
                         Error::input("user state already reconciled in this session")
                     })?
                 };
-                let report = UserScopeWorkflow::save_remote(&self.paths, desired, locks, check)
-                    .map_err(Error::input_display)?;
+                let report =
+                    UserScopeWorkflow::save_remote(&self.paths, desired, fingerprint, locks, check)
+                        .map_err(Error::input_display)?;
                 Ok(Response::User { report })
             }
             Request::Acknowledge {
@@ -915,6 +921,7 @@ pub(super) fn observed_content(path: &Path, expected: Option<&Entry>) -> Result<
     state::observe(path)
 }
 
+#[cfg(test)]
 fn hash_optional(path: &Path) -> Result<Option<String>> {
     Ok(state::read_optional(path)?.map(|bytes| state::digest(&bytes)))
 }
@@ -992,6 +999,36 @@ mod tests {
             panic!()
         };
         (home, session, PathBuf::from(stage))
+    }
+
+    #[test]
+    fn remote_user_save_rejects_edits_after_the_request_fingerprint_check() {
+        for present in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let paths = AppPaths::new(home.path().into());
+            fs::create_dir_all(paths.user_config().parent().unwrap()).unwrap();
+            let original = crate::config::RepositoryConfigCodec::render(
+                &crate::config::RepositoryConfig::user_first_run(),
+            )
+            .unwrap();
+            if present {
+                fs::write(paths.user_config(), &original).unwrap();
+            }
+            let session = UserScopeWorkflow::load(&paths).unwrap();
+            let expected = state::fingerprint(&paths.user_config()).unwrap();
+            let edited = [b"# concurrent edit\n".as_slice(), original.as_bytes()].concat();
+            fs::write(paths.user_config(), &edited).unwrap();
+            let target = Target::user(home.path()).unwrap();
+            let locks = TargetLocks::acquire(&[&target]).unwrap();
+            let error =
+                UserScopeWorkflow::save_remote(&paths, session.config, expected, locks, false)
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("changed after observation"),
+                "{error}"
+            );
+            assert_eq!(fs::read(paths.user_config()).unwrap(), edited);
+        }
     }
 
     #[test]

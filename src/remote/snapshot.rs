@@ -188,6 +188,13 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
         paths.home(),
         paths.environment(),
     );
+    if let Some(diagnostic) = library_snapshot
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == "discovery_failed")
+    {
+        return Err(Error::input(&diagnostic.message));
+    }
     let mut locations = Vec::new();
     for (index, location) in library_snapshot.locations().iter().enumerate() {
         let resolved = location.resolved().ok_or_else(|| {
@@ -679,6 +686,46 @@ pub(super) fn outside_user_directories(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_discovery_fails_preflight_unless_excluded() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        let directory = home.path().join(".skillator/library/hidden");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: hidden\ndescription: test\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/.skillator/library'}]\n",
+        )
+        .unwrap();
+        assert!(inspect(&paths, &[]).is_ok());
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = fs::read_dir(&directory).is_err();
+        let observed = inspect(&paths, &[]);
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/.skillator/library', exclusions: [hidden]}]\n",
+        )
+        .unwrap();
+        let excluded = inspect(&paths, &[]);
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        if unreadable {
+            assert!(
+                observed
+                    .unwrap_err()
+                    .message
+                    .contains("cannot discover skills")
+            );
+        }
+        assert!(excluded.is_ok(), "{excluded:?}");
+        assert!(!home.path().join(".skillator/rsync").exists());
+    }
 
     #[test]
     fn home_rooted_locations_fail_with_specific_guidance_before_observation() {

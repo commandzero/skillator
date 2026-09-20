@@ -179,6 +179,12 @@ impl Participant {
         else {
             return Err(Error::input("invalid inspection response"));
         };
+        if snapshot.history.id != self.id {
+            return Err(Error::input(format!(
+                "participant identity changed after observation: {}",
+                self.alias
+            )));
+        }
         self.snapshot = *snapshot;
         self.token = token;
         Ok(())
@@ -1468,6 +1474,40 @@ mod tests {
             missing: MissingPolicy::Copy,
             check,
             interactive: false,
+        }
+    }
+
+    #[test]
+    fn refreshed_identity_cannot_replace_the_observed_participant() {
+        for initialized in [false, true] {
+            let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+            configure(homes[0].path(), ".skillator/library");
+            skill(homes[0].path(), ".skillator/library/demo", "original");
+            if initialized {
+                sync(&homes, options(false));
+            }
+            let peers = participants(&homes);
+            let home = homes[1].path();
+            let path = home.join(".skillator/rsync/state.json");
+            let mut history = state::History::load(home).unwrap();
+            let expected = state::fingerprint(&path).unwrap();
+            history.id = Some(state::new_id().unwrap());
+            history.save(home, &expected).unwrap();
+            let replacement = fs::read(&path).unwrap();
+            let error = synchronize(
+                &AppPaths::new(homes[0].path().into()),
+                peers,
+                options(false),
+            )
+            .unwrap_err();
+            assert!(
+                error.message.contains("participant identity changed"),
+                "{error}"
+            );
+            assert_eq!(fs::read(path).unwrap(), replacement);
+            if !initialized {
+                assert!(!homes[0].path().join(".skillator/rsync").exists());
+            }
         }
     }
 
