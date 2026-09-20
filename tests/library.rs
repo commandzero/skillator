@@ -1,6 +1,7 @@
 mod support;
 
 use skillator::config::{LibraryConfigCodec, LoadResult};
+use skillator::domain::{SkillKey, SkillPath, SourceKey};
 use skillator::library::{SkillValidity, SourceKind, scan_library};
 use std::collections::BTreeMap;
 
@@ -262,6 +263,53 @@ fn invalid_registered_skill_keeps_its_registration_identity() {
         .unwrap();
 
     assert_eq!(skill.validity(), SkillValidity::Invalid);
+}
+
+#[test]
+fn colliding_source_keys_cannot_resolve_a_skill() {
+    let home = support::TestHome::new();
+    let library = home.path().join("library");
+    for name in ["first", "second"] {
+        let source = library.join(name);
+        std::fs::create_dir_all(&source).unwrap();
+        support::git_init(&source);
+        support::git(
+            &source,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/skills.git",
+            ],
+        );
+        write_skill(&source, "demo", "Demo skill");
+    }
+    let yaml = format!(
+        "version: 1\nlocations:\n  - path: {}\n",
+        serde_json::to_string(library.to_str().unwrap()).unwrap()
+    );
+    let LoadResult::Valid(config) = LibraryConfigCodec::parse(yaml.as_bytes()) else {
+        panic!("valid fixture config");
+    };
+    let snapshot = scan_library(
+        config.value(),
+        &home.library_config(),
+        home.path(),
+        &BTreeMap::new(),
+    );
+    let key = SkillKey::new(
+        SourceKey::parse("acme/skills").unwrap(),
+        SkillPath::parse(".").unwrap(),
+    );
+
+    assert_eq!(
+        snapshot
+            .sources()
+            .filter(|source| source.key() == key.source())
+            .count(),
+        2
+    );
+    assert!(snapshot.resolve(&key).is_none());
 }
 
 fn write_skill(directory: &std::path::Path, name: &str, description: &str) {
