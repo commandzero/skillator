@@ -5,6 +5,10 @@ source scripts/tools-versions.sh
 source scripts/filenames-check.sh
 export PATH="$PWD/.tools/bin:$PWD/.tools/node_modules/.bin:$PATH"
 export OPENSPEC_TELEMETRY=0
+# Tests write executable fixtures while other tests spawn subprocesses. On Linux,
+# fork can briefly retain another thread's writable descriptor until exec, making
+# a freshly installed hook fail with ETXTBSY. Keep tests within each binary serial.
+export RUST_TEST_THREADS=1
 # Resolve via rustup even when a system Cargo precedes its shims on PATH.
 cargo() { rustup run "${RUST_TOOLCHAIN:-1.97.1}" cargo "$@"; }
 policy_checks() {

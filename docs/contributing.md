@@ -20,6 +20,7 @@ Setup installs pinned Actionlint, OpenSpec, and OKF under the ignored `.tools` d
 ShellCheck and ripgrep must be on PATH. Rustup selects Rust 1.97.1 even when a system Cargo comes first on PATH.
 
 The full preflight runs formatting, strict Clippy, locked behavior tests, library doctests, shell and workflow checks, documentation-bundle validation, main-spec validation, and repository-tool tests.
+Preflight runs Rust tests serially within each test binary. Parallel tests that write executable fixtures and spawn subprocesses can briefly retain writable descriptors across a fork on Linux, causing `Text file busy` when another test executes a new hook. CI platform jobs still run in parallel.
 There are no optional Cargo features, so default and minimal feature sets are identical.
 
 Use `bash scripts/preflight.sh test` for another supported host or compiler.
