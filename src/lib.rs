@@ -12,6 +12,7 @@ pub mod hooks;
 pub mod library;
 mod materialization;
 pub mod reconcile;
+mod remote;
 pub mod target;
 pub mod tui;
 

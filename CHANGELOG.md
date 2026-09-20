@@ -4,6 +4,10 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ## [Unreleased]
 
+### Added
+
+- Synchronize library skills and user selections across configured SSH hosts with exact-commit Git bootstrap, explicit conflict and missing-file policies, read-only previews, and recoverable publication.
+
 ### Changed
 
 - Release archives gain a versionless executable, MIT license, and build details. The legacy executable name remains as a hard link for the current Homebrew formula.

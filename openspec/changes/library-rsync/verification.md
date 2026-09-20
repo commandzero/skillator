@@ -1,0 +1,51 @@
+# Verification report: library-rsync
+
+## Summary
+
+| Dimension | Result |
+| --- | --- |
+| Completeness | 26/26 in-scope tasks complete; implementation evidence mapped to all 22 requirements |
+| Correctness | Both reproduced failures fixed; direct tests added for both uncovered scenarios |
+| Coherence | Initiating branch provenance now retained separately from revision compatibility |
+
+The user removed task 7.5 because repository management is outside spec implementation. It is not an outstanding verification issue and has not been reintroduced. No repository archival or PR work is part of these fixes.
+
+## Resolved warnings
+
+### W1. Missing-file ignore and absent receiving locations
+
+The coordinator now registers an incoming location only when the receiver observed it, successfully prepared content there, or would prepare it in check mode. Ignoring absent content no longer schedules an impossible registration.
+
+Regression: `src/remote/coordinator.rs:1935`, `ignored_absent_location_is_successful_in_check_and_apply`. It runs check, apply, and check again, asserting status 0, no content/configuration changes, preserved receiving absence, and the intentional-ignore diagnostic.
+
+### W2. Nested directory-to-file conflicts
+
+`src/remote/state.rs:161` provides observation-only path resolution. It recognizes absence below a verified regular-file ancestor after checking physical home containment. Ordinary destination resolution still rejects that ancestor. Historical observation and acknowledgement use the observation path; publication retains strict destination checks.
+
+Regressions:
+
+- `src/remote/coordinator.rs:1957`, `nested_directory_replacement_resolves_and_retries_with_independent_work`: a synchronized multi-level tree is replaced with a file while the remote edits a nested child. Both local and remote policies select the correct complete value, independent content propagates, and a subsequent run makes no changes.
+- `src/remote/state.rs:335`, `obstructed_observation_preserves_strict_write_containment`: observing an obstructed descendant reports absence, writing through the same ancestor fails, and a file link escaping home remains rejected.
+
+### W3. Initiating branch provenance
+
+Source observation now includes the initiating branch name or absence for detached HEAD. Verified acknowledgement persists source identity, origin, exact commit, and optional branch in `History.provenance`. Receiving checkouts still use detached HEAD. Branch metadata does not participate in Git revision compatibility or file-baseline identity.
+
+Regression: `src/remote/coordinator.rs:2153`, `bootstrap_retains_initiating_branch_provenance_without_branch_alignment`. Named and detached initiating checkouts both bootstrap at the exact commit, persist the appropriate provenance on each participant, and remain idempotent despite detached receivers.
+
+### W4. Direct integration coverage
+
+- `src/remote/coordinator.rs:2012`, `first_contact_tracked_conflicts_preserve_indexes_under_each_policy`: two aligned Git checkouts have different dirty tracked contents before their first synchronization. Ask preserves both, local selects the initiating edit, and remote selects the changed remote edit. The checked-out references and index bytes remain unchanged under every policy.
+- `src/remote/coordinator.rs:2105`, `first_contact_independent_user_selections_form_a_union`: two homes independently enable different valid skills before synchronization. Both receive the semantic union and links to their own library paths. The next run is idempotent.
+
+## Validation
+
+- All 36 synchronization module tests passed, including six new regression/integration tests.
+- Strict OpenSpec validation passed.
+- OpenSpec apply instructions report `all_done`, with 26 complete and zero remaining tasks.
+- Full pinned-toolchain preflight passed: formatting, strict Clippy, 279 Rust tests, doctests, documentation, shell/workflow, main-spec, repository-tool, and release safeguards.
+- Both original CLI reproductions now return status 0. Missing ignore preserves absence; nested replacement publishes the selected file. Fresh reports are retained at `/var/folders/s2/8v9rgs8n2m70c5qxy0rz97nc0000gn/T/skillator-verify-rsync-qgoyoela/results.json`.
+
+The review covered all 22 requirements and 38 scenarios; the follow-up tests address its reported coverage gaps. Existing real SSH/Linux acceptance evidence is retained in `validation.md`; that environment was not recreated for this follow-up. The new CLI reproductions use disposable local homes, a process adapter for SSH, and real rsync. They are not described as a new real-network acceptance run.
+
+Assessment: all four verification warnings are resolved. No outstanding issue remains from this review.

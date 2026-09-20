@@ -32,6 +32,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(name = "__rsync", hide = true)]
+    RemoteProtocol,
     /// Choose which skills are available in your library.
     Library {
         #[command(subcommand)]
@@ -68,6 +70,8 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum LibraryCommand {
+    /// Synchronize library skills and user selections with configured SSH hosts.
+    Rsync(RsyncArgs),
     /// Add a directory of skills to the Library.
     Add {
         location: String,
@@ -213,6 +217,24 @@ struct OutputArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct RsyncArgs {
+    /// Select configured host aliases, separated by commas. Defaults to all hosts.
+    #[arg(long, value_name = "ALIAS,...")]
+    hosts: Option<String>,
+    /// Choose how competing edits are resolved.
+    #[arg(long, value_enum, default_value = "ask")]
+    conflict: crate::remote::ConflictPolicy,
+    /// Choose how missing skill files are handled.
+    #[arg(long, value_enum, default_value = "copy")]
+    missing: crate::remote::MissingPolicy,
+    /// Inspect without writing on any participant.
+    #[arg(long)]
+    check: bool,
+    #[command(flatten)]
+    output: OutputArgs,
+}
+
+#[derive(Debug, clap::Args)]
 struct MutationOutputArgs {
     /// Show what would change without writing files.
     #[arg(long)]
@@ -320,6 +342,10 @@ pub fn run() -> ExitCode {
     };
     let paths = AppPaths::new(home);
     match cli.command {
+        Some(Commands::RemoteProtocol) => match crate::remote::serve(paths) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => diagnostic(error.code, &error.to_string()),
+        },
         Some(Commands::Init(arguments)) => run_init(&paths, arguments),
         Some(Commands::Sync(arguments)) => run_sync_command(&paths, arguments),
         Some(Commands::Library { command: None }) => {
@@ -377,6 +403,30 @@ fn validate_output(output: &OutputArgs) -> Result<(), ExitCode> {
 
 fn run_library_command(paths: &AppPaths, command: LibraryCommand) -> ExitCode {
     match command {
+        LibraryCommand::Rsync(arguments) => {
+            if let Err(code) = validate_output(&arguments.output) {
+                return code;
+            }
+            let options = crate::remote::Options {
+                hosts: arguments.hosts,
+                conflict: arguments.conflict,
+                missing: arguments.missing,
+                check: arguments.check,
+                interactive: arguments.output.format == OutputFormat::Text
+                    && interactive_terminal(),
+            };
+            match crate::remote::run(paths, options) {
+                Ok(report) => {
+                    let rendered = match arguments.output.format {
+                        OutputFormat::Text => Ok(report.text()),
+                        OutputFormat::Json => render_json(&report),
+                        OutputFormat::Yaml => render_serialized_yaml(&report),
+                    };
+                    write_rendered(rendered, report.exit_status)
+                }
+                Err(error) => diagnostic(error.code, &error.to_string()),
+            }
+        }
         LibraryCommand::Add {
             location,
             allow_overlap,

@@ -2649,6 +2649,55 @@ impl PreparedUserScopeSave {
 }
 
 impl UserScopeWorkflow {
+    /// Remote callers already hold the user lock after all-host preflight.
+    pub(crate) fn save_remote(
+        paths: &AppPaths,
+        staged: RepositoryConfig,
+        locks: TargetLocks,
+        check: bool,
+    ) -> Result<CommandReport, WorkflowError> {
+        let session = Self::load(paths)?;
+        let (library, diagnostics) = load_library_snapshot(paths)?;
+        let prepared = crate::reconcile::prepare_transition_with_locks(
+            &session.target,
+            &session.config,
+            &staged,
+            &library,
+            locks,
+        )?;
+        let prepared = PreparedUserScopeSave {
+            target: session.target,
+            staged,
+            expected: session.fingerprint,
+            library,
+            prepared,
+            diagnostics,
+        };
+        if check {
+            return Ok(prepared.check());
+        }
+        if prepared.rejects_apply(false) {
+            let mut report = prepared.rejected_apply_report();
+            for change in &mut report.changes {
+                if change.outcome == ReportOutcome::WouldApply {
+                    change.outcome = ReportOutcome::NotAuthorized;
+                }
+            }
+            return Ok(report);
+        }
+        let configuration_changed = session.config != prepared.staged || session.first_run;
+        let mut report = Self::commit_save(paths, prepared, Authorization::SafeOnly)?;
+        if configuration_changed {
+            report.changes.push(ReportChange {
+                path: ".agents/skillator.yaml".into(),
+                action: "write_user_configuration".into(),
+                safety: "safe".into(),
+                outcome: ReportOutcome::Applied,
+            });
+        }
+        Ok(report)
+    }
+
     pub fn inspect(paths: &AppPaths) -> Result<ScopeEnablementsReport, WorkflowError> {
         let session = Self::load(paths)?;
         if session.first_run {
