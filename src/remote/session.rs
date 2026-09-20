@@ -141,7 +141,8 @@ impl Session {
                 self.require_active()?;
                 self.authorize_path(&path)?;
                 let source = state::contained(self.paths.home(), &path)?;
-                if observed_content(&source, Some(&expected))? != Some(expected.clone()) {
+                if self.observed_content(&path, &source, Some(&expected))? != Some(expected.clone())
+                {
                     return Err(Error::input("source changed after observation"));
                 }
                 let stage = self.stage.as_ref().unwrap().join(state::new_id()?);
@@ -221,7 +222,9 @@ impl Session {
                             ));
                         }
                         let actual = match state::observation_path(self.paths.home(), path)? {
-                            Some(path) => observed_content(&path, expected.as_ref())?,
+                            Some(actual) => {
+                                self.observed_content(path, &actual, expected.as_ref())?
+                            }
                             None => None,
                         };
                         if actual != *expected {
@@ -606,6 +609,36 @@ impl Session {
         Ok(Some((desired, fingerprint)))
     }
 
+    fn observed_content(
+        &self,
+        logical: &str,
+        path: &Path,
+        expected: Option<&Entry>,
+    ) -> Result<Option<Entry>> {
+        // Only aliases observed as skill-root directories can retain their local link.
+        if matches!(expected, Some(Entry::Directory))
+            && path.is_symlink()
+            && path.is_dir()
+            && let Some((snapshot, _, _)) = &self.last
+            && snapshot.sources.iter().any(|source| {
+                source.files.get(logical) == Some(&Entry::Directory)
+                    && source.skills.iter().any(|skill| {
+                        let root = if skill == "." {
+                            source.root.clone()
+                        } else {
+                            format!("{}/{}", source.root, skill)
+                        };
+                        root == logical
+                    })
+            })
+            && let Some(physical) = snapshot.physical_paths.get(logical)
+            && path.canonicalize().map_err(Error::input_display)? == Path::new(physical)
+        {
+            return Ok(Some(Entry::Directory));
+        }
+        state::observe(path)
+    }
+
     fn publish(
         &self,
         path: &str,
@@ -618,7 +651,7 @@ impl Session {
         if let Some(Entry::Link { target }) = desired {
             self.validate_link(path, target)?;
         }
-        let actual = observed_content(&destination, desired.or(expected))?;
+        let actual = self.observed_content(path, &destination, desired.or(expected))?;
         if actual.as_ref() == desired {
             return Ok(());
         }
@@ -665,7 +698,10 @@ impl Session {
             }
         }
         if state::contained(self.paths.home(), path)? != destination
-            || observed_content(&destination, expected)?.as_ref() != expected
+            || self
+                .observed_content(path, &destination, expected)?
+                .as_ref()
+                != expected
         {
             let _ = remove_entry(&sibling);
             return Err(Error::input("destination changed during staging"));
@@ -707,7 +743,7 @@ impl Session {
                     .map_err(Error::input_display)?
                     .next()
                     .is_some())
-            || observed_content(&destination, desired)?.as_ref() != desired
+            || self.observed_content(path, &destination, desired)?.as_ref() != desired
         {
             let rollback = match (expected, desired) {
                 (Some(_), Some(_)) => rename_exchange(&sibling, &destination),
@@ -918,14 +954,6 @@ impl Drop for Session {
     }
 }
 
-pub(super) fn observed_content(path: &Path, expected: Option<&Entry>) -> Result<Option<Entry>> {
-    // A library acquisition root link denotes the skill directory, not a transferred link.
-    if matches!(expected, Some(Entry::Directory)) && path.is_symlink() && path.is_dir() {
-        return Ok(Some(Entry::Directory));
-    }
-    state::observe(path)
-}
-
 #[cfg(test)]
 fn hash_optional(path: &Path) -> Result<Option<String>> {
     Ok(state::read_optional(path)?.map(|bytes| state::digest(&bytes)))
@@ -1004,6 +1032,29 @@ mod tests {
             panic!()
         };
         (home, session, PathBuf::from(stage))
+    }
+
+    #[test]
+    fn ordinary_directory_links_are_replaced_instead_of_acknowledged_as_directories() {
+        let (home, session, stage) = setup();
+        let root = home.path().join(".skillator/library/demo");
+        fs::create_dir(root.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", root.join("child")).unwrap();
+        let staged = stage.join("directory");
+        fs::create_dir(&staged).unwrap();
+        session
+            .publish(
+                ".skillator/library/demo/child",
+                Some(&Entry::Link {
+                    target: "real".into(),
+                }),
+                Some(&Entry::Directory),
+                staged.to_str(),
+            )
+            .unwrap();
+        assert!(!root.join("child").is_symlink());
+        assert!(root.join("child").is_dir());
+        assert!(root.join("real").is_dir());
     }
 
     #[test]

@@ -5,7 +5,7 @@ Validated on 2026-09-19. The planning artifacts were committed as `2fa9b0b`, `do
 ## Repository checks
 
 - `bash scripts/preflight.sh` passed with pinned Rust 1.97.1. The run included formatting, strict Clippy, all-target locked tests, doctests, shell and workflow checks, OKF documentation validation, main-spec validation, repository-tool tests, and release safeguard tests.
-- The complete Rust test run passed 273 tests. It includes 30 remote module tests and six CLI protocol/report tests.
+- The complete Rust test run passed, including synchronization module and CLI protocol/report tests.
 - `OPENSPEC_TELEMETRY=0 .tools/node_modules/.bin/openspec validate library-rsync --strict --no-interactive` passed.
 - Full preflight diagnostics were retained locally at `/tmp/skillator-rsync-full-preflight.log`.
 
@@ -45,4 +45,4 @@ All four warnings from the initial verification have been addressed:
 - Synchronization history retains the initiating source identity, origin, commit, and optional branch. Detached receiving checkouts do not affect revision compatibility or overwrite initiating branch provenance.
 - Integration tests now cover conflicting first-contact tracked Git edits under every policy, byte-for-byte index preservation, and the union of independent first-contact user selections.
 
-The follow-up synchronization suite passed 36 tests. Full pinned-toolchain preflight passed with 279 Rust tests, and strict OpenSpec validation passed. Both original CLI reproductions now return status 0. See `verification.md` for the regression cases and evidence.
+The follow-up synchronization suite passed 36 tests. Full pinned-toolchain preflight passed with all Rust tests passing, and strict OpenSpec validation passed. Both original CLI reproductions now return status 0. See `verification.md` for the regression cases and evidence.
