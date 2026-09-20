@@ -28,6 +28,10 @@ Immediately before pulling, Skillator SHALL verify unchanged checkout identity, 
 1. **WHEN** a clean checkout is behind its upstream without divergence
 2. **THEN** it fast-forwards and reports applied
 
+#### Scenario: Branch and tag share a name
+1. **WHEN** a clean branch has a configured upstream and a tag shares its name
+2. **THEN** preview and update resolve the branch upstream without a false missing-upstream diagnostic
+
 #### Scenario: Current or locally ahead
 1. **WHEN** a successful pull leaves HEAD unchanged
 2. **THEN** the result is unchanged and local commits remain intact without a push

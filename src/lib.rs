@@ -4,7 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod domain;
 // Atomic no-replace/exchange renames need platform APIs absent from std.
-// Keep the only unsafe exception private and confined to this module.
+// Keep the unsafe exception private and confined to this module.
 #[allow(unsafe_code)]
 mod fs_safety;
 pub mod git;
@@ -16,3 +16,9 @@ pub mod target;
 pub mod tui;
 
 pub use cli::run;
+
+mod library_update;
+// POSIX signals and nonblocking pipe flags have no std equivalents.
+// Keep signal installation, process-group cleanup, and descriptor access private.
+#[allow(unsafe_code)]
+mod update_process;

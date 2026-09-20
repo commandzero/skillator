@@ -16,6 +16,10 @@
 1. **WHEN** authentication requires interaction
 2. **THEN** the pull fails without prompting and independent work continues
 
+#### Scenario: Conflicting SSH batch settings
+1. **WHEN** the configured SSH executable arguments disable batch mode or permit password prompts
+2. **THEN** update enforces batch mode and zero password prompts while preserving the executable and other arguments
+
 ### Requirement: Library update preview inspects only local state
 
 Preview SHALL use normal discovery and local eligibility checks without fetching, contacting remotes, refreshing the Git index, or writing files or metadata. Eligible checkouts SHALL have action `pull` and outcome `would_apply`. Text SHALL say "Would attempt pull; remote state not checked." Machine output SHALL include advisory `remote_state_not_checked`. Cached tracking refs MUST NOT be presented as proof that a repository is current. Preview SHALL return 1 for any planned pull or blocking problem, and 0 for an empty successful plan.
@@ -26,13 +30,21 @@ Preview SHALL use normal discovery and local eligibility checks without fetching
 
 ### Requirement: Library update reports aggregate and per-checkout results
 
-The command SHALL use the existing version 1 report envelope and machine-format rules. Mode SHALL be `library_update` or `library_update_check`; target SHALL be the Library configuration path. Each selected checkout SHALL have 1 canonical-path-ordered change row with action `pull`, safety `safe` or `blocked`, and outcome `applied`, `unchanged`, `would_apply`, `blocked`, or `failed`. Diagnostics SHALL have stable reason codes and affected paths or Locations. Skipped submodules SHALL appear only in diagnostics. Text SHALL show updates, preview attempts, skips, and problems with a concise unchanged count; an empty plan SHALL say `No repositories to update.`
+The command SHALL use the existing version 1 report envelope and machine-format rules. Mode SHALL be `library_update` or `library_update_check`; target SHALL be the Library configuration path. Each selected checkout SHALL have 1 canonical-path-ordered change row with action `pull`, safety `safe` or `blocked`, and outcome `applied`, `unchanged`, `would_apply`, `blocked`, or `failed`. Diagnostics SHALL have stable reason codes and affected paths or Locations. Skipped submodules SHALL appear only in diagnostics. Text SHALL show updates, preview attempts, skips, and problems. When stdout is a terminal, text SHALL list every unchanged repository with the label `up-to-date`, including in mixed-result batches. Redirected text SHALL retain a concise unchanged count; an empty plan SHALL say `No repositories to update.`
 
 Completed reports SHALL use stdout, including partial reports. Machine output SHALL be deterministic and ANSI-free without raw Git progress. Application SHALL return 0 for complete success, 1 for trustworthy partial or blocked results, 3 for invalid or unreadable configuration before any pull, and 5 for missing Git or other fatal pre-report failure. Pre-report errors SHALL leave stdout empty and use stderr. Invalid Skill metadata, Source Key collisions, and skipped submodules alone SHALL NOT cause exit 1.
 
 #### Scenario: Partial machine report
 1. **WHEN** 1 checkout updates, 1 is unchanged, and 1 fails
 2. **THEN** JSON and YAML encode equivalent complete reports with exit 1
+
+#### Scenario: Unchanged repositories in an interactive terminal
+1. **WHEN** update evaluates repositories that need no changes and stdout is a terminal
+2. **THEN** text lists each unchanged repository path with the label `up-to-date`
+
+#### Scenario: Redirected text remains compact
+1. **WHEN** stdout is redirected and evaluated repositories need no changes
+2. **THEN** text reports the unchanged count without listing unchanged paths
 
 #### Scenario: Invalid configuration
 1. **WHEN** Library configuration is invalid

@@ -25,7 +25,8 @@ Revalidate identity, attached branch, upstream, clean porcelain status including
 Use read-only queries with optional Git locks disabled. Ignored files alone do not block a pull.
 
 Invoke Git directly with explicit arguments, disabling rebase, autostash, and submodule recursion while requiring fast-forward integration.
-Use the configured upstream. Compare HEAD before and after success to classify applied versus unchanged.
+Use the full symbolic HEAD ref and strip `refs/heads/` to look up the configured upstream, even when a tag shares the branch name.
+Compare HEAD before and after success to classify applied versus unchanged.
 
 Run sequentially, retain successes, and continue after independent failures.
 Respect Git locks without removing them or forcing updates.
@@ -47,7 +48,9 @@ Preview never fetches, contacts remotes, refreshes the index, or writes metadata
 Text says "Would attempt pull; remote state not checked." Machine output retains `would_apply` with `remote_state_not_checked`.
 
 Use the existing command-report envelope and stable diagnostic codes.
+Detect terminal stdout separately from color policy. List each unchanged repository as `up-to-date` in terminal text; keep the unchanged count for redirected text.
 Capture Git output, strip ANSI, disable terminal credentials, askpass, editors, and SSH interaction, and never mix raw progress into machine output.
+Place enforced SSH batch options before configured executable arguments, preserving quoted executable paths and other arguments. OpenSSH keeps the first value for each option.
 
 ## Risks / Trade-offs
 

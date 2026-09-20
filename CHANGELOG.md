@@ -4,6 +4,10 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ## [Unreleased]
 
+### Added
+
+- Update Library repositories with fast-forward-only pulls, local preview, structured reports, a configurable 30-second timeout, and batch cancellation. Skip submodules and preserve copied skills.
+
 ### Changed
 
 - Release archives gain a versionless executable, MIT license, and build details. The legacy executable name remains as a hard link for the current Homebrew formula.
