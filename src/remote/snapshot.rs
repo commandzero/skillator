@@ -350,9 +350,10 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
                 .is_ignore()
         });
         source.committed.retain(|path, _| {
-            !exclusions
-                .matched_path_or_any_parents(paths.home().join(path), false)
-                .is_ignore()
+            !state::administrative(Path::new(path))
+                && !exclusions
+                    .matched_path_or_any_parents(paths.home().join(path), false)
+                    .is_ignore()
         });
         for skill in &source.skills {
             if !skill.is_empty() {
@@ -401,6 +402,9 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
         }
         for peer in history.peers.values() {
             for path in peer.files.keys() {
+                if !state::transferable(paths.home(), path)? {
+                    continue;
+                }
                 if path.starts_with(&format!("{}/", source.root)) {
                     let logical = paths.home().join(path);
                     if exclusions
@@ -532,6 +536,9 @@ fn collect(
         return Ok(());
     }
     let path = state::home_relative(home, logical)?;
+    if !state::transferable(home, &path)? {
+        return Ok(());
+    }
     let actual = state::contained(home, &path)?;
     let entry = if root {
         Some(Entry::Directory)

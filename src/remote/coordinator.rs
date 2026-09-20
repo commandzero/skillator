@@ -283,8 +283,10 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
     }
     // Inspect incoming paths on every host before beginning any mutation.
     for peer in &mut peers {
-        peer.inspect(&sources)
-            .map_err(|e| Error::input(format!("{}: {e}", peer.alias)))?;
+        peer.inspect(&sources).map_err(|e| Error {
+            code: e.code,
+            message: format!("{}: {e}", peer.alias),
+        })?;
         for message in &peer.snapshot.problems {
             report.diagnostics.push(ReportDiagnostic {
                 code: "library_advisory".into(),
@@ -318,6 +320,20 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
         }
     }
     if !options.check {
+        // Reserve every participant before Begin creates identities or stages.
+        for index in 0..peers.len() {
+            let token = peers[index].token.clone();
+            if let Err(error) = peers[index].request_ok(Request::Lock { token }) {
+                let alias = peers[index].alias.clone();
+                for peer in &mut peers {
+                    let _ = peer.request_ok(Request::Finish);
+                }
+                return Err(Error {
+                    code: error.code,
+                    message: format!("{alias}: {error}"),
+                });
+            }
+        }
         for peer in &mut peers {
             match peer.endpoint.request(Request::Begin {
                 token: peer.token.clone(),
@@ -335,6 +351,12 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
                 }
                 Ok(_) => return Err(Error::input("invalid begin response")),
                 Err(error) => {
+                    if error.code == 4 {
+                        for peer in &mut peers {
+                            let _ = peer.request_ok(Request::Finish);
+                        }
+                        return Err(error);
+                    }
                     report.problem(&peer.alias, "", "begin_failed", error.to_string());
                     return Ok(report);
                 }
@@ -613,11 +635,12 @@ fn sync_files(
         );
     }
     paths.retain(|path| {
-        owner(path).is_some_and(|s| {
-            !exclusions[&s.root]
-                .matched_path_or_any_parents(peers[0].snapshot.home.join(path), false)
-                .is_ignore()
-        })
+        !state::administrative(std::path::Path::new(path))
+            && owner(path).is_some_and(|s| {
+                !exclusions[&s.root]
+                    .matched_path_or_any_parents(peers[0].snapshot.home.join(path), false)
+                    .is_ignore()
+            })
     });
     let mut type_choices = BTreeMap::new();
     let mut type_conflicts = BTreeSet::new();
@@ -1257,6 +1280,13 @@ fn sync_user(
             Ok(Response::User {
                 report: user_report,
             }) => {
+                for mut diagnostic in user_report.diagnostics {
+                    diagnostic
+                        .data
+                        .get_or_insert_default()
+                        .insert("host".into(), peer.alias.clone());
+                    report.diagnostics.push(diagnostic);
+                }
                 for change in &user_report.changes {
                     report.changes.push(Change {
                         host: peer.alias.clone(),
@@ -1341,6 +1371,142 @@ mod tests {
             check,
             interactive: false,
         }
+    }
+
+    #[test]
+    fn late_busy_participant_returns_busy_without_starting_sessions() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        let peers = participants(&homes);
+        let target = crate::target::Target::user(homes[1].path()).unwrap();
+        let _lock = crate::reconcile::TargetLocks::acquire(&[&target]).unwrap();
+        let error = synchronize(
+            &AppPaths::new(homes[0].path().into()),
+            peers,
+            options(false),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, 4);
+        for home in &homes {
+            assert!(!home.path().join(".skillator/rsync").exists());
+        }
+        let target = crate::target::Target::user(homes[0].path()).unwrap();
+        assert!(crate::reconcile::TargetLocks::acquire(&[&target]).is_ok());
+    }
+
+    #[test]
+    fn lock_reservation_failure_releases_earlier_participants_without_writes() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        let mut peers = participants(&homes);
+        let endpoint = std::mem::replace(
+            &mut peers[1].endpoint,
+            Endpoint::local(AppPaths::new(homes[1].path().into())),
+        );
+        peers[1].endpoint = Endpoint::Fault {
+            inner: Box::new(endpoint),
+            fault: super::super::transport::Fault::LockBusy,
+        };
+        let error = synchronize(
+            &AppPaths::new(homes[0].path().into()),
+            peers,
+            options(false),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, 4);
+        for home in &homes {
+            assert!(!home.path().join(".skillator/rsync").exists());
+            let target = crate::target::Target::user(home.path()).unwrap();
+            assert!(crate::reconcile::TargetLocks::acquire(&[&target]).is_ok());
+        }
+    }
+
+    #[test]
+    fn user_configuration_formatting_is_reported_in_preview_and_apply() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        let paths = AppPaths::new(homes[0].path().into());
+        let selector = crate::app::SkillSelector::parse("local/library:demo").unwrap();
+        crate::app::UserScopeWorkflow::mutate_enablement(
+            &paths,
+            &selector,
+            Some(crate::domain::MaterializationKind::Linked),
+            crate::app::SyncMode::Apply { force: false },
+        )
+        .unwrap();
+        assert_eq!(sync(&homes, options(false)).exit_status, 0);
+        let config = homes[1].path().join(".agents/skillator.yaml");
+        let canonical = fs::read_to_string(&config).unwrap();
+        let commented = format!("# local comment\n{canonical}");
+        fs::write(&config, &commented).unwrap();
+        let preview = sync(&homes, options(true));
+        assert_eq!(preview.exit_status, 1, "{}", preview.text());
+        assert_eq!(fs::read_to_string(&config).unwrap(), commented);
+        let applied = sync(&homes, options(false));
+        assert_eq!(applied.exit_status, 0, "{}", applied.text());
+        for report in [&preview, &applied] {
+            assert!(
+                report
+                    .changes
+                    .iter()
+                    .any(|change| change.host == "host1"
+                        && change.action == "write_user_configuration"),
+                "{}",
+                report.text()
+            );
+        }
+        assert_eq!(fs::read_to_string(config).unwrap(), canonical);
+        assert!(sync(&homes, options(false)).changes.is_empty());
+    }
+
+    #[test]
+    fn recovered_exchange_is_reobserved_before_planning_and_acknowledgement() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        assert_eq!(sync(&homes, options(false)).exit_status, 0);
+        let path = ".skillator/library/demo/SKILL.md";
+        let destination = state::contained(homes[1].path(), path).unwrap();
+        let expected = state::observe(&destination).unwrap();
+        let backup = destination
+            .parent()
+            .unwrap()
+            .join(format!(".skillator-rsync-{}", state::new_id().unwrap()));
+        fs::copy(&destination, &backup).unwrap();
+        skill(
+            homes[1].path(),
+            ".skillator/library/demo",
+            "interrupted replacement",
+        );
+        let desired = state::observe(&destination).unwrap();
+        let stage = homes[1].path().join(".skillator/rsync/stage-interrupted");
+        fs::create_dir(&stage).unwrap();
+        fs::write(
+            stage.join("recovery-test.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "path": path, "expected": expected, "desired": desired, "sibling": backup,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let recovered = sync(&homes, options(false));
+        assert_eq!(recovered.exit_status, 0, "{}", recovered.text());
+        assert!(
+            recovered
+                .changes
+                .iter()
+                .any(|change| change.action == "recover_publication")
+        );
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            fs::read(homes[0].path().join(path)).unwrap()
+        );
+        let again = sync(&homes, options(false));
+        assert_eq!(again.exit_status, 0, "{}", again.text());
+        assert!(again.changes.is_empty(), "{}", again.text());
     }
     fn sync(homes: &[tempfile::TempDir], options: Options) -> Report {
         synchronize(
@@ -1802,6 +1968,19 @@ mod tests {
         skill(homes[1].path(), ".agents/skills/demo", "unmanaged");
         let blocked = sync(&homes, options(false));
         assert_eq!(blocked.exit_status, 1, "{}", blocked.text());
+        assert!(
+            blocked.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code != "user_not_converged"
+                    && diagnostic.data.as_ref().is_some_and(|data| {
+                        data.get("host").is_some_and(|host| host == "host1")
+                            && data
+                                .get("path")
+                                .is_some_and(|path| path == ".agents/skills/demo")
+                    })
+            }),
+            "{}",
+            blocked.text()
+        );
         assert!(
             fs::read_to_string(homes[1].path().join(".agents/skills/demo/SKILL.md"))
                 .unwrap()

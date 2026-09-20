@@ -23,6 +23,9 @@ pub(super) enum Request {
     Begin {
         token: String,
     },
+    Lock {
+        token: String,
+    },
     Bootstrap {
         source: Source,
     },
@@ -125,6 +128,10 @@ impl Session {
                 })
             }
             Request::Begin { token } => self.begin(&token),
+            Request::Lock { token } => {
+                self.lock(&token)?;
+                Ok(Response::Ok)
+            }
             Request::Bootstrap { source } => {
                 self.require_active()?;
                 self.bootstrap(&source)?;
@@ -268,7 +275,7 @@ impl Session {
         }
     }
 
-    fn begin(&mut self, token: &str) -> Result<Response> {
+    fn lock(&mut self, token: &str) -> Result<()> {
         if self.stage.is_some() {
             return Err(Error::input("session is already active"));
         }
@@ -280,26 +287,51 @@ impl Session {
             return Err(Error::input("invalid observation token"));
         }
         let target = Target::user(self.paths.home()).map_err(Error::input_display)?;
-        self.user_lock = Some(TargetLocks::acquire(&[&target]).map_err(|_| Error::busy())?);
+        if self.user_lock.is_none() {
+            self.user_lock = Some(TargetLocks::acquire(&[&target]).map_err(|_| Error::busy())?);
+        }
         let observed = snapshot::inspect(&self.paths, sources)?;
         if state::digest(&serde_json::to_vec(&observed).map_err(Error::input_display)?) != token {
             self.user_lock = None;
             return Err(Error::input("participant changed after preflight; retry"));
         }
+        // An earlier session can still hold its history lock after user reconciliation.
+        // Reserve an existing lock without creating persistent state during this phase.
+        if self.session_lock.is_none() {
+            let root = state::contained(self.paths.home(), ".skillator/rsync/session.lock")?;
+            match fs::symlink_metadata(&root) {
+                Ok(meta) if meta.is_file() => {
+                    let lock = File::open(root).map_err(Error::input_display)?;
+                    lock.try_lock().map_err(|_| Error::busy())?;
+                    self.session_lock = Some(lock);
+                }
+                Ok(_) => return Err(Error::input("session lock must be a regular file")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(Error::input_display(error)),
+            }
+        }
+        Ok(())
+    }
+
+    fn begin(&mut self, token: &str) -> Result<Response> {
+        self.lock(token)?;
+        let observed = self.last.as_ref().unwrap().0.clone();
         let root = state::contained(self.paths.home(), ".skillator/rsync/session.lock")?;
         fs::create_dir_all(root.parent().unwrap()).map_err(Error::input_display)?;
         if fs::symlink_metadata(&root).is_ok_and(|meta| !meta.is_file()) {
             return Err(Error::input("session lock must be a regular file"));
         }
-        let lock = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&root)
-            .map_err(Error::input_display)?;
-        lock.try_lock().map_err(|_| Error::busy())?;
-        self.session_lock = Some(lock);
+        if self.session_lock.is_none() {
+            let lock = File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&root)
+                .map_err(Error::input_display)?;
+            lock.try_lock().map_err(|_| Error::busy())?;
+            self.session_lock = Some(lock);
+        }
         let recovered = recover_pending(self.paths.home())?;
         self.history = observed.history;
         self.history_expected = state::fingerprint(&state::contained(
@@ -340,12 +372,7 @@ impl Session {
     }
 
     fn authorize_path(&self, path: &str) -> Result<()> {
-        state::relative(path)?;
-        if Path::new(path)
-            .components()
-            .any(|part| part.as_os_str() == ".git")
-            || path.starts_with(".skillator/rsync/")
-        {
+        if !state::transferable(self.paths.home(), path)? {
             return Err(Error::input("administrative paths cannot be transferred"));
         }
         let snapshot = &self
@@ -893,6 +920,57 @@ mod tests {
             panic!()
         };
         (home, session, PathBuf::from(stage))
+    }
+
+    #[test]
+    fn skill_control_files_are_neither_collected_nor_authorized() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".skillator/rsync")).unwrap();
+        fs::create_dir_all(home.path().join(".skillator/nested/.agents")).unwrap();
+        fs::write(
+            home.path().join(".skillator/SKILL.md"),
+            "---\nname: demo\ndescription: Broad skill root\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            home.path().join(".skillator/library.yaml"),
+            "version: 1\nlocations: [{path: '~/.skillator'}]\n",
+        )
+        .unwrap();
+        let controls = [
+            ".skillator/library.yaml",
+            ".skillator/config.yaml",
+            ".skillator/targets.yaml",
+            ".skillator/rsync/private",
+            ".skillator/nested/.agents/skillator.yaml",
+        ];
+        for path in &controls[1..] {
+            fs::write(home.path().join(path), "machine-local bytes").unwrap();
+        }
+        std::os::unix::fs::symlink("config.yaml", home.path().join(".skillator/alias")).unwrap();
+        let mut session = Session::new(AppPaths::new(home.path().into()));
+        let Response::Snapshot { snapshot, .. } = session
+            .handle(Request::Inspect { sources: vec![] })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(
+            snapshot
+                .sources
+                .iter()
+                .any(|source| source.files.contains_key(".skillator/SKILL.md"))
+        );
+        for path in controls.into_iter().chain([".skillator/alias"]) {
+            assert!(
+                snapshot
+                    .sources
+                    .iter()
+                    .all(|source| !source.files.contains_key(path)),
+                "{path}"
+            );
+            assert!(session.authorize_path(path).is_err(), "{path}");
+        }
     }
 
     #[test]

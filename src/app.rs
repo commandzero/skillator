@@ -2665,7 +2665,7 @@ impl UserScopeWorkflow {
             &library,
             locks,
         )?;
-        let prepared = PreparedUserScopeSave {
+        let mut prepared = PreparedUserScopeSave {
             target: session.target,
             staged,
             expected: session.fingerprint,
@@ -2673,6 +2673,22 @@ impl UserScopeWorkflow {
             prepared,
             diagnostics,
         };
+        let guarded_diagnostics: Vec<_> = prepared
+            .plan()
+            .items()
+            .iter()
+            .filter(|item| item.safety() == Safety::Guarded)
+            .map(|item| ReportDiagnostic {
+                code: "not_authorized".into(),
+                severity: "warning".into(),
+                message: item.reason().into(),
+                data: Some(BTreeMap::from([(
+                    "path".into(),
+                    display_path(prepared.target.root(), item.path()),
+                )])),
+            })
+            .collect();
+        prepared.diagnostics.extend(guarded_diagnostics);
         if check {
             return Ok(prepared.check());
         }
@@ -2685,7 +2701,12 @@ impl UserScopeWorkflow {
             }
             return Ok(report);
         }
-        let configuration_changed = session.config != prepared.staged || session.first_run;
+        let configuration_changed = prepared.expected
+            != Fingerprint::for_bytes(
+                RepositoryConfigCodec::render(&prepared.staged)
+                    .expect("validated configuration renders")
+                    .as_bytes(),
+            );
         let mut report = Self::commit_save(paths, prepared, Authorization::SafeOnly)?;
         if configuration_changed {
             report.changes.push(ReportChange {

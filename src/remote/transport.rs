@@ -24,6 +24,7 @@ pub(super) enum Fault {
     Publish,
     Verification,
     Acknowledge,
+    LockBusy,
 }
 
 pub(super) struct Remote {
@@ -105,6 +106,9 @@ impl Endpoint {
             Self::Local(session) => session.handle(request)?,
             #[cfg(test)]
             Self::Fault { inner, fault } => {
+                if matches!((&request, *fault), (Request::Lock { .. }, Fault::LockBusy)) {
+                    return Err(Error::busy());
+                }
                 if matches!(
                     (&request, *fault),
                     (

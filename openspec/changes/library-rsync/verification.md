@@ -49,3 +49,14 @@ Regression: `src/remote/coordinator.rs:2153`, `bootstrap_retains_initiating_bran
 The review covered all 22 requirements and 38 scenarios; the follow-up tests address its reported coverage gaps. Existing real SSH/Linux acceptance evidence is retained in `validation.md`; that environment was not recreated for this follow-up. The new CLI reproductions use disposable local homes, a process adapter for SSH, and real rsync. They are not described as a new real-network acceptance run.
 
 Assessment: all four verification warnings are resolved. No outstanding issue remains from this review.
+
+## PR review follow-up
+
+Copilot's first review of PR #32 identified four implementation defects:
+
+- Busy errors lost status 4. Participant lock reservation now precedes identity creation and staging, and errors retain their status. Regressions cover a participant becoming busy after observation and failure while reserving the later participant's lock, including release of earlier locks without writes.
+- Broad skill roots could include machine-local control files. Collection, historical path planning, and transfer authorization exclude Git metadata, Skillator configuration and registries, synchronization state, and user/project configuration. Authorization also checks physical paths to prevent aliases from bypassing these exclusions.
+- Configuration formatting changes were reported only by preview. Application now compares the same rendered-byte fingerprint and reports canonicalization writes. The regression checks preview preservation, application reporting, and subsequent convergence.
+- User reconciliation diagnostics were omitted from the outer report. They now retain their fields and gain the receiving alias. Guarded materializations also carry their reason, covered by the unmanaged-entry regression.
+
+The fifth finding claimed recovery leaves stale observations. The coordinator already re-inspects every participant after Begin and bootstrap, before file planning and acknowledgement. `recovered_exchange_is_reobserved_before_planning_and_acknowledgement` exercises a pending exchange journal through that complete path and verifies convergence in the recovery run, followed by an unchanged retry. No recovery implementation change was needed.

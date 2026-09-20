@@ -151,6 +151,38 @@ pub(super) fn relative(value: &str) -> Result<&Path> {
     Ok(path)
 }
 
+/// Control files belong to their local workflows, never to skill transfers.
+pub(super) fn administrative(path: &Path) -> bool {
+    let parts: Vec<_> = path.components().map(|part| part.as_os_str()).collect();
+    parts.iter().any(|part| *part == ".git")
+        || parts.windows(2).any(|pair| {
+            (pair[0] == ".agents" && pair[1] == "skillator.yaml")
+                || (pair[0] == ".skillator"
+                    && ["config.yaml", "library.yaml", "targets.yaml", "rsync"]
+                        .iter()
+                        .any(|name| pair[1] == *name))
+        })
+}
+
+pub(super) fn transferable(home: &Path, path: &str) -> Result<bool> {
+    if administrative(relative(path)?) {
+        return Ok(false);
+    }
+    let Some(actual) = observation_path(home, path)? else {
+        return Ok(true);
+    };
+    let actual = if actual.exists() {
+        actual.canonicalize().map_err(Error::input_display)?
+    } else {
+        actual
+    };
+    Ok(!administrative(
+        actual
+            .strip_prefix(home.canonicalize().map_err(Error::input_display)?)
+            .map_err(Error::input_display)?,
+    ))
+}
+
 /// Resolve physical parents but leave the final entry intact for link observation.
 pub(super) fn contained(home: &Path, value: &str) -> Result<PathBuf> {
     resolve(home, value, false)?
