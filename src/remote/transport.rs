@@ -25,6 +25,9 @@ pub(super) enum Fault {
     Verification,
     Acknowledge,
     LockBusy,
+    Begin,
+    InspectActive,
+    AdvanceGitOnBegin,
 }
 
 pub(super) struct Remote {
@@ -106,6 +109,37 @@ impl Endpoint {
             Self::Local(session) => session.handle(request)?,
             #[cfg(test)]
             Self::Fault { inner, fault } => {
+                if let Self::Local(session) = inner.as_mut() {
+                    if matches!(request, Request::Finish)
+                        && matches!(fault, Fault::Begin | Fault::InspectActive)
+                    {
+                        std::fs::write(session.paths.home().join("finish-observed"), "yes")
+                            .unwrap();
+                    }
+                    if matches!((&request, *fault), (Request::Begin { .. }, Fault::Begin))
+                        || (matches!(
+                            (&request, *fault),
+                            (Request::Inspect { .. }, Fault::InspectActive)
+                        ) && session
+                            .paths
+                            .home()
+                            .join(".skillator/rsync/state.json")
+                            .exists())
+                    {
+                        return Err(Error::input("injected session failure"));
+                    }
+                    if matches!(
+                        (&request, *fault),
+                        (Request::Begin { .. }, Fault::AdvanceGitOnBegin)
+                    ) {
+                        let response = session.handle(request)?;
+                        process::git(
+                            &session.paths.home().join("Development/acme/skills"),
+                            &["checkout", "next", "--"],
+                        )?;
+                        return Ok(response);
+                    }
+                }
                 if matches!((&request, *fault), (Request::Lock { .. }, Fault::LockBusy)) {
                     return Err(Error::busy());
                 }
@@ -144,16 +178,11 @@ impl Endpoint {
                     .input
                     .send(bytes)
                     .map_err(|_| Error::input("remote input closed"))?;
-                // A missing executable can close stdin after returning a diagnostic.
-                // Read that response even when the write raced with process exit.
-                let _written = remote
+                let written = remote
                     .written
                     .recv_timeout(process::TIMEOUT)
                     .map_err(|_| Error::input("remote request timed out"))?;
-                let result = remote
-                    .output
-                    .recv_timeout(process::TIMEOUT)
-                    .map_err(|_| Error::input("remote response timed out"))?;
+                let result = receive_response(&remote.output, written)?;
                 let bytes = match result {
                     Ok(bytes) => bytes,
                     Err(_) => {
@@ -180,6 +209,25 @@ impl Endpoint {
     pub fn push(&self, local: &std::path::Path, staged: &str) -> Result<()> {
         transfer(self, staged, local, true)
     }
+}
+
+fn receive_response(
+    output: &Receiver<std::result::Result<Vec<u8>, String>>,
+    written: std::result::Result<(), String>,
+) -> Result<std::result::Result<Vec<u8>, String>> {
+    if written.is_err() {
+        // Preserve an already returned missing-installation diagnostic, but never
+        // wait the full response timeout after a failed write.
+        return match output.recv_timeout(std::time::Duration::from_millis(250)) {
+            Ok(Ok(bytes)) => Ok(Ok(bytes)),
+            _ => Err(Error::input(
+                "remote request write failed; SSH input closed",
+            )),
+        };
+    }
+    output
+        .recv_timeout(process::TIMEOUT)
+        .map_err(|_| Error::input("remote response timed out"))
 }
 
 fn probe_version(remote: &Remote) -> Error {
@@ -307,6 +355,28 @@ pub(crate) fn serve(paths: AppPaths) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_write_does_not_wait_for_the_full_response_timeout() {
+        let (sender, output) = mpsc::channel();
+        let started = std::time::Instant::now();
+        assert!(
+            receive_response(&output, Err("broken pipe".into()))
+                .unwrap_err()
+                .message
+                .contains("write failed")
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        sender
+            .send(Ok(b"missing Skillator diagnostic".to_vec()))
+            .unwrap();
+        assert_eq!(
+            receive_response(&output, Err("broken pipe".into()))
+                .unwrap()
+                .unwrap(),
+            b"missing Skillator diagnostic"
+        );
+    }
 
     #[test]
     fn protocol_frames_are_bounded_and_shell_paths_stay_literal() {

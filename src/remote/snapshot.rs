@@ -52,6 +52,7 @@ pub(super) struct Snapshot {
     pub available_locations: BTreeSet<String>,
     pub sources: Vec<Source>,
     pub physical_paths: BTreeMap<String, String>,
+    pub user_directories: BTreeSet<String>,
     pub user: BTreeMap<String, String>,
     pub user_present: bool,
     pub library_hash: Option<String>,
@@ -164,6 +165,7 @@ pub(super) fn user_from_entries(entries: &BTreeMap<String, String>) -> Result<Re
 pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
     let config = library(paths)?;
     let user_config = user(paths)?;
+    let mut user_directories = user_directories(paths.home(), &user_config)?;
     let history = History::load(paths.home())?;
     let library_snapshot = scan_library(
         &config,
@@ -355,11 +357,21 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
                     .matched_path_or_any_parents(paths.home().join(path), false)
                     .is_ignore()
         });
+        for path in source.committed.keys().cloned().collect::<Vec<_>>() {
+            if !outside_user_directories(paths.home(), &path, &user_directories)? {
+                source.committed.remove(&path);
+            }
+        }
         for skill in &source.skills {
             if !skill.is_empty() {
                 state::relative(skill)?;
             }
             let logical = root.join(skill);
+            let skill_path = state::home_relative(paths.home(), &logical)?;
+            if !outside_user_directories(paths.home(), &skill_path, &user_directories)? {
+                user_directories.insert(skill_path);
+                continue;
+            }
             if !logical.exists() {
                 continue;
             }
@@ -397,12 +409,15 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
                 &real,
                 &exclusions,
                 &mut source.files,
+                &user_directories,
                 true,
             )?;
         }
         for peer in history.peers.values() {
             for path in peer.files.keys() {
-                if !state::transferable(paths.home(), path)? {
+                if !state::transferable(paths.home(), path)?
+                    || !outside_user_directories(paths.home(), path, &user_directories)?
+                {
                     continue;
                 }
                 if path.starts_with(&format!("{}/", source.root)) {
@@ -463,11 +478,12 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
         available_locations,
         protocol: 1,
         version: env!("CARGO_PKG_VERSION").into(),
-        home: paths.home().to_path_buf(),
+        home: paths.home().canonicalize().map_err(Error::input_display)?,
         history,
         locations,
         sources,
         physical_paths,
+        user_directories,
         user: user_entries(&user_config)?,
         user_present: user_bytes.is_some(),
         library_hash: state::read_optional(&paths.library_config())?
@@ -525,6 +541,7 @@ fn collect(
     boundary: &Path,
     exclusions: &ignore::gitignore::Gitignore,
     files: &mut BTreeMap<String, Entry>,
+    user_directories: &BTreeSet<String>,
     root: bool,
 ) -> Result<()> {
     if logical.file_name().is_some_and(|name| {
@@ -536,7 +553,9 @@ fn collect(
         return Ok(());
     }
     let path = state::home_relative(home, logical)?;
-    if !state::transferable(home, &path)? {
+    if !state::transferable(home, &path)?
+        || !outside_user_directories(home, &path, user_directories)?
+    {
         return Ok(());
     }
     let actual = state::contained(home, &path)?;
@@ -564,6 +583,7 @@ fn collect(
                     boundary,
                     exclusions,
                     files,
+                    user_directories,
                     false,
                 )?;
             }
@@ -588,6 +608,55 @@ fn collect(
         }
     }
     Ok(())
+}
+
+pub(super) fn user_directories(home: &Path, config: &RepositoryConfig) -> Result<BTreeSet<String>> {
+    let mut directories = BTreeSet::from([".agents/skills".into()]);
+    directories.extend(
+        config
+            .skill_directories()
+            .iter()
+            .map(|directory| directory.path().as_str().to_owned()),
+    );
+    for directory in directories.clone() {
+        if let Some(path) = state::observation_path(home, &directory)? {
+            let physical = if path.exists() {
+                path.canonicalize().map_err(Error::input_display)?
+            } else {
+                path
+            };
+            directories.insert(state::home_relative(home, &physical)?);
+        }
+    }
+    Ok(directories)
+}
+
+pub(super) fn outside_user_directories(
+    home: &Path,
+    path: &str,
+    directories: &BTreeSet<String>,
+) -> Result<bool> {
+    let protected = |path: &Path| {
+        directories
+            .iter()
+            .any(|directory| path.starts_with(directory))
+    };
+    if protected(state::relative(path)?) {
+        return Ok(false);
+    }
+    let Some(actual) = state::observation_path(home, path)? else {
+        return Ok(true);
+    };
+    let physical = if actual.exists() {
+        actual.canonicalize().map_err(Error::input_display)?
+    } else {
+        actual
+    };
+    Ok(!protected(
+        physical
+            .strip_prefix(home.canonicalize().map_err(Error::input_display)?)
+            .map_err(Error::input_display)?,
+    ))
 }
 
 #[cfg(test)]

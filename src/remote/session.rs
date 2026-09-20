@@ -372,7 +372,11 @@ impl Session {
     }
 
     fn authorize_path(&self, path: &str) -> Result<()> {
-        if !state::transferable(self.paths.home(), path)? {
+        let directories =
+            snapshot::user_directories(self.paths.home(), &snapshot::user(&self.paths)?)?;
+        if !state::transferable(self.paths.home(), path)?
+            || !snapshot::outside_user_directories(self.paths.home(), path, &directories)?
+        {
             return Err(Error::input("administrative paths cannot be transferred"));
         }
         let snapshot = &self
@@ -962,6 +966,59 @@ mod tests {
                 .any(|source| source.files.contains_key(".skillator/SKILL.md"))
         );
         for path in controls.into_iter().chain([".skillator/alias"]) {
+            assert!(
+                snapshot
+                    .sources
+                    .iter()
+                    .all(|source| !source.files.contains_key(path)),
+                "{path}"
+            );
+            assert!(session.authorize_path(path).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn configured_user_materializations_and_physical_aliases_are_excluded() {
+        use crate::config::RepositoryConfigCodec;
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".skillator/library")).unwrap();
+        fs::create_dir_all(home.path().join(".agents")).unwrap();
+        let config = snapshot::user_from_entries(&BTreeMap::from([(
+            "directory/custom".into(),
+            r#"["Library/user-skills",null]"#.into(),
+        )]))
+        .unwrap();
+        fs::write(
+            home.path().join(".agents/skillator.yaml"),
+            RepositoryConfigCodec::render(&config).unwrap(),
+        )
+        .unwrap();
+        for root in [".agents/skills/demo", "Library/user-skills/demo"] {
+            fs::create_dir_all(home.path().join(root)).unwrap();
+            fs::write(
+                home.path().join(root).join("SKILL.md"),
+                "---\nname: demo\ndescription: User copy\n---\n",
+            )
+            .unwrap();
+        }
+        std::os::unix::fs::symlink(
+            home.path().join("Library/user-skills/demo"),
+            home.path().join(".skillator/library/alias"),
+        )
+        .unwrap();
+        fs::write(home.path().join(".skillator/library.yaml"), "version: 1\nlocations: [{path: '~/.skillator/library'}, {path: '~/.agents'}, {path: '~/Library'}]\n").unwrap();
+        let mut session = Session::new(AppPaths::new(home.path().into()));
+        let Response::Snapshot { snapshot, .. } = session
+            .handle(Request::Inspect { sources: vec![] })
+            .unwrap()
+        else {
+            panic!()
+        };
+        for path in [
+            ".agents/skills/demo/SKILL.md",
+            "Library/user-skills/demo/SKILL.md",
+            ".skillator/library/alias/SKILL.md",
+        ] {
             assert!(
                 snapshot
                     .sources

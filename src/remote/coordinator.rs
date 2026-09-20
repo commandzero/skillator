@@ -185,9 +185,34 @@ pub(crate) fn run(paths: &AppPaths, options: Options) -> Result<Report> {
 }
 
 fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) -> Result<Report> {
+    let mut result = synchronize_inner(paths, &mut peers, options);
+    for peer in &mut peers {
+        if let Err(error) = peer.request_ok(Request::Finish)
+            && peer.stage.is_some()
+            && let Ok(report) = &mut result
+        {
+            report.problem(&peer.alias, "", "recovery_required", error.to_string());
+        }
+    }
+    if let Ok(report) = &mut result {
+        report
+            .changes
+            .sort_by(|a, b| (&a.host, &a.path, &a.action).cmp(&(&b.host, &b.path, &b.action)));
+        report
+            .diagnostics
+            .sort_by(|a, b| (&a.data, &a.code, &a.message).cmp(&(&b.data, &b.code, &b.message)));
+    }
+    result
+}
+
+fn synchronize_inner(
+    paths: &AppPaths,
+    peers: &mut [Participant],
+    options: Options,
+) -> Result<Report> {
     let mut report = Report::new(paths);
     let mut ids = BTreeSet::new();
-    for peer in &peers {
+    for peer in peers.iter() {
         if let Some(id) = &peer.id
             && !ids.insert(id)
         {
@@ -212,7 +237,7 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
         .iter()
         .map(|s| s.root.clone())
         .collect();
-    for peer in &peers {
+    for peer in peers.iter() {
         for source in &peer.snapshot.sources {
             if source.git.is_some() && !local_roots.contains(&source.root) {
                 blocked.insert(source.root.clone());
@@ -259,7 +284,7 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
     }
 
     let mut locations = BTreeMap::<String, Location>::new();
-    for peer in &peers {
+    for peer in peers.iter() {
         for location in &peer.snapshot.locations {
             if locations
                 .get(&location.path)
@@ -282,7 +307,7 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
         }
     }
     // Inspect incoming paths on every host before beginning any mutation.
-    for peer in &mut peers {
+    for peer in peers.iter_mut() {
         peer.inspect(&sources).map_err(|e| Error {
             code: e.code,
             message: format!("{}: {e}", peer.alias),
@@ -321,20 +346,17 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
     }
     if !options.check {
         // Reserve every participant before Begin creates identities or stages.
-        for index in 0..peers.len() {
-            let token = peers[index].token.clone();
-            if let Err(error) = peers[index].request_ok(Request::Lock { token }) {
-                let alias = peers[index].alias.clone();
-                for peer in &mut peers {
-                    let _ = peer.request_ok(Request::Finish);
-                }
+        for peer in peers.iter_mut() {
+            let token = peer.token.clone();
+            if let Err(error) = peer.request_ok(Request::Lock { token }) {
+                let alias = peer.alias.clone();
                 return Err(Error {
                     code: error.code,
                     message: format!("{alias}: {error}"),
                 });
             }
         }
-        for peer in &mut peers {
+        for peer in peers.iter_mut() {
             match peer.endpoint.request(Request::Begin {
                 token: peer.token.clone(),
             }) {
@@ -352,9 +374,6 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
                 Ok(_) => return Err(Error::input("invalid begin response")),
                 Err(error) => {
                     if error.code == 4 {
-                        for peer in &mut peers {
-                            let _ = peer.request_ok(Request::Finish);
-                        }
                         return Err(error);
                     }
                     report.problem(&peer.alias, "", "begin_failed", error.to_string());
@@ -367,7 +386,7 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
         if blocked.contains(&source.root) || source.git.is_none() {
             continue;
         }
-        for peer in &mut peers {
+        for peer in peers.iter_mut() {
             let actual = peer.snapshot.sources.iter().find(|s| s.root == source.root);
             if actual.is_some_and(|s| s.git.is_some()) {
                 continue;
@@ -402,10 +421,25 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
         }
     }
     if !options.check {
-        for peer in &mut peers {
+        for peer in peers.iter_mut() {
             if let Err(error) = peer.inspect(&sources) {
                 report.problem(&peer.alias, "", "inspection_failed", error.to_string());
                 return Ok(report);
+            }
+            for reference in &sources {
+                let actual = peer
+                    .snapshot
+                    .sources
+                    .iter()
+                    .find(|source| source.root == reference.root);
+                if (reference.git.is_some() || actual.is_some_and(|source| source.git.is_some()))
+                    && actual.is_none_or(|actual| {
+                        actual.key != reference.key || actual.git != reference.git
+                    })
+                {
+                    blocked.insert(reference.root.clone());
+                    report.problem(&peer.alias, &reference.root, "git_mismatch", "Git source changed since preflight; align it separately before synchronizing");
+                }
             }
         }
     }
@@ -413,7 +447,7 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
     let failed_sources = sync_files(
         &sources,
         &blocked,
-        &mut peers,
+        peers,
         &options,
         &mut report,
         &mut acknowledgements,
@@ -476,7 +510,7 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
         }
     }
     sync_user(
-        &mut peers,
+        peers,
         &sources,
         &blocked,
         &options,
@@ -545,11 +579,6 @@ fn synchronize(paths: &AppPaths, mut peers: Vec<Participant>, options: Options) 
                     "acknowledgement_failed",
                     error.to_string(),
                 );
-            }
-        }
-        for peer in &mut peers {
-            if let Err(error) = peer.request_ok(Request::Finish) {
-                report.problem(&peer.alias, "", "recovery_required", error.to_string());
             }
         }
     }
@@ -636,6 +665,19 @@ fn sync_files(
     }
     paths.retain(|path| {
         !state::administrative(std::path::Path::new(path))
+            && !peers.iter().any(|peer| {
+                peer.snapshot.user_directories.iter().any(|directory| {
+                    std::path::Path::new(path).starts_with(directory)
+                        || peer
+                            .snapshot
+                            .physical_paths
+                            .get(path)
+                            .is_some_and(|physical| {
+                                std::path::Path::new(physical)
+                                    .starts_with(peer.snapshot.home.join(directory))
+                            })
+                })
+            })
             && owner(path).is_some_and(|s| {
                 !exclusions[&s.root]
                     .matched_path_or_any_parents(peers[0].snapshot.home.join(path), false)
@@ -812,15 +854,22 @@ fn sync_files(
             Decision::Use(value) => {
                 planned.push((group[0].clone(), addresses, observations, value, roots))
             }
-            Decision::Ignore => report.diagnostics.push(ReportDiagnostic {
-                code: "missing_ignored".into(),
-                severity: "info".into(),
-                message: "one-sided absence intentionally ignored".into(),
-                data: Some(BTreeMap::from([
-                    ("host".into(), "local".into()),
-                    ("path".into(), group[0].clone()),
-                ])),
-            }),
+            Decision::Ignore => {
+                for ((index, path), observation) in addresses.iter().zip(&observations) {
+                    if observation.value.is_some() {
+                        continue;
+                    }
+                    report.diagnostics.push(ReportDiagnostic {
+                        code: "missing_ignored".into(),
+                        severity: "info".into(),
+                        message: "one-sided absence intentionally ignored".into(),
+                        data: Some(BTreeMap::from([
+                            ("host".into(), peers[*index].alias.clone()),
+                            ("path".into(), path.clone()),
+                        ])),
+                    });
+                }
+            }
             Decision::Unmatched => {
                 report.problem(
                     "local",
@@ -871,8 +920,17 @@ fn sync_files(
             continue;
         }
         if options.check {
+            let mut destinations = BTreeSet::new();
             for address in changed {
                 let (index, path) = &addresses[address];
+                let physical = peers[*index]
+                    .snapshot
+                    .physical_paths
+                    .get(path)
+                    .unwrap_or(path);
+                if !destinations.insert((*index, physical.clone())) {
+                    continue;
+                }
                 report.changed(
                     &peers[*index].alias,
                     path,
@@ -939,6 +997,7 @@ fn sync_files(
         } else {
             None
         };
+        let mut published = BTreeMap::new();
         for ((index, path), observation) in addresses.iter().zip(observations) {
             if observation.value == desired {
                 acknowledgements[*index]
@@ -946,6 +1005,21 @@ fn sync_files(
                     .insert(path.clone(), desired.clone());
                 continue;
             }
+            let physical = peers[*index]
+                .snapshot
+                .physical_paths
+                .get(path)
+                .unwrap_or(path)
+                .clone();
+            if let Some(success) = published.get(&(*index, physical.clone())) {
+                if *success {
+                    acknowledgements[*index]
+                        .files
+                        .insert(path.clone(), desired.clone());
+                }
+                continue;
+            }
+            published.insert((*index, physical.clone()), false);
             let stage = if let Some(payload) = &payload {
                 let stage = format!(
                     "{}/{}",
@@ -973,6 +1047,7 @@ fn sync_files(
                 stage,
             }) {
                 Ok(()) => {
+                    published.insert((*index, physical), true);
                     report.changed(
                         &peers[*index].alias,
                         path,
@@ -1396,6 +1471,136 @@ mod tests {
     }
 
     #[test]
+    fn early_session_failures_send_finish_to_every_participant() {
+        use super::super::transport::Fault;
+        for fault in [Fault::Begin, Fault::InspectActive] {
+            let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+            configure(homes[0].path(), ".skillator/library");
+            skill(homes[0].path(), ".skillator/library/demo", "original");
+            let mut peers = participants(&homes);
+            let inner = std::mem::replace(
+                &mut peers[1].endpoint,
+                Endpoint::local(AppPaths::new(homes[1].path().into())),
+            );
+            peers[1].endpoint = Endpoint::Fault {
+                inner: Box::new(inner),
+                fault,
+            };
+            let report = synchronize(
+                &AppPaths::new(homes[0].path().into()),
+                peers,
+                options(false),
+            )
+            .unwrap();
+            assert_eq!(report.exit_status, 1);
+            assert!(homes[1].path().join("finish-observed").exists());
+            for home in &homes {
+                let root = home.path().join(".skillator/rsync");
+                if root.exists() {
+                    assert!(fs::read_dir(root).unwrap().all(|entry| {
+                        !entry
+                            .unwrap()
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("stage-")
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changed_git_revision_after_begin_blocks_publication() {
+        use super::super::process;
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        let origin_home = tempfile::tempdir().unwrap();
+        let origin = origin_home.path().join("acme/skills");
+        skill(origin_home.path(), "acme/skills/demo", "commit A");
+        process::git(&origin, &["init", "-q"]).unwrap();
+        process::git(&origin, &["add", "."]).unwrap();
+        process::git(
+            &origin,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "A",
+            ],
+        )
+        .unwrap();
+        let root = homes[0].path().join("Development/acme/skills");
+        fs::create_dir_all(root.parent().unwrap()).unwrap();
+        process::capture(
+            std::process::Command::new("git")
+                .args(["clone", "--"])
+                .arg(&origin)
+                .arg(&root),
+        )
+        .unwrap();
+        let reference = super::super::snapshot::git_ref(&root).unwrap();
+        process::git(&root, &["checkout", "-b", "next"]).unwrap();
+        skill(homes[0].path(), "Development/acme/skills/demo", "commit B");
+        process::git(&root, &["add", "."]).unwrap();
+        process::git(
+            &root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "B",
+            ],
+        )
+        .unwrap();
+        process::git(&root, &["checkout", "--detach", &reference.commit]).unwrap();
+        configure(homes[0].path(), "Development/acme/skills");
+        let mut peers = participants(&homes);
+        let inner = std::mem::replace(
+            &mut peers[0].endpoint,
+            Endpoint::local(AppPaths::new(homes[0].path().into())),
+        );
+        peers[0].endpoint = Endpoint::Fault {
+            inner: Box::new(inner),
+            fault: super::super::transport::Fault::AdvanceGitOnBegin,
+        };
+        let report = synchronize(
+            &AppPaths::new(homes[0].path().into()),
+            peers,
+            options(false),
+        )
+        .unwrap();
+        assert_eq!(report.exit_status, 1, "{}", report.text());
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "git_mismatch")
+        );
+        let remote = homes[1].path().join("Development/acme/skills");
+        assert_eq!(super::super::snapshot::git_ref(&remote).unwrap(), reference);
+        assert!(
+            fs::read_to_string(remote.join("demo/SKILL.md"))
+                .unwrap()
+                .contains("commit A")
+        );
+        assert!(
+            process::git(&remote, &["diff", "--name-only"])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            fs::read_to_string(root.join("demo/SKILL.md"))
+                .unwrap()
+                .contains("commit B")
+        );
+    }
+
+    #[test]
     fn lock_reservation_failure_releases_earlier_participants_without_writes() {
         let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
         configure(homes[0].path(), ".skillator/library");
@@ -1767,6 +1972,15 @@ mod tests {
             }
         }
         assert!(homes[0].path().join(".skillator/library/demo").is_symlink());
+        assert_eq!(
+            changed
+                .changes
+                .iter()
+                .filter(|change| change.host == "local" && change.action == "copy_skill_entry")
+                .count(),
+            1
+        );
+        assert!(sync(&homes, options(false)).changes.is_empty());
     }
 
     #[test]
@@ -2126,6 +2340,13 @@ mod tests {
                     .diagnostics
                     .iter()
                     .any(|d| d.code == "missing_ignored")
+            );
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.code == "missing_ignored")
+                    .all(|d| d.data.as_ref().unwrap().get("host").unwrap() == "host1")
             );
             assert!(!homes[1].path().join(".skillator/library").exists());
             assert!(!homes[1].path().join(".skillator/library.yaml").exists());
