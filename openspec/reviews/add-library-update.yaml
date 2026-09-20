@@ -1,0 +1,29 @@
+change: add-library-update
+reviewer: codex
+reviewed_at: 2026-09-20T03:01:01Z
+notes: |
+  # Synchronization review: add-library-update
+  
+  Reviewed all seven added requirements and their scenarios against the committed main specs. Existing requirements and purposes remain unchanged. No removals, modifications, renamed capabilities, or absent specs are declared.
+  
+  ## cli-contract
+  - Library update is a non-interactive command: requirement and all 4 scenarios preserved verbatim in the main spec.
+  - Library update preview inspects only local state: requirement and all 1 scenarios preserved verbatim in the main spec.
+  - Library update reports aggregate and per-checkout results: requirement and all 4 scenarios preserved verbatim in the main spec.
+  - Library pulls have a timeout and support batch cancellation: requirement and all 3 scenarios preserved verbatim in the main spec.
+  
+  ## library-management
+  - Library updates discover distinct Git checkouts: requirement and all 4 scenarios preserved verbatim in the main spec.
+  - Library pulls only fast-forward clean checkouts: requirement and all 5 scenarios preserved verbatim in the main spec.
+  - Library updates preserve independent outcomes and desired state: requirement and all 3 scenarios preserved verbatim in the main spec.
+  
+  The CLI additions retain the 30-second default, positive integer timeout validation, non-interactive authentication including conflicting SSH settings, local-only preview wording, terminal up-to-date listings, redirected counts, versioned reports, failure exits, and exit 130 cancellation.
+  
+  The Library additions retain canonical checkout discovery, independent worktrees, submodule skips, fast-forward-only eligibility, branch/tag collision handling, independent outcomes, and preservation of desired state and copied skills.
+  
+  All proposal, design, tasks, metadata, and delta artifacts were moved unchanged into the archive. All 13 tasks are checked. Main-spec validation and documentation policy preflight pass.
+no_spec_deltas: false
+archive_tree: 2f5d3eea7eecbef3ef8e3595574bc6a73b020b65
+specs:
+  openspec/specs/cli-contract/spec.md: 8737bd6beecba54b05601d6f76f1b6b602b69c13
+  openspec/specs/library-management/spec.md: ba97002b56f5f0f7d476bab8460761d9d740c6aa
