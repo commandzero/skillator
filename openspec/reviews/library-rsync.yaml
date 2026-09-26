@@ -1,10 +1,10 @@
 change: library-rsync
 reviewer: Codex
-reviewed_at: 2026-09-26T06:30:33Z
+reviewed_at: 2026-09-26T06:44:44Z
 notes: |
   # Semantic review: library-rsync
   
-  Reviewed the archived delta and combined main specifications at implementation commit 57079df. All 22 affected requirements and 38 scenarios remain present. Twenty-one requirement blocks match their archived delta exactly. The statement of “Skillator composes with Git repository operations” now also names the separately merged, bounded `library update` command; its two rsync scenarios retain their original text. No scenario was dropped from a modified requirement. The new library-rsync main spec retains the delta Purpose. There are no removals or renames.
+  Reviewed the archived delta and combined main specifications at implementation commit 35dbf01. All 22 affected requirements and 38 scenarios remain present. Twenty-one requirement blocks match their archived delta exactly. The statement of “Skillator composes with Git repository operations” now also names the separately merged, bounded `library update` command; its two rsync scenarios retain their original text. No scenario was dropped from a modified requirement. The new library-rsync main spec retains the delta Purpose. There are no removals or renames.
   
   CLI contract: the Git-clone exception is limited to first-time library synchronization at the initiating commit. The merged `library update` command is separately limited to fast-forwarding clean registered checkouts; rsync still never updates existing checkouts. The general Git/worktree ownership rule, shared report envelope, stable host aliases, explicit policies, and exit-status rules remain coherent with both implemented commands.
   
@@ -50,11 +50,11 @@ notes: |
   - Remote synchronization reconciles user selections semantically: Remote deselection; First-contact independent selections.
   - Received selections use local reconciliation: Rebuild a user link; Unmanaged user entry.
   
-  The archived design now records protocol 4 because snapshots carry invalid-skill paths separately from transferable files and peers validate their physical stage identity before transfers. The latest verification evidence covers blocked dependent selections after registration failure and independent treatment of internal symbolic links. These fixes preserve the existing main-spec requirements and scenarios. Post-Begin Git reference revalidation now precedes any absent-checkout clone, and returned staging paths are checked against the observed home before transfer. The changed-commit and outside-stage regressions cover both ordering and path containment. Root-level invalid skills and absent sources or skills do not propagate new Enablements, while existing selections remain local. A former receiver uses acknowledged peer identities to detect replacement of a previously synchronized host even when its SSH aliases differ. Transfer and publication validate that the stage remains the directory created at Begin; alias publication rechecks its physical destination and target. Library writes and updates now share the rsync user-home lock. Parent skill collection and authorization exclude nested Git checkout boundaries, leaving their files under the nested source’s own Git reference.
+  The archived design now records protocol 4 because snapshots carry invalid-skill paths separately from transferable files and peers validate their physical stage identity before transfers. The latest verification evidence covers blocked dependent selections after registration failure and independent treatment of internal symbolic links. These fixes preserve the existing main-spec requirements and scenarios. Post-Begin Git reference revalidation now precedes any absent-checkout clone, and returned staging paths are checked against the observed home before transfer. The changed-commit and outside-stage regressions cover both ordering and path containment. Root-level invalid skills and absent sources or skills do not propagate new Enablements, while existing selections remain local. A former receiver uses acknowledged peer identities to detect replacement of a previously synchronized host even when its SSH aliases differ. Transfer and publication validate that the stage remains the directory created at Begin; alias publication rechecks its physical destination and target. Library writes and updates now share the rsync user-home lock. Parent skill collection and authorization exclude nested Git checkout boundaries, leaving their files under the nested source’s own Git reference. New Enablements now wait until each receiving host has an acknowledged skill manifest; read-only preview also recognizes a planned manifest copy, while `--missing ignore` preserves absence and reports the selection as unavailable.
   
   Finding: the merged main specs faithfully express the completed rsync change alongside the separately merged library update feature. The one combined statement is a deliberate, compatible extension; no rsync scenario or guarantee was lost.
 no_spec_deltas: false
-archive_tree: 16f8466bd288a8d0b09e44627481c6187460f9bd
+archive_tree: cabaf8b75c85e5d3d856755a34f641207dbfbaa2
 specs:
   openspec/specs/cli-contract/spec.md: a516856ae88ace60a9d53927f4a80880a6d9e2f4
   openspec/specs/library-management/spec.md: 79659cd637567c7ac811564b50753e512804fdc5
