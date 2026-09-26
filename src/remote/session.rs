@@ -229,6 +229,21 @@ impl Session {
                 expected,
                 check,
             } => {
+                let library_bytes =
+                    state::read_contained(self.paths.home(), ".skillator/library.yaml")?;
+                if library_bytes.as_ref().map(|bytes| state::digest(bytes))
+                    != self
+                        .last
+                        .as_ref()
+                        .ok_or_else(|| Error::input("inspect before reconciling user state"))?
+                        .0
+                        .library_hash
+                {
+                    return Err(Error::input(
+                        "library configuration changed after observation",
+                    ));
+                }
+                let library = snapshot::library_from_bytes(library_bytes.as_deref())?;
                 let bytes = state::read_contained(self.paths.home(), ".agents/skillator.yaml")?;
                 if bytes.as_ref().map(|bytes| state::digest(bytes)) != expected {
                     return Err(Error::input("user configuration changed after observation"));
@@ -247,9 +262,15 @@ impl Session {
                         Error::input("user state already reconciled in this session")
                     })?
                 };
-                let report =
-                    UserScopeWorkflow::save_remote(&self.paths, desired, fingerprint, locks, check)
-                        .map_err(Error::input_display)?;
+                let report = UserScopeWorkflow::save_remote(
+                    &self.paths,
+                    desired,
+                    fingerprint,
+                    locks,
+                    check,
+                    &library,
+                )
+                .map_err(Error::input_display)?;
                 Ok(Response::User { report })
             }
             Request::Acknowledge {
@@ -677,7 +698,7 @@ impl Session {
         result
     }
 
-    fn register(&self, locations: &[Location], expected: Option<String>) -> Result<()> {
+    fn register(&mut self, locations: &[Location], expected: Option<String>) -> Result<()> {
         if let Some((desired, fingerprint)) = self.prepare_registration(locations, expected)? {
             let bytes = LibraryConfigCodec::render(&desired).map_err(Error::input_display)?;
             state::save_contained_bytes(
@@ -686,6 +707,7 @@ impl Session {
                 bytes.as_bytes(),
                 &fingerprint,
             )?;
+            self.last.as_mut().unwrap().0.library_hash = Some(state::digest(bytes.as_bytes()));
         }
         Ok(())
     }
@@ -1578,15 +1600,64 @@ mod tests {
             fs::write(paths.user_config(), &edited).unwrap();
             let target = Target::user(home.path()).unwrap();
             let locks = TargetLocks::acquire(&[&target]).unwrap();
-            let error =
-                UserScopeWorkflow::save_remote(&paths, session.config, expected, locks, false)
-                    .unwrap_err();
+            let error = UserScopeWorkflow::save_remote(
+                &paths,
+                session.config,
+                expected,
+                locks,
+                false,
+                &crate::config::LibraryConfig::empty(),
+            )
+            .unwrap_err();
             assert!(
                 error.to_string().contains("changed after observation"),
                 "{error}"
             );
             assert_eq!(fs::read(paths.user_config()).unwrap(), edited);
         }
+    }
+
+    #[test]
+    fn remote_user_reconciliation_rejects_a_replaced_library_configuration() {
+        let (home, mut session, _) = setup();
+        let outside = tempfile::tempdir().unwrap();
+        let config = home.path().join(".skillator/library.yaml");
+        fs::write(
+            outside.path().join("library.yaml"),
+            format!(
+                "version: 1\nlocations: [{{path: '{}'}}]\n",
+                outside.path().display()
+            ),
+        )
+        .unwrap();
+        fs::rename(&config, config.with_extension("saved")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("library.yaml"), &config).unwrap();
+        let error = session
+            .handle(Request::User {
+                entries: BTreeMap::new(),
+                expected: None,
+                check: false,
+            })
+            .unwrap_err();
+        assert!(
+            error.message.contains("link") || error.message.contains("symbolic"),
+            "{error}"
+        );
+        assert!(!home.path().join(".agents/skillator.yaml").exists());
+        fs::remove_file(&config).unwrap();
+        fs::write(&config, "version: 1\nlocations: []\n").unwrap();
+        let error = session
+            .handle(Request::User {
+                entries: BTreeMap::new(),
+                expected: None,
+                check: false,
+            })
+            .unwrap_err();
+        assert!(
+            error.message.contains("changed after observation"),
+            "{error}"
+        );
+        assert!(!home.path().join(".agents/skillator.yaml").exists());
     }
 
     #[test]
@@ -1695,7 +1766,7 @@ mod tests {
 
     #[test]
     fn registration_rejects_escaping_final_links_and_preserves_equivalent_expressions() {
-        let (home, session, _) = setup();
+        let (home, mut session, _) = setup();
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), home.path().join("escape")).unwrap();
         let config = home.path().join(".skillator/library.yaml");

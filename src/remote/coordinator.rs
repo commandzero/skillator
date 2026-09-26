@@ -2252,6 +2252,30 @@ mod tests {
     }
 
     #[test]
+    fn registering_an_incoming_location_preserves_hidden_skills() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        fs::create_dir_all(homes[1].path().join(".skillator")).unwrap();
+        fs::write(
+            homes[1].path().join(".skillator/library.yaml"),
+            "version: 1\nlocations: []\nhidden_skills:\n  - source: local/library\n    path: demo\n",
+        )
+        .unwrap();
+        let report = sync(&homes, options(false));
+        assert_eq!(report.exit_status, 0, "{}", report.text());
+        let config = fs::read_to_string(homes[1].path().join(".skillator/library.yaml")).unwrap();
+        assert!(config.contains("hidden_skills:"), "{config}");
+        assert!(config.contains("local/library"), "{config}");
+        assert!(
+            homes[1]
+                .path()
+                .join(".skillator/library/demo/SKILL.md")
+                .exists()
+        );
+    }
+
+    #[test]
     fn divergent_acknowledged_bases_block_file_and_selection_planning() {
         let homes: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
         configure(homes[0].path(), ".skillator/library");

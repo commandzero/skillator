@@ -7,7 +7,9 @@ use crate::config::{
     save_repository, save_target_registry,
 };
 use crate::domain::{MaterializationKind, SkillDirectoryKey, SkillKey, SkillPath, SourceKey};
-use crate::library::{LibrarySnapshot, SkillValidity, expand_location, scan_library};
+use crate::library::{
+    LibrarySnapshot, SkillValidity, expand_location, scan_library, scan_library_within,
+};
 use crate::reconcile::{
     Action, ApplyResult, Authorization, Outcome, Plan, PreparedPlan, Safety, TargetBusy,
     TargetLocks, execute, prepare_apply, prepare_check, prepare_transition,
@@ -693,6 +695,54 @@ fn load_library_snapshot(
             }),
         })
         .collect::<Vec<_>>();
+    Ok((snapshot, diagnostics))
+}
+
+fn load_remote_library_snapshot(
+    paths: &AppPaths,
+    config: &LibraryConfig,
+) -> Result<(LibrarySnapshot, Vec<ReportDiagnostic>), WorkflowError> {
+    let home = paths.home().canonicalize().map_err(fatal)?;
+    let path = paths.library_config();
+    for location in config.locations() {
+        let expanded = expand_location(
+            location.path(),
+            path.parent().unwrap(),
+            paths.home(),
+            paths.environment(),
+        )
+        .map_err(|message| WorkflowError::InvalidInput { message })?;
+        if let Ok(physical) = expanded.canonicalize()
+            && (physical == home || !physical.starts_with(&home))
+        {
+            return Err(WorkflowError::InvalidInput {
+                message: "remote library location is outside the user home".into(),
+            });
+        }
+    }
+    let snapshot = scan_library_within(config, &path, paths.home(), paths.environment(), &home);
+    if snapshot
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.code == "location_outside_home")
+    {
+        return Err(WorkflowError::InvalidInput {
+            message: "remote library location is outside the user home".into(),
+        });
+    }
+    if snapshot.locations().iter().any(|location| {
+        location.resolved().is_some_and(|physical| {
+            physical == home
+                || !physical.starts_with(&home)
+                || (location.available()
+                    && physical.canonicalize().is_ok_and(|now| now != physical))
+        })
+    }) {
+        return Err(WorkflowError::InvalidInput {
+            message: "remote library location changed or escaped the user home".into(),
+        });
+    }
+    let diagnostics = library_diagnostics(&snapshot);
     Ok((snapshot, diagnostics))
 }
 
@@ -2675,6 +2725,7 @@ impl UserScopeWorkflow {
         expected: Fingerprint,
         locks: TargetLocks,
         check: bool,
+        library_config: &LibraryConfig,
     ) -> Result<CommandReport, WorkflowError> {
         let session = Self::load(paths)?;
         if session.fingerprint != expected {
@@ -2682,7 +2733,7 @@ impl UserScopeWorkflow {
                 message: "user configuration changed after observation".into(),
             });
         }
-        let (library, diagnostics) = load_library_snapshot(paths)?;
+        let (library, diagnostics) = load_remote_library_snapshot(paths, library_config)?;
         let prepared = crate::reconcile::prepare_transition_with_locks(
             &session.target,
             &session.config,

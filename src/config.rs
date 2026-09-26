@@ -323,7 +323,16 @@ impl LibraryConfig {
         &self,
         locations: Vec<LibraryLocationConfig>,
     ) -> Result<Self, Vec<ConfigIssue>> {
-        Self::new(locations)
+        let value = Self {
+            locations,
+            hidden_skills: self.hidden_skills.clone(),
+        };
+        let issues = validate_library(&value);
+        if issues.is_empty() {
+            Ok(value)
+        } else {
+            Err(issues)
+        }
     }
 }
 
@@ -1567,6 +1576,27 @@ fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn changing_locations_preserves_hidden_skills() {
+        let LoadResult::Valid(loaded) = LibraryConfigCodec::parse(
+            b"version: 1\nlocations: []\nhidden_skills:\n  - source: local/library\n    path: demo\n",
+        ) else {
+            panic!("expected valid library configuration")
+        };
+        let updated = loaded
+            .value()
+            .with_locations(vec![LibraryLocationConfig::new(
+                "~/skills".into(),
+                Vec::new(),
+                false,
+            )])
+            .unwrap();
+        assert_eq!(updated.hidden_skills(), loaded.value().hidden_skills());
+        let rendered = LibraryConfigCodec::render(&updated).unwrap();
+        assert!(rendered.contains("hidden_skills:"));
+        assert!(rendered.contains("local/library"));
+    }
 
     #[test]
     fn structural_validation_collects_independent_repository_issues() {

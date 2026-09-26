@@ -344,6 +344,9 @@ fn transfer(
         return copy_local_entry(source, source_name, target, target_name);
     }
     let mut command = Command::new("rsync");
+    // We quote the remote pathname as one shell argument below. Newer rsync
+    // otherwise escapes those quotes a second time; older rsync ignores this.
+    command.env("RSYNC_OLD_ARGS", "1");
     command.args([
         "--links",
         "--perms",

@@ -78,9 +78,12 @@ pub(super) fn file_context(snapshot: &Snapshot, path: &str) -> Option<String> {
 }
 
 pub(super) fn library(paths: &AppPaths) -> Result<LibraryConfig> {
+    library_from_bytes(state::read_contained(paths.home(), ".skillator/library.yaml")?.as_deref())
+}
+
+pub(super) fn library_from_bytes(bytes: Option<&[u8]>) -> Result<LibraryConfig> {
     parse_load(
-        state::read_contained(paths.home(), ".skillator/library.yaml")?
-            .as_deref()
+        bytes
             .map(LibraryConfigCodec::parse)
             .unwrap_or(LoadResult::Missing),
         LibraryConfig::empty(),
