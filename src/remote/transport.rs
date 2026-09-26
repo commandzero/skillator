@@ -206,10 +206,7 @@ impl Endpoint {
                 })?
             }
         };
-        match response {
-            Response::Error { code, message } => Err(Error { code, message }),
-            response => Ok(response),
-        }
+        checked_response(response)
     }
 
     pub fn pull(&self, exported: &str, local: &std::path::Path) -> Result<()> {
@@ -225,6 +222,19 @@ impl Endpoint {
             return Err(Error::input("unexpected stage validation response"));
         }
         Ok(())
+    }
+}
+
+fn checked_response(response: Response) -> Result<Response> {
+    match response {
+        Response::Error {
+            code: code @ 2..=4,
+            message,
+        } => Err(Error { code, message }),
+        Response::Error { .. } => Err(Error::input(
+            "invalid remote error status or incompatible Skillator; protocol 4 is required",
+        )),
+        response => Ok(response),
     }
 }
 
@@ -376,6 +386,28 @@ pub(crate) fn serve(paths: AppPaths) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_peer_error_codes_cannot_turn_failure_into_success() {
+        for code in [0, 1, 5, 255] {
+            let error = checked_response(Response::Error {
+                code,
+                message: "peer supplied error".into(),
+            })
+            .unwrap_err();
+            assert_eq!(error.code, 3);
+            assert!(error.message.contains("invalid remote error status"));
+        }
+        for code in [2, 3, 4] {
+            let error = checked_response(Response::Error {
+                code,
+                message: "valid error".into(),
+            })
+            .unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(error.message, "valid error");
+        }
+    }
 
     #[test]
     fn stderr_drain_consumes_beyond_the_protocol_output_limit() {

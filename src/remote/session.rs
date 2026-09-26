@@ -778,8 +778,6 @@ impl Session {
                 ));
             }
         }
-        fs::create_dir_all(self.paths.library_config().parent().unwrap())
-            .map_err(Error::input_display)?;
         Ok(Some((desired, fingerprint)))
     }
 
