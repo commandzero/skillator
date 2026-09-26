@@ -1,10 +1,10 @@
 change: library-rsync
 reviewer: Codex
-reviewed_at: 2026-09-26T11:02:53Z
+reviewed_at: 2026-09-26T11:33:44Z
 notes: |
   # Semantic review: library-rsync
   
-  Reviewed the archived delta and combined main specifications at implementation commit 5f816e4. All 22 affected requirements and 38 scenarios remain present. Twenty-one requirement blocks match their archived delta exactly. The statement of “Skillator composes with Git repository operations” now also names the separately merged, bounded `library update` command; its two rsync scenarios retain their original text. No scenario was dropped from a modified requirement. The new library-rsync main spec retains the delta Purpose. There are no removals or renames.
+  Reviewed the archived delta and combined main specifications at implementation commit f9de542. All 22 affected requirements and 38 scenarios remain present. Twenty-one requirement blocks match their archived delta exactly. The statement of “Skillator composes with Git repository operations” now also names the separately merged, bounded `library update` command; its two rsync scenarios retain their original text. No scenario was dropped from a modified requirement. The new library-rsync main spec retains the delta Purpose. There are no removals or renames.
   
   CLI contract: the Git-clone exception is limited to first-time library synchronization at the initiating commit. The merged `library update` command is separately limited to fast-forwarding clean registered checkouts; rsync still never updates existing checkouts. The general Git/worktree ownership rule, shared report envelope, stable host aliases, explicit policies, and exit-status rules remain coherent with both implemented commands.
   
@@ -74,9 +74,11 @@ notes: |
   
   The final lock-lifetime fix retains a session-owned user-home lock through User Scope reconciliation, acknowledgement, history publication, and Finish. Reconciliation shares the underlying file lock while it prepares and executes materializations. A regression proves competing user-home writers stay blocked after User and Acknowledge and are released only at Finish. The archived design and verification evidence record the boundary.
   
+  The latest fix ties each opened transfer stage to the participant home observed during the session; the remote server also checks its stage against its actual HOME before running rsync. A direct server regression rejects a second home’s otherwise valid stage. Synchronization-history publication retains both exchanged entries if the backup changes, rather than exchanging again and risking deletion of intervening bytes; a deterministic regression modifies live and backup state after exchange. The archived design and verification evidence record these safeguards.
+  
   Finding: the merged main specs faithfully express the completed rsync change alongside the separately merged library update feature. The one combined statement is a deliberate, compatible extension; no rsync scenario or guarantee was lost.
 no_spec_deltas: false
-archive_tree: 4e44608fd33c6eb9c641ed1bc60918b0aba67b42
+archive_tree: a1921cfcd848c2ab0a35b56f0a57293acca26d37
 specs:
   openspec/specs/cli-contract/spec.md: a516856ae88ace60a9d53927f4a80880a6d9e2f4
   openspec/specs/library-management/spec.md: 79659cd637567c7ac811564b50753e512804fdc5
