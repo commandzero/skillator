@@ -35,20 +35,10 @@ pub(super) enum Decision<T> {
     Unmatched,
 }
 
-pub(super) fn decide<T: Clone + Ord>(
-    observations: &[Observation<T>],
-    conflict: ConflictPolicy,
-    missing: MissingPolicy,
-    selection: bool,
-) -> Decision<T> {
-    decide_group(observations, conflict, missing, selection, 1)
-}
-
 pub(super) fn decide_group<T: Clone + Ord>(
     observations: &[Observation<T>],
     conflict: ConflictPolicy,
     missing: MissingPolicy,
-    selection: bool,
     local_count: usize,
 ) -> Decision<T> {
     let Some(local) = observations.first() else {
@@ -80,14 +70,6 @@ pub(super) fn decide_group<T: Clone + Ord>(
         || (changes.is_empty() && present_values.len() > 1);
     if contested {
         return resolve(observations, conflict, local_count);
-    }
-    if selection {
-        return Decision::Use(
-            changes
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| present_values.into_iter().next()),
-        );
     }
     if values.contains(&None) {
         return match missing {
@@ -161,7 +143,7 @@ mod tests {
         }
     }
     fn run(values: &[Observation<String>], missing: MissingPolicy) -> Decision<String> {
-        decide(values, ConflictPolicy::Ask, missing, false)
+        decide_group(values, ConflictPolicy::Ask, missing, 1)
     }
 
     #[test]
@@ -204,15 +186,6 @@ mod tests {
                 Decision::Conflict
             );
         }
-        assert_eq!(
-            decide(
-                &[present, deleted],
-                ConflictPolicy::Ask,
-                MissingPolicy::Copy,
-                true
-            ),
-            Decision::Use(None)
-        );
     }
 
     #[test]
@@ -223,11 +196,11 @@ mod tests {
             seen(Some("c"), Some(Some("a"))),
         ];
         assert_eq!(
-            decide(&values, ConflictPolicy::Remote, MissingPolicy::Copy, false),
+            decide_group(&values, ConflictPolicy::Remote, MissingPolicy::Copy, 1),
             Decision::Conflict
         );
         assert_eq!(
-            decide(&values, ConflictPolicy::Local, MissingPolicy::Copy, false),
+            decide_group(&values, ConflictPolicy::Local, MissingPolicy::Copy, 1),
             Decision::Use(Some("a".into()))
         );
         assert_eq!(

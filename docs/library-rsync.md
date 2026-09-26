@@ -1,18 +1,18 @@
 ---
 type: Playbook
 title: Synchronize libraries across SSH hosts
-description: Configure hosts, synchronize exact Git revisions and user selections, and recover partial runs.
+description: Configure hosts, synchronize library content at exact Git revisions, and recover partial runs.
 status: draft
-generated: { by: codex/gpt-6, at: 2026-09-19T00:00:00Z }
+generated: { by: openai-codex/gpt-6-astra, at: 2026-09-26T19:55:21Z }
 ---
 
 # Synchronize libraries across SSH hosts
 
-`skillator library rsync` synchronizes library skill files and account-wide selections between this machine and configured SSH hosts. Changes can originate on any selected host. All selected hosts participate in one comparison, so an edit on one remote can reach another in the same run.
+`skillator library rsync` synchronizes library skill files between this machine and configured SSH hosts. Changes can originate on any selected host. All selected hosts participate in one comparison, so an edit on one remote can reach another in the same run. User selections and materializations remain host-local.
 
 ## Configure hosts
 
-Install Skillator with synchronization protocol 4, Git, and rsync on every host. The remote noninteractive shell must find all three on PATH. Skillator reports missing or incompatible dependencies and does not install them.
+Install Skillator with synchronization protocol 5, Git, and rsync on every host. The remote noninteractive shell must find all three on PATH. Skillator reports missing or incompatible dependencies and does not install them.
 
 Create `~/.skillator/config.yaml` on the initiating machine:
 
@@ -49,9 +49,11 @@ Skillator includes all discovered skills, including hidden and unselected skills
 
 The central library and external locations keep their paths relative to each user's home. For example, `~/Development/acme/skills` maps to `/home/developer/Development/acme/skills` on a host whose home is `/home/developer`. Locations must be directories below the home. Registering the home itself as `~` is unsupported by `library rsync`; choose its skill-containing subdirectories instead. Locations outside the home, including links that escape it, fail validation. Existing receiving registrations and equivalent path expressions remain intact; missing registrations use portable `~/...` paths. Conflicting exclusions or overlap settings block the affected location.
 
-Library acquisition links retain their originating link and transfer the skill content to receivers. Internal skill links must be relative and remain inside their skill directory. User materialization links are rebuilt against each receiving library.
+Library acquisition links retain their originating link and transfer the skill content to receivers. Internal skill links must be relative and remain inside their skill directory.
 
-Rsync transfers skill content only. It does not copy Git administrative files, project selections, user materialization directories, the host configuration, credentials, or the target registry. A Git bootstrap creates a complete checkout, which can include unrelated repository files.
+Rsync transfers skill content only. It does not copy Git administrative files, project or user selections, the standard `~/.agents/skills` materialization directory, the host configuration, credentials, or the target registry. A Git bootstrap creates a complete checkout, which can include unrelated repository files.
+
+Payloads are batched per peer in groups of at most 64 entries. Remote-to-remote content passes through the initiating machine. Each batch uses an isolated staging view, and every entry retains its own content verification, race checks, publication, recovery, and acknowledgement. A failed batch does not publish its destination files or prevent independent peers from completing.
 
 ## Git revisions stay fixed
 
@@ -84,15 +86,13 @@ skillator library rsync --missing remove
 
 Conflicts take precedence over missing-file policy. Deleting a file while another participant edits it is a conflict. Timestamps do not choose winners, and Skillator does not merge text automatically. Noninteractive commands, machine formats, and check mode never prompt. Unresolved conflicts return status 1 while independent work can still complete.
 
-A choice does not authorize deleting unrelated siblings or overwriting user materialization drift. There is no `--force` option for this command.
+A choice does not authorize deleting unrelated siblings or changing user materializations. There is no `--force` option for this command.
 
-## User selections
+## User selections stay local
 
-Skill Directory definitions and Enablements merge by their keys, including linked or copied mode. First contact combines independent selections. After shared history exists, explicit deselection propagates even with `--missing copy`; the library skill remains available. An absent entire user configuration does not mean every skill was deselected.
+The command neither reads nor changes `~/.agents/skillator.yaml`. Different, absent, or malformed user configurations do not block library synchronization. Skill Directory definitions, Enablements, and linked or copied modes are not exchanged or included in synchronization history.
 
-Directory removal stays coupled to its selections. Concurrent incompatible changes use the conflict policy. Unavailable or blocked sources cannot gain new dependent selections. Existing unresolved selections remain.
-
-Receiving hosts use normal protected user reconciliation. Unmanaged entries and edited copied materializations remain guarded. Reports distinguish a saved user configuration from materialization outcomes; failed materialization prevents an in-sync result. Copied user edits are not promoted into the library.
+Enable or disable skills independently on each host with the normal user-scope commands. Library synchronization does not reconcile user materializations or promote copied user edits into the library. A copied materialization stays unchanged until a local user-scope action updates it.
 
 ## Preview and reports
 
@@ -100,15 +100,19 @@ Receiving hosts use normal protected user reconciliation. Unmanaged entries and 
 
 Every selected host must pass read-only dependency and configuration preflight before persistent writes start anywhere. A failed host aborts that run. Failures after preflight can leave successful independent work in place.
 
-JSON and YAML use the normal report envelope with `mode: library_rsync`. Changes identify the configured `host` alias and home-relative path. Reports distinguish applied, proposed, blocked, unauthorized, and failed user mutations. Exit codes are 0 for convergence, 1 for remaining work, 2 for invalid arguments, 3 for unavailable or invalid required input, 4 for a busy target, and 5 for fatal command/output failures.
+JSON and YAML use the normal report envelope with `mode: library_rsync`. Changes identify the configured `host` alias and home-relative path. Reports cover library content, registrations, Git bootstrap, and synchronization state, not user-scope mutations. Exit codes are 0 for convergence, 1 for remaining work, 2 for invalid arguments, 3 for unavailable or invalid required input, 4 for a busy target, and 5 for fatal command/output failures.
 
 ## Retry and recovery
 
 Synchronization identity and acknowledged history live under `~/.skillator/rsync/`. Do not copy this state directory between machines. A duplicated identity or replaced host is an error. Restore the original state if available. If a host was deliberately replaced, back up the initiating state and remove only that host's saved entry from the `aliases` map to permit conservative first contact. Lost shared history never authorizes automatic deletion.
 
+Protocol 5 uses history format 2. Earlier unreleased protocol and history versions are rejected rather than migrated. Before upgrading from an earlier build, finish pending recovery with that build. Back up and move aside `~/.skillator/rsync/state.json` on every participating host to restart with conservative first contact. Do not change the version field or discard retained recovery journals and backups.
+
 Each publication verifies staged content and rechecks the observed source and destination. A stale entry is preserved and reported for retry. Concurrent initiators, Library configuration saves, and `library update` share the user-home write lock.
 
 After interruption, rerun the command. It inspects retained publication journals, restores recoverable originals where safe, and refuses to overwrite later edits. Preserve any reported journal and backup when manual recovery is required. Once the old and current values are reconciled, retry. Successful entries retain their own acknowledgements; a failed host does not cause all other hosts to roll back.
+
+Partial multi-host completion can leave different acknowledged baselines. An all-host retry then reports a history conflict rather than guessing. Retry the failed peer with `--hosts <alias>` against its unchanged baseline, then retry the complete cohort. If history remains inconsistent, preserve the state and reconcile it before proceeding.
 
 The names `.skillator-rsync-<32 hex digits>`, `.skillator-clone-<32 hex digits>`, and `.skillator-alias-<32 hex digits>` are reserved temporary entries and excluded from discovery during synchronization. Do not use them for skill content.
 

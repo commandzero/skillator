@@ -4,6 +4,7 @@ use super::{
     planner::{self, ConflictPolicy, Decision, MissingPolicy, Observation},
     session::{Request, Response},
     snapshot::{Location, Snapshot, Source},
+    stage::Stage,
     state::{self, Baseline, Entry},
     transport::Endpoint,
 };
@@ -11,7 +12,7 @@ use crate::app::{AppPaths, ReportDiagnostic};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 pub(crate) struct Options {
     pub hosts: Option<String>,
@@ -140,8 +141,7 @@ struct Participant {
     snapshot: Snapshot,
     token: String,
     id: Option<String>,
-    stage: Option<String>,
-    stage_identity: Option<(u64, u64)>,
+    stage: Option<Stage>,
 }
 
 impl Participant {
@@ -155,9 +155,9 @@ impl Participant {
         else {
             return Err(Error::input("remote did not return an observation"));
         };
-        if snapshot.protocol != 4 {
+        if snapshot.protocol != 5 {
             return Err(Error::input(format!(
-                "incompatible Skillator {} on remote host {alias}; protocol 4 is required",
+                "incompatible Skillator {} on remote host {alias}; protocol 5 is required",
                 snapshot.version
             )));
         }
@@ -171,7 +171,6 @@ impl Participant {
             snapshot: *snapshot,
             token,
             stage: None,
-            stage_identity: None,
         })
     }
     fn inspect(&mut self, sources: &[Source]) -> Result<()> {
@@ -198,19 +197,6 @@ impl Participant {
             Err(Error::input("unexpected remote protocol response"))
         }
     }
-}
-
-fn valid_stage(home: &Path, stage: &str) -> bool {
-    let path = Path::new(stage);
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    path.is_absolute()
-        && !path
-            .components()
-            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-        && path.parent() == Some(home.join(".skillator/rsync").as_path())
-        && name.strip_prefix("stage-").is_some_and(state::valid_id)
 }
 
 pub(crate) fn run(paths: &AppPaths, options: Options) -> Result<Report> {
@@ -430,18 +416,24 @@ fn synchronize_inner(
                     inode,
                     recovered,
                 }) => {
-                    if !valid_stage(&peer.snapshot.home, &stage) {
-                        report.problem(
-                            &peer.alias,
-                            "",
-                            "begin_failed",
-                            "remote returned a staging path outside the observed synchronization directory",
-                        );
-                        return Ok(report);
-                    }
+                    let descriptor = match Stage::new(
+                        &peer.snapshot.home,
+                        Path::new(&stage),
+                        (device, inode),
+                    ) {
+                        Ok(descriptor) => descriptor,
+                        Err(_) => {
+                            report.problem(
+                                &peer.alias,
+                                "",
+                                "begin_failed",
+                                "remote returned a staging path outside the observed synchronization directory",
+                            );
+                            return Ok(report);
+                        }
+                    };
                     peer.id = Some(id);
-                    peer.stage = Some(stage);
-                    peer.stage_identity = Some((device, inode));
+                    peer.stage = Some(descriptor);
                     if recovered != 0 {
                         report.changed(&peer.alias, "", "recover_publication", false);
                     }
@@ -458,35 +450,10 @@ fn synchronize_inner(
         }
     }
     if !options.check {
-        // Begin can take long enough for an external Git operation to advance a
-        // checkout. Recheck the reference before creating any receiving clone.
-        for (index, peer) in peers.iter_mut().enumerate() {
-            if let Err(error) = peer.inspect(&sources) {
-                report.problem(&peer.alias, "", "inspection_failed", error.to_string());
-                return Ok(report);
-            }
-            for reference in &sources {
-                let actual = peer
-                    .snapshot
-                    .sources
-                    .iter()
-                    .find(|source| source.root == reference.root);
-                let occupied_git = actual.is_some_and(|source| source.git.is_some());
-                if (index == 0 || occupied_git)
-                    && (reference.git.is_some() || occupied_git)
-                    && actual.is_none_or(|source| {
-                        source.key != reference.key || source.git != reference.git
-                    })
-                {
-                    blocked.insert(reference.root.clone());
-                    report.problem(
-                        &peer.alias,
-                        &reference.root,
-                        "git_mismatch",
-                        "Git source changed since preflight; align it separately before synchronizing",
-                    );
-                }
-            }
+        // Begin can take long enough for external Git changes; inspect again
+        // before creating any receiving clone.
+        if !inspect_git_checkpoint(peers, &sources, &mut blocked, &mut report, true) {
+            return Ok(report);
         }
     }
     for source in &sources {
@@ -527,28 +494,9 @@ fn synchronize_inner(
             }
         }
     }
-    if !options.check {
-        for peer in peers.iter_mut() {
-            if let Err(error) = peer.inspect(&sources) {
-                report.problem(&peer.alias, "", "inspection_failed", error.to_string());
-                return Ok(report);
-            }
-            for reference in &sources {
-                let actual = peer
-                    .snapshot
-                    .sources
-                    .iter()
-                    .find(|source| source.root == reference.root);
-                if (reference.git.is_some() || actual.is_some_and(|source| source.git.is_some()))
-                    && actual.is_none_or(|actual| {
-                        actual.key != reference.key || actual.git != reference.git
-                    })
-                {
-                    blocked.insert(reference.root.clone());
-                    report.problem(&peer.alias, &reference.root, "git_mismatch", "Git source changed since preflight; align it separately before synchronizing");
-                }
-            }
-        }
+    if !options.check && !inspect_git_checkpoint(peers, &sources, &mut blocked, &mut report, false)
+    {
+        return Ok(report);
     }
     let mut acquisition_aliases = BTreeMap::<String, String>::new();
     let mut conflicting_aliases = BTreeSet::new();
@@ -704,14 +652,6 @@ fn synchronize_inner(
             }
         }
     }
-    sync_user(
-        peers,
-        &sources,
-        &blocked,
-        &options,
-        &mut report,
-        &mut acknowledgements,
-    )?;
     if !options.check {
         for index in 0..peers.len() {
             let mut accepted = BTreeMap::new();
@@ -728,11 +668,6 @@ fn synchronize_inner(
                         {
                             common.contexts.insert(path.clone(), context);
                         }
-                    }
-                }
-                for (key, value) in &acknowledgements[index].user {
-                    if acknowledgements[other].user.get(key) == Some(value) {
-                        common.user.insert(key.clone(), value.clone());
                     }
                 }
                 accepted.insert(peers[other].id.clone().unwrap(), common);
@@ -819,6 +754,43 @@ fn file_bases_disagree(peers: &[Participant], path: &str) -> bool {
         > 1
 }
 
+fn inspect_git_checkpoint(
+    peers: &mut [Participant],
+    sources: &[Source],
+    blocked: &mut BTreeSet<String>,
+    report: &mut Report,
+    before_bootstrap: bool,
+) -> bool {
+    for (index, peer) in peers.iter_mut().enumerate() {
+        if let Err(error) = peer.inspect(sources) {
+            report.problem(&peer.alias, "", "inspection_failed", error.to_string());
+            return false;
+        }
+        for reference in sources {
+            let actual = peer
+                .snapshot
+                .sources
+                .iter()
+                .find(|source| source.root == reference.root);
+            let occupied_git = actual.is_some_and(|source| source.git.is_some());
+            if (!before_bootstrap || index == 0 || occupied_git)
+                && (reference.git.is_some() || occupied_git)
+                && actual
+                    .is_none_or(|source| source.key != reference.key || source.git != reference.git)
+            {
+                blocked.insert(reference.root.clone());
+                report.problem(
+                    &peer.alias,
+                    &reference.root,
+                    "git_mismatch",
+                    "Git source changed since preflight; align it separately before synchronizing",
+                );
+            }
+        }
+    }
+    true
+}
+
 fn sync_files(
     sources: &[Source],
     blocked: &BTreeSet<String>,
@@ -864,20 +836,7 @@ fn sync_files(
         );
     }
     paths.retain(|path| {
-        !state::administrative(std::path::Path::new(path))
-            && !peers.iter().any(|peer| {
-                peer.snapshot.user_directories.iter().any(|directory| {
-                    std::path::Path::new(path).starts_with(directory)
-                        || peer
-                            .snapshot
-                            .physical_paths
-                            .get(path)
-                            .is_some_and(|physical| {
-                                std::path::Path::new(physical)
-                                    .starts_with(peer.snapshot.home.join(directory))
-                            })
-                })
-            })
+        state::transferable(&peers[0].snapshot.home, path).unwrap_or(false)
             && owner(path).is_some_and(|s| {
                 !exclusions[&s.root]
                     .matched_path_or_any_parents(peers[0].snapshot.home.join(path), false)
@@ -1065,7 +1024,6 @@ fn sync_files(
                 &observations,
                 options.conflict,
                 options.missing,
-                false,
                 group.len(),
             )
         };
@@ -1129,12 +1087,157 @@ fn sync_files(
                 &b.0,
             ))
     });
-    for (_, addresses, observations, desired, roots) in planned {
+    // Exports are individually validated by their owners. Only successful exports
+    // enter the flat transfer manifests; a batch failure invalidates every member.
+    let mut payloads = vec![None::<(usize, String)>; planned.len()];
+    let mut unavailable = BTreeSet::new();
+    let mut failed_pushes = BTreeSet::<(usize, usize)>::new();
+    let mut pulls = BTreeMap::<usize, Vec<usize>>::new();
+    if !options.check {
+        for (group, (_, addresses, observations, desired, roots)) in planned.iter().enumerate() {
+            let Some(entry) = desired
+                .as_ref()
+                .filter(|entry| !matches!(entry, Entry::Directory))
+            else {
+                continue;
+            };
+            if observations
+                .iter()
+                .all(|observation| observation.value == *desired)
+            {
+                continue;
+            }
+            let source = observations
+                .iter()
+                .position(|observation| observation.value.as_ref() == Some(entry))
+                .ok_or_else(|| Error::input("planned value has no content source"))?;
+            let (index, path) = &addresses[source];
+            match peers[*index].endpoint.request(Request::Export {
+                path: path.clone(),
+                expected: entry.clone(),
+            }) {
+                Ok(Response::Exported { path: export }) => {
+                    let export = Path::new(&export);
+                    let name = export.file_name().and_then(|name| name.to_str());
+                    if export.parent() != Some(peers[*index].stage.as_ref().unwrap().path())
+                        || name.is_none_or(|name| !state::valid_id(name))
+                    {
+                        report.problem(
+                            &peers[*index].alias,
+                            path,
+                            "protocol_error",
+                            "invalid export stage path",
+                        );
+                        failed.extend(roots.iter().cloned());
+                        unavailable.insert(group);
+                        continue;
+                    }
+                    payloads[group] = Some((*index, name.unwrap().to_owned()));
+                    if *index != 0 {
+                        pulls.entry(*index).or_default().push(group);
+                    }
+                }
+                Ok(_) => {
+                    report.problem(
+                        &peers[*index].alias,
+                        path,
+                        "protocol_error",
+                        "unexpected export response",
+                    );
+                    failed.extend(roots.iter().cloned());
+                    unavailable.insert(group);
+                }
+                Err(error) => {
+                    report.problem(
+                        &peers[*index].alias,
+                        path,
+                        "export_failed",
+                        error.to_string(),
+                    );
+                    failed.extend(roots.iter().cloned());
+                    unavailable.insert(group);
+                }
+            }
+        }
+        for (source, groups) in pulls {
+            for chunk in groups.chunks(64) {
+                let names: Vec<_> = chunk
+                    .iter()
+                    .map(|group| payloads[*group].as_ref().unwrap().1.clone())
+                    .collect();
+                let (initiator, others) = peers.split_at_mut(source);
+                let local = &mut initiator[0];
+                let remote = &mut others[0];
+                let result = remote.endpoint.pull_batch(
+                    &names,
+                    remote.stage.as_ref().unwrap(),
+                    local.stage.as_ref().unwrap(),
+                );
+                if let Err(error) = result {
+                    for group in chunk {
+                        let (_, addresses, _, _, roots) = &planned[*group];
+                        let path = &addresses[0].1;
+                        report.problem(&remote.alias, path, "transfer_failed", error.to_string());
+                        failed.extend(roots.iter().cloned());
+                        unavailable.insert(*group);
+                    }
+                }
+            }
+        }
+    }
+    let mut pushes = BTreeMap::<usize, Vec<usize>>::new();
+    if !options.check {
+        for (group, (_, addresses, observations, desired, _)) in planned.iter().enumerate() {
+            if unavailable.contains(&group) || payloads[group].is_none() {
+                continue;
+            }
+            let source = payloads[group].as_ref().unwrap().0;
+            let mut destinations = BTreeSet::new();
+            for ((index, _path), observation) in addresses.iter().zip(observations) {
+                if observation.value == *desired || *index == source || *index == 0 {
+                    continue;
+                }
+                if destinations.insert(*index) {
+                    pushes.entry(*index).or_default().push(group);
+                }
+            }
+        }
+        for (destination, groups) in pushes {
+            for chunk in groups.chunks(64) {
+                let names: Vec<_> = chunk
+                    .iter()
+                    .map(|group| payloads[*group].as_ref().unwrap().1.clone())
+                    .collect();
+                let (initiator, others) = peers.split_at_mut(destination);
+                let local = &mut initiator[0];
+                let remote = &mut others[0];
+                let result = remote.endpoint.push_batch(
+                    &names,
+                    local.stage.as_ref().unwrap(),
+                    remote.stage.as_ref().unwrap(),
+                );
+                if let Err(error) = result {
+                    for group in chunk {
+                        let (_, addresses, _, _, roots) = &planned[*group];
+                        failed_pushes.insert((*group, destination));
+                        report.problem(
+                            &remote.alias,
+                            &addresses[0].1,
+                            "transfer_failed",
+                            error.to_string(),
+                        );
+                        failed.extend(roots.iter().cloned());
+                    }
+                }
+            }
+        }
+    }
+    for (group, (_, addresses, observations, desired, roots)) in planned.into_iter().enumerate() {
         let changed: Vec<_> = observations
             .iter()
             .enumerate()
-            .filter(|(_, o)| o.value != desired)
-            .map(|(i, _)| i)
+            .filter(|(_, observation)| observation.value != desired)
+            .map(|(address, _)| address)
             .collect();
         if changed.is_empty() {
             for (index, path) in &addresses {
@@ -1153,118 +1256,25 @@ fn sync_files(
                     .physical_paths
                     .get(path)
                     .unwrap_or(path);
-                if !destinations.insert((*index, physical.clone())) {
-                    continue;
+                if destinations.insert((*index, physical.clone())) {
+                    report.changed(
+                        &peers[*index].alias,
+                        path,
+                        if desired.is_some() {
+                            "copy_skill_entry"
+                        } else {
+                            "remove_skill_entry"
+                        },
+                        true,
+                    );
                 }
-                report.changed(
-                    &peers[*index].alias,
-                    path,
-                    if desired.is_some() {
-                        "copy_skill_entry"
-                    } else {
-                        "remove_skill_entry"
-                    },
-                    true,
-                );
             }
             continue;
         }
-        let payload = if let Some(entry) = &desired
-            && !matches!(entry, Entry::Directory)
-        {
-            let source = observations
-                .iter()
-                .position(|o| o.value.as_ref() == Some(entry))
-                .ok_or_else(|| Error::input("planned value has no content source"))?;
-            let (index, path) = &addresses[source];
-            match peers[*index].endpoint.request(Request::Export {
-                path: path.clone(),
-                expected: entry.clone(),
-            }) {
-                Ok(Response::Exported { path: export }) => {
-                    let local =
-                        PathBuf::from(peers[0].stage.as_ref().unwrap()).join(state::new_id()?);
-                    if let Err(error) = peers[*index].request_ok(Request::ValidateStage) {
-                        report.problem(
-                            &peers[*index].alias,
-                            path,
-                            "transfer_failed",
-                            error.to_string(),
-                        );
-                        failed.extend(roots);
-                        continue;
-                    }
-                    if let Err(error) = peers[0].request_ok(Request::ValidateStage) {
-                        report.problem("local", path, "transfer_failed", error.to_string());
-                        failed.extend(roots);
-                        continue;
-                    }
-                    match peers[*index].endpoint.pull(
-                        &export,
-                        &local,
-                        super::transport::StageRef {
-                            home: &peers[*index].snapshot.home,
-                            identity: peers[*index].stage_identity.unwrap(),
-                        },
-                        super::transport::StageRef {
-                            home: &peers[0].snapshot.home,
-                            identity: peers[0].stage_identity.unwrap(),
-                        },
-                    ) {
-                        Ok(()) => {
-                            if let Err(error) = peers[0].request_ok(Request::ValidateStage) {
-                                report.problem("local", path, "transfer_failed", error.to_string());
-                                failed.extend(roots);
-                                continue;
-                            }
-                            if let Err(error) = peers[*index].request_ok(Request::ValidateStage) {
-                                report.problem(
-                                    &peers[*index].alias,
-                                    path,
-                                    "transfer_failed",
-                                    error.to_string(),
-                                );
-                                failed.extend(roots);
-                                continue;
-                            }
-                            Some(local)
-                        }
-                        Err(error) => {
-                            report.problem(
-                                &peers[*index].alias,
-                                path,
-                                "transfer_failed",
-                                error.to_string(),
-                            );
-                            failed.extend(roots);
-                            continue;
-                        }
-                    }
-                }
-                Ok(_) => {
-                    report.problem(
-                        &peers[*index].alias,
-                        path,
-                        "protocol_error",
-                        "unexpected export response",
-                    );
-                    failed.extend(roots);
-                    continue;
-                }
-                Err(error) => {
-                    report.problem(
-                        &peers[*index].alias,
-                        path,
-                        "export_failed",
-                        error.to_string(),
-                    );
-                    failed.extend(roots);
-                    continue;
-                }
-            }
-        } else {
-            None
-        };
+        if unavailable.contains(&group) {
+            failed.extend(roots);
+            continue;
+        }
         let mut published = BTreeMap::new();
         for ((index, path), observation) in addresses.iter().zip(observations) {
             if observation.value == desired {
@@ -1288,31 +1298,21 @@ fn sync_files(
                 continue;
             }
             published.insert((*index, physical.clone()), false);
-            let stage = if let Some(payload) = &payload {
-                if let Err(error) = peers[0].request_ok(Request::ValidateStage) {
-                    report.problem("local", path, "transfer_failed", error.to_string());
+            let stage = if let Some((_, name)) = &payloads[group] {
+                if failed_pushes.contains(&(group, *index)) {
                     failed.extend(roots.iter().cloned());
                     continue;
                 }
-                let stage = format!(
-                    "{}/{}",
-                    peers[*index].stage.as_ref().unwrap(),
-                    state::new_id()?
-                );
-                let local_home = peers[0].snapshot.home.clone();
-                let target_home = peers[*index].snapshot.home.clone();
-                if let Err(error) = peers[*index].endpoint.push(
-                    payload,
-                    &stage,
-                    super::transport::StageRef {
-                        home: &local_home,
-                        identity: peers[0].stage_identity.unwrap(),
-                    },
-                    super::transport::StageRef {
-                        home: &target_home,
-                        identity: peers[*index].stage_identity.unwrap(),
-                    },
-                ) {
+                // A source's validated export and a completed batch retain the
+                // same generated filename on each receiving participant.
+                let target_path = peers[*index].stage.as_ref().unwrap().path().to_path_buf();
+                let local_check = peers[0].stage.as_ref().unwrap().open().map(|_| ());
+                let target_check = if *index == 0 {
+                    local_check
+                } else {
+                    local_check.and_then(|()| peers[*index].request_ok(Request::ValidateStage))
+                };
+                if let Err(error) = target_check {
                     report.problem(
                         &peers[*index].alias,
                         path,
@@ -1322,12 +1322,7 @@ fn sync_files(
                     failed.extend(roots.iter().cloned());
                     continue;
                 }
-                if let Err(error) = peers[0].request_ok(Request::ValidateStage) {
-                    report.problem("local", path, "transfer_failed", error.to_string());
-                    failed.extend(roots.iter().cloned());
-                    continue;
-                }
-                Some(stage)
+                Some(target_path.join(name).to_string_lossy().into_owned())
             } else {
                 None
             };
@@ -1436,412 +1431,12 @@ fn choose<T: Clone + Ord + std::fmt::Debug>(
     Ok(Decision::Conflict)
 }
 
-fn user_directory(key: &str) -> Option<String> {
-    if let Some(directory) = key.strip_prefix("directory/") {
-        return Some(directory.into());
-    }
-    let (directory, _, _): (String, String, String) =
-        serde_json::from_str(key.strip_prefix("enablement/")?).ok()?;
-    Some(directory)
-}
-
-fn blocked_enablement(key: &str, sources: &[Source], blocked: &BTreeSet<String>) -> bool {
-    let Some(value) = key.strip_prefix("enablement/") else {
-        return false;
-    };
-    let Ok((_, source, skill)) = serde_json::from_str::<(String, String, String)>(value) else {
-        return true;
-    };
-    let normalized_skill = if skill == "." { "" } else { &skill };
-    let Some(source) = sources.iter().find(|s| s.key == source) else {
-        return true;
-    };
-    blocked.contains(&source.root)
-        || source.invalid_skills.contains(normalized_skill)
-        || !source.skills.contains(normalized_skill)
-}
-
-fn report_blocked_enablement(key: &str, peers: &[Participant], report: &mut Report) {
-    if peers
-        .iter()
-        .any(|peer| peer.snapshot.user.contains_key(key))
-        && peers
-            .iter()
-            .any(|peer| !peer.snapshot.user.contains_key(key))
-    {
-        report.problem(
-            "local",
-            ".agents/skillator.yaml",
-            "enablement_source_unavailable",
-            format!(
-                "selection {key} cannot reach another host until its skill source is available"
-            ),
-        );
-    }
-}
-
-fn unavailable_selection_host<'a>(
-    key: &str,
-    peers: &'a [Participant],
-    sources: &[Source],
-    acknowledgements: &[Baseline],
-    check: bool,
-    changes: &[Change],
-) -> Option<&'a str> {
-    let value = key.strip_prefix("enablement/")?;
-    let (_, source_key, skill): (String, String, String) = serde_json::from_str(value).ok()?;
-    let source = sources.iter().find(|source| source.key == source_key)?;
-    let skill = if skill == "." { "" } else { &skill };
-    let manifest = Path::new(&source.root)
-        .join(skill)
-        .join("SKILL.md")
-        .to_string_lossy()
-        .into_owned();
-    peers
-        .iter()
-        .enumerate()
-        .filter(|(_, peer)| !peer.snapshot.user.contains_key(key))
-        .find(|(index, peer)| {
-            let acknowledged =
-                matches!(acknowledgements[*index].files.get(&manifest), Some(Some(_)));
-            let planned = check
-                && changes.iter().any(|change| {
-                    change.host == peer.alias
-                        && change.path == manifest
-                        && change.action == "copy_skill_entry"
-                });
-            !acknowledged && !planned
-        })
-        .map(|(_, peer)| peer.alias.as_str())
-}
-
-fn user_base(peers: &[Participant], index: usize, key: &str) -> Option<Option<String>> {
-    if !peers[index].snapshot.user_present {
-        return None;
-    }
-    if index == 0 {
-        let bases: Option<BTreeSet<_>> =
-            (1..peers.len()).map(|i| user_base(peers, i, key)).collect();
-        let bases = bases?;
-        (bases.len() == 1).then(|| bases.into_iter().next().unwrap())
-    } else {
-        let local_id = peers[0].snapshot.history.id.as_ref()?;
-        let remote_id = peers[index].snapshot.history.id.as_ref()?;
-        let remote = peers[index]
-            .snapshot
-            .history
-            .peers
-            .get(local_id)?
-            .user
-            .get(key)?;
-        let local = peers[0]
-            .snapshot
-            .history
-            .peers
-            .get(remote_id)?
-            .user
-            .get(key)?;
-        (remote == local).then(|| remote.clone())
-    }
-}
-
-fn user_bases_disagree(peers: &[Participant], key: &str) -> bool {
-    (1..peers.len())
-        .filter_map(|index| user_base(peers, index, key))
-        .collect::<BTreeSet<_>>()
-        .len()
-        > 1
-}
-
-fn sync_user(
-    peers: &mut [Participant],
-    sources: &[Source],
-    blocked: &BTreeSet<String>,
-    options: &Options,
-    report: &mut Report,
-    acknowledgements: &mut [Baseline],
-) -> Result<()> {
-    let mut keys = BTreeSet::new();
-    for peer in peers.iter() {
-        keys.extend(peer.snapshot.user.keys().cloned());
-        for base in peer.snapshot.history.peers.values() {
-            keys.extend(base.user.keys().cloned());
-        }
-    }
-    let mut merged: Vec<_> = peers.iter().map(|p| p.snapshot.user.clone()).collect();
-    let mut accepted = BTreeMap::new();
-    let mut coupled = BTreeSet::new();
-    let labels: Vec<_> = peers.iter().map(|p| p.alias.clone()).collect();
-    // Whole-directory decisions are limited to a historical directory removal.
-    // First-contact enablements stay in the per-key loop below and form a union.
-    for directory in keys.iter().filter_map(|key| key.strip_prefix("directory/")) {
-        let directory_key = format!("directory/{directory}");
-        let removed = (0..peers.len()).any(|index| {
-            peers[index].snapshot.user_present
-                && !peers[index].snapshot.user.contains_key(&directory_key)
-                && matches!(user_base(peers, index, &directory_key), Some(Some(_)))
-        });
-        if !removed {
-            continue;
-        }
-        let mut members = vec![directory_key.clone()];
-        members.extend(
-            keys.iter()
-                .filter(|key| {
-                    key.starts_with("enablement/")
-                        && user_directory(key).as_deref() == Some(directory)
-                })
-                .cloned(),
-        );
-        coupled.extend(members.iter().cloned());
-        if let Some(key) = members.iter().find(|key| user_bases_disagree(peers, key)) {
-            report.problem("local", ".agents/skillator.yaml", "conflict", format!("acknowledged selection baselines disagree for {key}; resolve the history before synchronizing this directory"));
-            continue;
-        }
-        if members
-            .iter()
-            .any(|key| blocked_enablement(key, sources, blocked))
-        {
-            for key in members
-                .iter()
-                .filter(|key| blocked_enablement(key, sources, blocked))
-            {
-                report_blocked_enablement(key, peers, report);
-            }
-            continue;
-        }
-        let unavailable: Vec<_> = members
-            .iter()
-            .filter_map(|key| {
-                unavailable_selection_host(
-                    key,
-                    peers,
-                    sources,
-                    acknowledgements,
-                    options.check,
-                    &report.changes,
-                )
-                .map(|host| (key, host))
-            })
-            .collect();
-        if !unavailable.is_empty() {
-            for (key, host) in unavailable {
-                report.problem(
-                    host,
-                    ".agents/skillator.yaml",
-                    "enablement_source_unavailable",
-                    format!("selection {key} cannot reach {host} until its skill is available"),
-                );
-            }
-            continue;
-        }
-        let observations: Vec<_> = (0..peers.len())
-            .map(|index| {
-                let value = peers[index]
-                    .snapshot
-                    .user
-                    .contains_key(&directory_key)
-                    .then(|| {
-                        members
-                            .iter()
-                            .filter_map(|key| {
-                                peers[index]
-                                    .snapshot
-                                    .user
-                                    .get(key)
-                                    .map(|v| (key.clone(), v.clone()))
-                            })
-                            .collect::<BTreeMap<_, _>>()
-                    });
-                let base = user_base(peers, index, &directory_key).map(|definition| {
-                    definition.map(|_| {
-                        members
-                            .iter()
-                            .filter_map(|key| {
-                                user_base(peers, index, key)
-                                    .flatten()
-                                    .map(|v| (key.clone(), v))
-                            })
-                            .collect::<BTreeMap<_, _>>()
-                    })
-                });
-                Observation {
-                    value,
-                    base,
-                    prior_presence: false,
-                }
-            })
-            .collect();
-        let decision = planner::decide(&observations, options.conflict, options.missing, true);
-        if let Decision::Use(value) = choose(
-            decision,
-            &observations,
-            &labels,
-            &directory_key,
-            options,
-            report,
-        )? {
-            for key in &members {
-                let value = value.as_ref().and_then(|values| values.get(key)).cloned();
-                for desired in &mut merged {
-                    if let Some(value) = &value {
-                        desired.insert(key.clone(), value.clone());
-                    } else {
-                        desired.remove(key);
-                    }
-                }
-                accepted.insert(key.clone(), value);
-            }
-        }
-    }
-    for key in keys {
-        if coupled.contains(&key) {
-            continue;
-        }
-        if user_bases_disagree(peers, &key) {
-            report.problem("local", ".agents/skillator.yaml", "conflict", format!("acknowledged selection baselines disagree for {key}; resolve the history before synchronizing it"));
-            continue;
-        }
-        let observations: Vec<_> = (0..peers.len())
-            .map(|index| Observation {
-                prior_presence: false,
-                value: peers[index].snapshot.user.get(&key).cloned(),
-                base: user_base(peers, index, &key),
-            })
-            .collect();
-        if blocked_enablement(&key, sources, blocked) {
-            report_blocked_enablement(&key, peers, report);
-            continue;
-        }
-        if let Some(host) = unavailable_selection_host(
-            &key,
-            peers,
-            sources,
-            acknowledgements,
-            options.check,
-            &report.changes,
-        ) {
-            report.problem(
-                host,
-                ".agents/skillator.yaml",
-                "enablement_source_unavailable",
-                format!("selection {key} cannot reach {host} until its skill is available"),
-            );
-            continue;
-        }
-        let decision = planner::decide(&observations, options.conflict, options.missing, true);
-        if let Decision::Use(value) = choose(
-            decision,
-            &observations,
-            &peers.iter().map(|p| p.alias.clone()).collect::<Vec<_>>(),
-            &key,
-            options,
-            report,
-        )? {
-            for desired in &mut merged {
-                if let Some(value) = &value {
-                    desired.insert(key.clone(), value.clone());
-                } else {
-                    desired.remove(&key);
-                }
-            }
-            accepted.insert(key, value);
-        }
-    }
-    for (index, peer) in peers.iter_mut().enumerate() {
-        if let Err(error) = super::snapshot::user_from_entries(&merged[index]) {
-            report.problem(
-                &peer.alias,
-                ".agents/skillator.yaml",
-                "user_conflict",
-                error.to_string(),
-            );
-            continue;
-        }
-        if merged[index].is_empty() && !peer.snapshot.user_present {
-            continue;
-        }
-        match peer.endpoint.request(Request::User {
-            entries: merged[index].clone(),
-            expected: peer.snapshot.user_hash.clone(),
-            check: options.check,
-        }) {
-            Ok(Response::User {
-                report: user_report,
-            }) => {
-                for mut diagnostic in user_report.diagnostics {
-                    diagnostic
-                        .data
-                        .get_or_insert_default()
-                        .insert("host".into(), peer.alias.clone());
-                    report.diagnostics.push(diagnostic);
-                }
-                for change in &user_report.changes {
-                    report.changes.push(Change {
-                        host: peer.alias.clone(),
-                        path: change.path.clone(),
-                        action: change.action.clone(),
-                        safety: change.safety.clone(),
-                        outcome: change.outcome,
-                    });
-                    if options.check {
-                        report.status = "not_converged";
-                        report.exit_status = 1;
-                    }
-                }
-                if user_report.exit_status == 0 {
-                    acknowledgements[index].user = accepted.clone();
-                } else {
-                    report.problem(&peer.alias, ".agents/skillator.yaml", "user_not_converged", "user materialization is not converged; inspect the reported paths and outcomes");
-                }
-            }
-            Ok(_) => report.problem(
-                &peer.alias,
-                "",
-                "protocol_error",
-                "unexpected user reconciliation response",
-            ),
-            Err(error) => report.problem(
-                &peer.alias,
-                ".agents/skillator.yaml",
-                "user_failed",
-                error.to_string(),
-            ),
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::test_support::{configure_library as configure, write_skill as skill};
     use std::fs;
 
-    fn skill(home: &std::path::Path, directory: &str, text: &str) {
-        let path = home.join(directory);
-        fs::create_dir_all(&path).unwrap();
-        fs::write(
-            path.join("SKILL.md"),
-            format!("---\nname: demo\ndescription: A demonstration skill\n---\n{text}\n"),
-        )
-        .unwrap();
-    }
-    fn configure(home: &std::path::Path, location: &str) {
-        fs::create_dir_all(home.join(".skillator")).unwrap();
-        fs::write(
-            home.join(".skillator/library.yaml"),
-            format!("version: 1\nlocations:\n  - path: '~/{location}'\n"),
-        )
-        .unwrap();
-    }
-    fn select_demo_for_user(home: &std::path::Path) {
-        fs::create_dir_all(home.join(".agents")).unwrap();
-        fs::write(
-            home.join(".agents/skillator.yaml"),
-            "version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements:\n  - directory: agents\n    skill:\n      source: local/library\n      path: demo\n    materialization: linked\n",
-        )
-        .unwrap();
-    }
     fn participants(homes: &[tempfile::TempDir]) -> Vec<Participant> {
         homes
             .iter()
@@ -2130,45 +1725,6 @@ mod tests {
     }
 
     #[test]
-    fn user_configuration_formatting_is_reported_in_preview_and_apply() {
-        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
-        configure(homes[0].path(), ".skillator/library");
-        skill(homes[0].path(), ".skillator/library/demo", "original");
-        let paths = AppPaths::new(homes[0].path().into());
-        let selector = crate::app::SkillSelector::parse("local/library:demo").unwrap();
-        crate::app::UserScopeWorkflow::mutate_enablement(
-            &paths,
-            &selector,
-            Some(crate::domain::MaterializationKind::Linked),
-            crate::app::SyncMode::Apply { force: false },
-        )
-        .unwrap();
-        assert_eq!(sync(&homes, options(false)).exit_status, 0);
-        let config = homes[1].path().join(".agents/skillator.yaml");
-        let canonical = fs::read_to_string(&config).unwrap();
-        let commented = format!("# local comment\n{canonical}");
-        fs::write(&config, &commented).unwrap();
-        let preview = sync(&homes, options(true));
-        assert_eq!(preview.exit_status, 1, "{}", preview.text());
-        assert_eq!(fs::read_to_string(&config).unwrap(), commented);
-        let applied = sync(&homes, options(false));
-        assert_eq!(applied.exit_status, 0, "{}", applied.text());
-        for report in [&preview, &applied] {
-            assert!(
-                report
-                    .changes
-                    .iter()
-                    .any(|change| change.host == "host1"
-                        && change.action == "write_user_configuration"),
-                "{}",
-                report.text()
-            );
-        }
-        assert_eq!(fs::read_to_string(config).unwrap(), canonical);
-        assert!(sync(&homes, options(false)).changes.is_empty());
-    }
-
-    #[test]
     fn recovered_exchange_is_reobserved_before_planning_and_acknowledgement() {
         let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
         configure(homes[0].path(), ".skillator/library");
@@ -2213,6 +1769,80 @@ mod tests {
         let again = sync(&homes, options(false));
         assert_eq!(again.exit_status, 0, "{}", again.text());
         assert!(again.changes.is_empty(), "{}", again.text());
+    }
+
+    #[test]
+    fn malformed_host_local_user_configuration_does_not_block_content_sync() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "first");
+        let user_bytes: [&[u8]; 2] = [b"invalid:\n  - [\n", b"other:\n  - {\n"];
+        for (home, bytes) in homes.iter().zip(user_bytes) {
+            fs::create_dir_all(home.path().join(".agents")).unwrap();
+            fs::write(home.path().join(".agents/skillator.yaml"), bytes).unwrap();
+        }
+        let report = sync(&homes, options(false));
+        assert_eq!(report.exit_status, 0, "{}", report.text());
+        assert!(
+            homes[1]
+                .path()
+                .join(".skillator/library/demo/SKILL.md")
+                .exists()
+        );
+        for (home, bytes) in homes.iter().zip(user_bytes) {
+            assert_eq!(
+                fs::read(home.path().join(".agents/skillator.yaml")).unwrap(),
+                bytes
+            );
+            assert!(!home.path().join(".agents/skills/demo").exists());
+        }
+    }
+
+    #[test]
+    fn multiple_files_flow_in_both_directions_without_unrelated_content() {
+        let homes: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        assert_eq!(sync(&homes, options(false)).exit_status, 0);
+        let root = ".skillator/library/demo";
+        for (peer, names) in [(1, ["alpha", "beta"]), (2, ["gamma", "delta"])] {
+            for name in names {
+                fs::write(
+                    homes[peer].path().join(root).join(name),
+                    format!("{peer}-{name}"),
+                )
+                .unwrap();
+            }
+        }
+        fs::write(
+            homes[1].path().join(".skillator/library/unrelated.txt"),
+            "private",
+        )
+        .unwrap();
+        let result = sync(&homes, options(false));
+        assert_eq!(result.exit_status, 0, "{}", result.text());
+        for home in &homes {
+            for (peer, names) in [(1, ["alpha", "beta"]), (2, ["gamma", "delta"])] {
+                for name in names {
+                    assert_eq!(
+                        fs::read_to_string(home.path().join(root).join(name)).unwrap(),
+                        format!("{peer}-{name}")
+                    );
+                }
+            }
+        }
+        assert!(
+            !homes[0]
+                .path()
+                .join(".skillator/library/unrelated.txt")
+                .exists()
+        );
+        assert!(
+            !homes[2]
+                .path()
+                .join(".skillator/library/unrelated.txt")
+                .exists()
+        );
     }
     fn sync(homes: &[tempfile::TempDir], options: Options) -> Report {
         synchronize(
@@ -2290,24 +1920,16 @@ mod tests {
     }
 
     #[test]
-    fn divergent_acknowledged_bases_block_file_and_selection_planning() {
+    fn divergent_acknowledged_bases_block_file_planning() {
         let homes: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
         configure(homes[0].path(), ".skillator/library");
         skill(homes[0].path(), ".skillator/library/demo", "original");
-        select_demo_for_user(homes[0].path());
         let first = sync(&homes, options(false));
         assert_eq!(first.exit_status, 0, "{}", first.text());
         let mut peers = participants(&homes);
         let local_id = peers[0].snapshot.history.id.clone().unwrap();
         let remote_id = peers[1].snapshot.history.id.clone().unwrap();
         let path = ".skillator/library/demo/SKILL.md";
-        let key = peers[0]
-            .snapshot
-            .user
-            .keys()
-            .find(|key| key.starts_with("enablement/"))
-            .unwrap()
-            .clone();
         for (index, peer_id) in [(0, remote_id.as_str()), (1, local_id.as_str())] {
             let baseline = peers[index]
                 .snapshot
@@ -2322,7 +1944,6 @@ mod tests {
                     executable: false,
                 }),
             );
-            baseline.user.insert(key.clone(), Some("divergent".into()));
             fs::write(
                 homes[index].path().join(".skillator/rsync/state.json"),
                 serde_json::to_vec(&peers[index].snapshot.history).unwrap(),
@@ -2331,9 +1952,7 @@ mod tests {
         }
         let observed = participants(&homes);
         assert!(file_bases_disagree(&observed, path));
-        assert!(user_bases_disagree(&observed, &key));
         assert_eq!(file_base(&observed, 0, path), None);
-        assert_eq!(user_base(&observed, 0, &key), None);
         let report = sync(&homes, options(false));
         assert_eq!(report.exit_status, 1, "{}", report.text());
         assert!(
@@ -2342,10 +1961,6 @@ mod tests {
                 .iter()
                 .any(|d| d.message.contains("acknowledged file baselines disagree"))
         );
-        assert!(report.diagnostics.iter().any(|d| {
-            d.message
-                .contains("acknowledged selection baselines disagree")
-        }));
         assert!(report.changes.is_empty(), "{}", report.text());
     }
 
@@ -2491,52 +2106,6 @@ mod tests {
     }
 
     #[test]
-    fn user_selections_rebuild_links_and_deselections_ignore_missing_policy() {
-        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
-        configure(homes[0].path(), ".skillator/library");
-        skill(homes[0].path(), ".skillator/library/demo", "original");
-        let selector = crate::app::SkillSelector::parse("local/library:demo").unwrap();
-        let paths = AppPaths::new(homes[0].path().into());
-        let enabled = crate::app::UserScopeWorkflow::mutate_enablement(
-            &paths,
-            &selector,
-            Some(crate::domain::MaterializationKind::Linked),
-            crate::app::SyncMode::Apply { force: false },
-        )
-        .unwrap();
-        assert_eq!(enabled.exit_status, 0);
-        let first = sync(&homes, options(false));
-        assert_eq!(first.exit_status, 0, "{}", first.text());
-        for home in &homes {
-            assert_eq!(
-                fs::read_link(home.path().join(".agents/skills/demo")).unwrap(),
-                home.path()
-                    .join(".skillator/library/demo")
-                    .canonicalize()
-                    .unwrap()
-            );
-        }
-        let remote = AppPaths::new(homes[1].path().into());
-        crate::app::UserScopeWorkflow::mutate_enablement(
-            &remote,
-            &selector,
-            None,
-            crate::app::SyncMode::Apply { force: false },
-        )
-        .unwrap();
-        let removed = sync(&homes, options(false));
-        assert_eq!(removed.exit_status, 0, "{}", removed.text());
-        for home in &homes {
-            assert!(!home.path().join(".agents/skills/demo").exists());
-            assert!(
-                home.path()
-                    .join(".skillator/library/demo/SKILL.md")
-                    .exists()
-            );
-        }
-    }
-
-    #[test]
     fn competing_remote_edits_are_preserved_with_independent_files_applied() {
         let homes: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
         configure(homes[0].path(), ".skillator/library");
@@ -2589,147 +2158,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_discovered_skills_do_not_gain_remote_enablements() {
-        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
-        configure(homes[0].path(), ".skillator/library");
-        let skill = homes[0].path().join(".skillator/library/demo");
-        fs::create_dir_all(&skill).unwrap();
-        fs::write(skill.join("SKILL.md"), "missing frontmatter\n").unwrap();
-        select_demo_for_user(homes[0].path());
-        let report = sync(&homes, options(false));
-        assert!(report.exit_status <= 1, "{}", report.text());
-        let remote = super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
-        assert!(remote.enablements().is_empty());
-        let local = super::super::snapshot::user(&AppPaths::new(homes[0].path().into())).unwrap();
-        assert_eq!(local.enablements().len(), 1);
-    }
-
-    #[test]
-    fn invalid_source_root_skill_does_not_gain_remote_enablement() {
-        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
-        configure(homes[0].path(), "development/root");
-        fs::create_dir_all(homes[0].path().join("development/root")).unwrap();
-        fs::write(
-            homes[0].path().join("development/root/SKILL.md"),
-            "missing frontmatter\n",
-        )
-        .unwrap();
-        fs::create_dir_all(homes[0].path().join(".agents")).unwrap();
-        fs::write(
-            homes[0].path().join(".agents/skillator.yaml"),
-            "version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements:\n  - directory: agents\n    skill:\n      source: local/development/root\n      path: .\n    materialization: linked\n",
-        )
-        .unwrap();
-        let report = sync(&homes, options(false));
-        assert!(report.exit_status <= 1, "{}", report.text());
-        let remote = super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
-        assert!(remote.enablements().is_empty());
-        let local = super::super::snapshot::user(&AppPaths::new(homes[0].path().into())).unwrap();
-        assert_eq!(local.enablements().len(), 1);
-    }
-
-    #[test]
-    fn unavailable_selection_source_or_skill_stays_local() {
-        for missing_source in [true, false] {
-            let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
-            if !missing_source {
-                configure(homes[0].path(), ".skillator/library");
-                skill(homes[0].path(), ".skillator/library/other", "valid");
-            }
-            select_demo_for_user(homes[0].path());
-            let report = sync(&homes, options(false));
-            assert_eq!(report.exit_status, 1, "{}", report.text());
-            assert!(
-                report
-                    .diagnostics
-                    .iter()
-                    .any(|diagnostic| { diagnostic.code == "enablement_source_unavailable" })
-            );
-            let remote =
-                super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
-            assert!(remote.enablements().is_empty());
-            let local =
-                super::super::snapshot::user(&AppPaths::new(homes[0].path().into())).unwrap();
-            assert_eq!(local.enablements().len(), 1);
-        }
-    }
-
-    #[test]
-    fn ignored_missing_skill_does_not_send_its_selection() {
-        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
-        configure(homes[0].path(), ".skillator/library");
-        skill(homes[0].path(), ".skillator/library/demo", "original");
-        select_demo_for_user(homes[0].path());
-        let preview = sync(&homes, options(true));
-        assert!(preview.changes.iter().any(|change| {
-            change.host == "host1" && change.action == "write_user_configuration"
-        }));
-        assert!(!homes[1].path().join(".agents/skillator.yaml").exists());
-        let mut ignore = options(false);
-        ignore.missing = MissingPolicy::Ignore;
-        let report = sync(&homes, ignore);
-        assert_eq!(report.exit_status, 1, "{}", report.text());
-        assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "enablement_source_unavailable"
-                && diagnostic
-                    .data
-                    .as_ref()
-                    .is_some_and(|data| data.get("host").map(String::as_str) == Some("host1"))
-        }));
-        let remote = super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
-        assert!(remote.enablements().is_empty());
-        assert!(
-            !homes[1]
-                .path()
-                .join(".skillator/library/demo/SKILL.md")
-                .exists()
-        );
-        let copied = sync(&homes, options(false));
-        assert_eq!(copied.exit_status, 0, "{}", copied.text());
-        let remote = super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
-        assert_eq!(remote.enablements().len(), 1);
-    }
-
-    #[test]
-    fn removed_skill_directory_and_enablement_are_recorded_together() {
-        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
-        configure(homes[0].path(), ".skillator/library");
-        skill(homes[0].path(), ".skillator/library/demo", "original");
-        select_demo_for_user(homes[0].path());
-        assert_eq!(sync(&homes, options(false)).exit_status, 0);
-        fs::write(
-            homes[0].path().join(".agents/skillator.yaml"),
-            "version: 1\nskill_directories: []\nenablements: []\n",
-        )
-        .unwrap();
-        let report = sync(&homes, options(false));
-        assert_eq!(report.exit_status, 0, "{}", report.text());
-        for home in &homes {
-            let paths = AppPaths::new(home.path().into());
-            let entries = super::super::snapshot::user_entries(
-                &super::super::snapshot::user(&paths).unwrap(),
-            )
-            .unwrap();
-            assert!(!entries.contains_key("directory/agents"));
-            assert!(entries.keys().all(|key| !key.starts_with("enablement/")));
-            let history = state::History::load(home.path()).unwrap();
-            assert!(
-                history
-                    .peers
-                    .values()
-                    .all(|peer| { peer.user.get("directory/agents") == Some(&None) })
-            );
-        }
-        assert!(sync(&homes, options(false)).changes.is_empty());
-    }
-
-    #[test]
-    fn failed_registration_blocks_new_dependent_enablements() {
+    fn failed_registration_reports_error_without_losing_content() {
         use super::super::transport::Fault;
         let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
         configure(homes[0].path(), ".skillator/library");
         skill(homes[0].path(), ".skillator/library/demo", "original");
-        select_demo_for_user(homes[0].path());
         let mut peers = participants(&homes);
         let inner = std::mem::replace(
             &mut peers[1].endpoint,
@@ -2752,8 +2185,12 @@ mod tests {
                 .iter()
                 .any(|d| d.code == "registration_failed")
         );
-        let remote = super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
-        assert!(remote.enablements().is_empty());
+        assert!(
+            homes[1]
+                .path()
+                .join(".skillator/library/demo/SKILL.md")
+                .exists()
+        );
     }
 
     #[test]
@@ -2966,81 +2403,54 @@ mod tests {
     }
 
     #[test]
-    fn directory_deletion_conflicts_with_a_new_selection_and_preserves_independent_state() {
-        for policy in [
-            ConflictPolicy::Ask,
-            ConflictPolicy::Local,
-            ConflictPolicy::Remote,
-        ] {
-            let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
-            configure(homes[0].path(), ".skillator/library");
-            skill(homes[0].path(), ".skillator/library/demo", "original");
-            let paths = AppPaths::new(homes[0].path().into());
-            let selector = crate::app::SkillSelector::parse("local/library:demo").unwrap();
-            crate::app::UserScopeWorkflow::mutate_enablement(
-                &paths,
-                &selector,
-                Some(crate::domain::MaterializationKind::Linked),
-                crate::app::SyncMode::Apply { force: false },
-            )
-            .unwrap();
-            assert_eq!(sync(&homes, options(false)).exit_status, 0);
-            let mut local = super::super::snapshot::user_entries(
-                &super::super::snapshot::user(&paths).unwrap(),
-            )
-            .unwrap();
-            let directory = local
-                .keys()
-                .find_map(|key| key.strip_prefix("directory/"))
-                .unwrap()
-                .to_owned();
-            local.retain(|key, _| user_directory(key).as_deref() != Some(&directory));
-            let desired = super::super::snapshot::user_from_entries(&local).unwrap();
-            let session = crate::app::UserScopeWorkflow::load(&paths).unwrap();
-            let prepared =
-                crate::app::UserScopeWorkflow::prepare_save(&paths, &session, desired).unwrap();
-            crate::app::UserScopeWorkflow::commit_save(
-                &paths,
-                prepared,
-                crate::reconcile::Authorization::SafeOnly,
-            )
-            .unwrap();
-            let remote_paths = AppPaths::new(homes[1].path().into());
-            crate::app::UserScopeWorkflow::mutate_enablement(
-                &remote_paths,
-                &selector,
-                Some(crate::domain::MaterializationKind::Copied),
-                crate::app::SyncMode::Apply { force: false },
-            )
-            .unwrap();
-            let mut opts = options(false);
-            opts.conflict = policy;
-            let report = sync(&homes, opts);
+    fn failed_peer_batch_does_not_publish_or_ack_its_files() {
+        use super::super::transport::Fault;
+        let homes: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        let source = homes[0].path().join(".skillator/library/demo");
+        for name in ["alpha", "beta"] {
+            fs::write(source.join(name), name).unwrap();
+        }
+        let mut peers = participants(&homes);
+        let endpoint = std::mem::replace(
+            &mut peers[1].endpoint,
+            Endpoint::local(AppPaths::new(homes[1].path().into())),
+        );
+        peers[1].endpoint = Endpoint::Fault {
+            inner: Box::new(endpoint),
+            fault: Fault::Transfer,
+        };
+        let report = synchronize(
+            &AppPaths::new(homes[0].path().into()),
+            peers,
+            options(false),
+        )
+        .unwrap();
+        assert_eq!(report.exit_status, 1, "{}", report.text());
+        for name in ["alpha", "beta"] {
+            let path = format!(".skillator/library/demo/{name}");
+            assert!(!homes[1].path().join(&path).exists());
             assert_eq!(
-                report.exit_status,
-                if matches!(policy, ConflictPolicy::Ask) {
-                    1
-                } else {
-                    0
-                },
-                "{}",
-                report.text()
+                fs::read_to_string(homes[2].path().join(&path)).unwrap(),
+                name
             );
-            for (index, home) in homes.iter().enumerate() {
-                let values = super::super::snapshot::user_entries(
-                    &super::super::snapshot::user(&AppPaths::new(home.path().into())).unwrap(),
-                )
-                .unwrap();
-                let present = match policy {
-                    ConflictPolicy::Ask => index == 1,
-                    ConflictPolicy::Local => false,
-                    ConflictPolicy::Remote => true,
-                };
-                assert_eq!(
-                    values.contains_key(&format!("directory/{directory}")),
-                    present
-                );
-            }
+            let first = state::History::load(homes[1].path()).unwrap();
+            assert!(
+                first
+                    .peers
+                    .values()
+                    .all(|baseline| !matches!(baseline.files.get(&path), Some(Some(_))))
+            );
+        }
+        let retry = sync(&homes, options(false));
+        assert_eq!(retry.exit_status, 0, "{}", retry.text());
+        for name in ["alpha", "beta"] {
+            assert_eq!(
+                fs::read_to_string(homes[1].path().join(".skillator/library/demo").join(name))
+                    .unwrap(),
+                name
+            );
         }
     }
 
@@ -3120,63 +2530,6 @@ mod tests {
         assert_eq!(report.exit_status, 0, "{}", report.text());
     }
 
-    #[test]
-    fn unmanaged_user_content_and_copied_drift_remain_protected() {
-        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
-        configure(homes[0].path(), ".skillator/library");
-        skill(homes[0].path(), ".skillator/library/demo", "original");
-        let paths = AppPaths::new(homes[0].path().into());
-        let selector = crate::app::SkillSelector::parse("local/library:demo").unwrap();
-        crate::app::UserScopeWorkflow::mutate_enablement(
-            &paths,
-            &selector,
-            Some(crate::domain::MaterializationKind::Copied),
-            crate::app::SyncMode::Apply { force: false },
-        )
-        .unwrap();
-        skill(homes[1].path(), ".agents/skills/demo", "unmanaged");
-        let blocked = sync(&homes, options(false));
-        assert_eq!(blocked.exit_status, 1, "{}", blocked.text());
-        assert!(
-            blocked.diagnostics.iter().any(|diagnostic| {
-                diagnostic.code != "user_not_converged"
-                    && diagnostic.data.as_ref().is_some_and(|data| {
-                        data.get("host").is_some_and(|host| host == "host1")
-                            && data
-                                .get("path")
-                                .is_some_and(|path| path == ".agents/skills/demo")
-                    })
-            }),
-            "{}",
-            blocked.text()
-        );
-        assert!(
-            fs::read_to_string(homes[1].path().join(".agents/skills/demo/SKILL.md"))
-                .unwrap()
-                .contains("unmanaged")
-        );
-        assert!(!homes[1].path().join(".agents/skillator.yaml").exists());
-        fs::remove_dir_all(homes[1].path().join(".agents/skills/demo")).unwrap();
-        assert_eq!(sync(&homes, options(false)).exit_status, 0);
-        skill(
-            homes[1].path(),
-            ".agents/skills/demo",
-            "private copied edit",
-        );
-        skill(homes[0].path(), ".skillator/library/demo", "library edit");
-        let drift = sync(&homes, options(false));
-        assert_eq!(drift.exit_status, 1, "{}", drift.text());
-        assert!(
-            fs::read_to_string(homes[1].path().join(".agents/skills/demo/SKILL.md"))
-                .unwrap()
-                .contains("private copied edit")
-        );
-        assert!(
-            fs::read_to_string(homes[0].path().join(".skillator/library/demo/SKILL.md"))
-                .unwrap()
-                .contains("library edit")
-        );
-    }
     #[test]
     fn directory_type_conflicts_choose_a_complete_subtree() {
         for local_directory in [false, true] {
@@ -3501,54 +2854,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn first_contact_independent_user_selections_form_a_union() {
-        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
-        for (index, home) in homes.iter().enumerate() {
-            configure(home.path(), ".skillator/library");
-            for name in ["alpha", "beta"] {
-                let directory = home.path().join(format!(".skillator/library/{name}"));
-                fs::create_dir_all(&directory).unwrap();
-                fs::write(
-                    directory.join("SKILL.md"),
-                    format!("---\nname: {name}\ndescription: Independent selection\n---\n"),
-                )
-                .unwrap();
-            }
-            let selector = crate::app::SkillSelector::parse(if index == 0 {
-                "local/library:alpha"
-            } else {
-                "local/library:beta"
-            })
-            .unwrap();
-            let report = crate::app::UserScopeWorkflow::mutate_enablement(
-                &AppPaths::new(home.path().into()),
-                &selector,
-                Some(crate::domain::MaterializationKind::Linked),
-                crate::app::SyncMode::Apply { force: false },
-            )
-            .unwrap();
-            assert_eq!(report.exit_status, 0);
-            assert!(!home.path().join(".skillator/rsync").exists());
-        }
-        let report = sync(&homes, options(false));
-        assert_eq!(report.exit_status, 0, "{}", report.text());
-        for home in &homes {
-            let config = super::super::snapshot::user(&AppPaths::new(home.path().into())).unwrap();
-            assert_eq!(config.enablements().len(), 2);
-            for name in ["alpha", "beta"] {
-                assert_eq!(
-                    fs::read_link(home.path().join(format!(".agents/skills/{name}"))).unwrap(),
-                    home.path()
-                        .join(format!(".skillator/library/{name}"))
-                        .canonicalize()
-                        .unwrap()
-                );
-            }
-        }
-        assert!(sync(&homes, options(false)).changes.is_empty());
     }
 
     #[test]

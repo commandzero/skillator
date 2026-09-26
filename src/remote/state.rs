@@ -22,7 +22,6 @@ pub(super) struct Baseline {
     pub files: BTreeMap<String, Option<Entry>>,
     #[serde(default)]
     pub contexts: BTreeMap<String, String>,
-    pub user: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,7 +48,7 @@ pub(super) struct History {
 impl Default for History {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             id: None,
             peers: BTreeMap::new(),
             aliases: BTreeMap::new(),
@@ -64,7 +63,7 @@ impl History {
             None => Ok(Self::default()),
             Some(bytes) => {
                 let state: Self = serde_json::from_slice(&bytes).map_err(Error::input_display)?;
-                if state.version != 1
+                if state.version != 2
                     || state.id.as_ref().is_none_or(|id| !valid_id(id))
                     || state.peers.keys().any(|id| !valid_id(id))
                     || state.aliases.values().any(|id| !valid_id(id))
@@ -242,14 +241,106 @@ pub(super) fn new_id() -> Result<String> {
     File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .map_err(Error::input_display)?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hex(&bytes))
+}
+
+pub(super) fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        result.push(DIGITS[(byte >> 4) as usize] as char);
+        result.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    result
 }
 
 pub(super) fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex(&Sha256::digest(bytes))
+}
+
+fn digest_reader(mut input: impl Read) -> Result<String> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 65536];
+    loop {
+        let count = input.read(&mut buffer).map_err(Error::input_display)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+pub(super) fn copy_entry_at(
+    source: &Directory,
+    source_name: &std::ffi::OsStr,
+    target: &Directory,
+    target_name: &std::ffi::OsStr,
+    entry: &Entry,
+) -> Result<()> {
+    match entry {
+        Entry::File { executable, .. } => {
+            copy_file_at(source, source_name, target, target_name, Some(*executable))?;
+        }
+        Entry::Link { target: link } => target
+            .symlink(target_name, std::ffi::OsStr::new(link))
+            .map_err(Error::input_display)?,
+        Entry::Directory => target
+            .create_dir(target_name)
+            .map_err(Error::input_display)?,
+    }
+    Ok(())
+}
+
+/// Copy a stage payload without computing a content hash; verification remains
+/// the responsibility of the publication boundary.
+pub(super) fn copy_transfer_entry_at(
+    source: &Directory,
+    source_name: &std::ffi::OsStr,
+    target: &Directory,
+    target_name: &std::ffi::OsStr,
+) -> Result<()> {
+    let metadata = source.metadata(source_name).map_err(Error::input_display)?;
+    match metadata.st_mode & libc::S_IFMT {
+        libc::S_IFREG => copy_file_at(source, source_name, target, target_name, None),
+        libc::S_IFLNK => {
+            let link = source
+                .read_link(source_name)
+                .map_err(Error::input_display)?;
+            target
+                .symlink(target_name, &link)
+                .map_err(Error::input_display)
+        }
+        _ => Err(Error::input("unsupported transfer entry")),
+    }
+}
+
+fn copy_file_at(
+    source: &Directory,
+    source_name: &std::ffi::OsStr,
+    target: &Directory,
+    target_name: &std::ffi::OsStr,
+    executable: Option<bool>,
+) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut input = source
+        .open_file(source_name)
+        .map_err(Error::input_display)?;
+    let mut output = target
+        .create_file(target_name)
+        .map_err(Error::input_display)?;
+    std::io::copy(&mut input, &mut output).map_err(Error::input_display)?;
+    let permissions = match executable {
+        Some(executable) => fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
+        None => input
+            .metadata()
+            .map_err(Error::input_display)?
+            .permissions(),
+    };
+    output
+        .set_permissions(permissions)
+        .map_err(Error::input_display)?;
+    output.sync_all().map_err(Error::input_display)
 }
 
 #[cfg(test)]
@@ -310,8 +401,12 @@ pub(super) fn administrative(path: &Path) -> bool {
         })
 }
 
+fn protected_content(path: &Path) -> bool {
+    administrative(path) || path.starts_with(".agents/skills")
+}
+
 pub(super) fn transferable(home: &Path, path: &str) -> Result<bool> {
-    if administrative(relative(path)?) {
+    if protected_content(relative(path)?) {
         return Ok(false);
     }
     let Some(actual) = observation_path(home, path)? else {
@@ -322,7 +417,7 @@ pub(super) fn transferable(home: &Path, path: &str) -> Result<bool> {
     } else {
         actual
     };
-    Ok(!administrative(
+    Ok(!protected_content(
         actual
             .strip_prefix(home.canonicalize().map_err(Error::input_display)?)
             .map_err(Error::input_display)?,
@@ -432,22 +527,9 @@ pub(super) fn observe(path: &Path) -> Result<Option<Entry>> {
         Err(error) => return Err(Error::input_display(error)),
     };
     let entry = if meta.is_file() {
-        let mut file = File::open(path).map_err(Error::input_display)?;
-        let mut hasher = Sha256::new();
-        let mut buffer = [0; 65536];
-        loop {
-            let count = file.read(&mut buffer).map_err(Error::input_display)?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
-        }
+        let file = File::open(path).map_err(Error::input_display)?;
         Entry::File {
-            hash: hasher
-                .finalize()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
+            hash: digest_reader(file)?,
             executable: meta.permissions().mode() & 0o111 != 0,
         }
     } else if meta.is_dir() {
@@ -478,22 +560,9 @@ pub(super) fn observe_at(parent: &Directory, name: &std::ffi::OsStr) -> Result<O
     };
     let entry = match stat.st_mode & libc::S_IFMT {
         libc::S_IFREG => {
-            let mut file = parent.open_file(name).map_err(Error::input_display)?;
-            let mut hasher = Sha256::new();
-            let mut buffer = [0; 65536];
-            loop {
-                let count = file.read(&mut buffer).map_err(Error::input_display)?;
-                if count == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..count]);
-            }
+            let file = parent.open_file(name).map_err(Error::input_display)?;
             Entry::File {
-                hash: hasher
-                    .finalize()
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect(),
+                hash: digest_reader(file)?,
                 executable: stat.st_mode & 0o111 != 0,
             }
         }
@@ -538,6 +607,16 @@ mod tests {
         assert_eq!(History::load(home.path()).unwrap().id, history.id);
         assert!(history.save(home.path(), &Fingerprint::Absent).is_err());
         let path = home.path().join(".skillator/rsync/state.json");
+        assert_eq!(history.version, 2);
+        let mut obsolete = serde_json::to_value(&history).unwrap();
+        obsolete["version"] = serde_json::json!(1);
+        fs::write(&path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
+        assert!(History::load(home.path()).is_err());
+        let mut invalid = serde_json::to_value(&history).unwrap();
+        invalid["peers"][new_id().unwrap()] =
+            serde_json::json!({ "files": {}, "contexts": {}, "user": {} });
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(History::load(home.path()).is_err());
         fs::write(&path, b"{\"version\":99,\"id\":null,\"peers\":{}}").unwrap();
         assert!(History::load(home.path()).is_err());
         assert!(fs::read_to_string(&path).unwrap().contains("99"));
@@ -701,5 +780,20 @@ mod tests {
             fs::read_to_string(outside.path().join("file")).unwrap(),
             "outside"
         );
+    }
+
+    #[test]
+    fn user_materialization_directory_and_its_physical_alias_are_not_transferable() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".agents/skills")).unwrap();
+        fs::create_dir_all(home.path().join("library")).unwrap();
+        std::os::unix::fs::symlink(
+            home.path().join(".agents/skills"),
+            home.path().join("library/user-alias"),
+        )
+        .unwrap();
+        assert!(!transferable(home.path(), ".agents/skills/demo/SKILL.md").unwrap());
+        assert!(!transferable(home.path(), "library/user-alias/demo/SKILL.md").unwrap());
+        assert!(transferable(home.path(), ".agents/skills-other/demo/SKILL.md").unwrap());
     }
 }

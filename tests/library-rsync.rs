@@ -106,7 +106,7 @@ fn protocol_observation_is_framed_and_write_free() {
         .clone();
     let value: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(value["result"], "snapshot");
-    assert_eq!(value["snapshot"]["protocol"], 4);
+    assert_eq!(value["snapshot"]["protocol"], 5);
     assert!(fs::read_dir(home.path()).unwrap().next().is_none());
 }
 
@@ -295,6 +295,34 @@ fn rsync_server_pins_stages_across_shell_transport_with_spaced_homes() {
         "---\nname: demo\ndescription: Original\n---\n",
     )
     .unwrap();
+    let support = ".skillator/library/demo/support's file.txt";
+    let executable = ".skillator/library/demo/run.sh";
+    let empty = ".skillator/library/demo/empty";
+    fs::write(local.path().join(support), "initial supporting content\n").unwrap();
+    fs::write(local.path().join(executable), "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(
+        local.path().join(executable),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::write(local.path().join(empty), "").unwrap();
+    std::os::unix::fs::symlink(
+        "support's file.txt",
+        local.path().join(".skillator/library/demo/support-link"),
+    )
+    .unwrap();
+    // User configuration and copied materializations are not synchronization inputs.
+    for (home, contents) in [
+        (local.path(), "local malformed user configuration"),
+        (
+            remote.path(),
+            "different remote malformed user configuration",
+        ),
+    ] {
+        fs::create_dir_all(home.join(".agents/skills/local-only")).unwrap();
+        fs::write(home.join(".agents/skillator.yaml"), contents).unwrap();
+        fs::write(home.join(".agents/skills/local-only/SKILL.md"), contents).unwrap();
+    }
     let sync = || {
         Command::cargo_bin("skillator")
             .unwrap()
@@ -309,6 +337,24 @@ fn rsync_server_pins_stages_across_shell_transport_with_spaced_homes() {
         fs::read_to_string(&remote_skill).unwrap(),
         fs::read_to_string(&local_skill).unwrap()
     );
+    assert_eq!(
+        fs::read_to_string(remote.path().join(support)).unwrap(),
+        "initial supporting content\n"
+    );
+    assert_eq!(fs::read(remote.path().join(empty)).unwrap(), b"");
+    assert_eq!(
+        fs::metadata(remote.path().join(executable))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111,
+        0o111
+    );
+    assert_eq!(
+        fs::read_link(remote.path().join(".skillator/library/demo/support-link")).unwrap(),
+        std::path::Path::new("support's file.txt")
+    );
+    fs::write(remote.path().join(support), "remote supporting edit\n").unwrap();
     fs::write(
         &remote_skill,
         "---\nname: demo\ndescription: Remote edit\n---\n",
@@ -324,4 +370,24 @@ fn rsync_server_pins_stages_across_shell_transport_with_spaced_homes() {
             .unwrap()
             .contains("Remote edit")
     );
+    assert_eq!(
+        fs::read_to_string(local.path().join(support)).unwrap(),
+        "remote supporting edit\n"
+    );
+    for (home, contents) in [
+        (local.path(), "local malformed user configuration"),
+        (
+            remote.path(),
+            "different remote malformed user configuration",
+        ),
+    ] {
+        assert_eq!(
+            fs::read_to_string(home.join(".agents/skillator.yaml")).unwrap(),
+            contents
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".agents/skills/local-only/SKILL.md")).unwrap(),
+            contents
+        );
+    }
 }

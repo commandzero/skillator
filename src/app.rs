@@ -7,9 +7,7 @@ use crate::config::{
     save_repository, save_target_registry,
 };
 use crate::domain::{MaterializationKind, SkillDirectoryKey, SkillKey, SkillPath, SourceKey};
-use crate::library::{
-    LibrarySnapshot, SkillValidity, expand_location, scan_library, scan_library_within,
-};
+use crate::library::{LibrarySnapshot, SkillValidity, expand_location, scan_library};
 use crate::reconcile::{
     Action, ApplyResult, Authorization, Outcome, Plan, PreparedPlan, Safety, TargetBusy,
     TargetLocks, execute, prepare_apply, prepare_check, prepare_transition,
@@ -695,59 +693,6 @@ fn load_library_snapshot(
             }),
         })
         .collect::<Vec<_>>();
-    Ok((snapshot, diagnostics))
-}
-
-fn load_remote_library_snapshot(
-    paths: &AppPaths,
-    config: &LibraryConfig,
-) -> Result<(LibrarySnapshot, Vec<ReportDiagnostic>), WorkflowError> {
-    let home = paths.home().canonicalize().map_err(fatal)?;
-    let path = paths.library_config();
-    for location in config.locations() {
-        let expanded = expand_location(
-            location.path(),
-            path.parent().unwrap(),
-            paths.home(),
-            paths.environment(),
-        )
-        .map_err(|message| WorkflowError::InvalidInput { message })?;
-        crate::remote::validate_location_path(paths.home(), &expanded).map_err(|error| {
-            WorkflowError::InvalidInput {
-                message: error.to_string(),
-            }
-        })?;
-        if let Ok(physical) = expanded.canonicalize()
-            && (physical == home || !physical.starts_with(&home))
-        {
-            return Err(WorkflowError::InvalidInput {
-                message: "remote library location is outside the user home".into(),
-            });
-        }
-    }
-    let snapshot = scan_library_within(config, &path, paths.home(), paths.environment(), &home);
-    if snapshot
-        .diagnostics()
-        .iter()
-        .any(|diagnostic| diagnostic.code == "location_outside_home")
-    {
-        return Err(WorkflowError::InvalidInput {
-            message: "remote library location is outside the user home".into(),
-        });
-    }
-    if snapshot.locations().iter().any(|location| {
-        location.resolved().is_some_and(|physical| {
-            physical == home
-                || !physical.starts_with(&home)
-                || (location.available()
-                    && physical.canonicalize().is_ok_and(|now| now != physical))
-        })
-    }) {
-        return Err(WorkflowError::InvalidInput {
-            message: "remote library location changed or escaped the user home".into(),
-        });
-    }
-    let diagnostics = library_diagnostics(&snapshot);
     Ok((snapshot, diagnostics))
 }
 
@@ -2723,83 +2668,6 @@ impl PreparedUserScopeSave {
 }
 
 impl UserScopeWorkflow {
-    /// Remote callers already hold the user lock after all-host preflight.
-    pub(crate) fn save_remote(
-        paths: &AppPaths,
-        staged: RepositoryConfig,
-        expected: Fingerprint,
-        locks: TargetLocks,
-        check: bool,
-        library_config: &LibraryConfig,
-    ) -> Result<CommandReport, WorkflowError> {
-        let session = Self::load(paths)?;
-        if session.fingerprint != expected {
-            return Err(WorkflowError::InvalidInput {
-                message: "user configuration changed after observation".into(),
-            });
-        }
-        let (library, diagnostics) = load_remote_library_snapshot(paths, library_config)?;
-        let prepared = crate::reconcile::prepare_transition_with_locks(
-            &session.target,
-            &session.config,
-            &staged,
-            &library,
-            locks,
-        )?;
-        let mut prepared = PreparedUserScopeSave {
-            target: session.target,
-            staged,
-            expected,
-            library,
-            prepared,
-            diagnostics,
-        };
-        let guarded_diagnostics: Vec<_> = prepared
-            .plan()
-            .items()
-            .iter()
-            .filter(|item| item.safety() == Safety::Guarded)
-            .map(|item| ReportDiagnostic {
-                code: "not_authorized".into(),
-                severity: "warning".into(),
-                message: item.reason().into(),
-                data: Some(BTreeMap::from([(
-                    "path".into(),
-                    display_path(prepared.target.root(), item.path()),
-                )])),
-            })
-            .collect();
-        prepared.diagnostics.extend(guarded_diagnostics);
-        if check {
-            return Ok(prepared.check());
-        }
-        if prepared.rejects_apply(false) {
-            let mut report = prepared.rejected_apply_report();
-            for change in &mut report.changes {
-                if change.outcome == ReportOutcome::WouldApply {
-                    change.outcome = ReportOutcome::NotAuthorized;
-                }
-            }
-            return Ok(report);
-        }
-        let configuration_changed = prepared.expected
-            != Fingerprint::for_bytes(
-                RepositoryConfigCodec::render(&prepared.staged)
-                    .expect("validated configuration renders")
-                    .as_bytes(),
-            );
-        let mut report = Self::commit_save(paths, prepared, Authorization::SafeOnly)?;
-        if configuration_changed {
-            report.changes.push(ReportChange {
-                path: ".agents/skillator.yaml".into(),
-                action: "write_user_configuration".into(),
-                safety: "safe".into(),
-                outcome: ReportOutcome::Applied,
-            });
-        }
-        Ok(report)
-    }
-
     pub fn inspect(paths: &AppPaths) -> Result<ScopeEnablementsReport, WorkflowError> {
         let session = Self::load(paths)?;
         if session.first_run {
@@ -3030,23 +2898,6 @@ fn load_target_repository(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn remote_library_scan_rejects_escaped_missing_location() {
-        let home = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), home.path().join("escape")).unwrap();
-        let config = LibraryConfig::new(vec![crate::config::LibraryLocationConfig::new(
-            "~/escape/new".into(),
-            Vec::new(),
-            false,
-        )])
-        .unwrap();
-        let error =
-            load_remote_library_snapshot(&AppPaths::new(home.path().into()), &config).unwrap_err();
-        assert!(error.to_string().contains("escapes"), "{error}");
-        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
-    }
 
     #[test]
     fn library_writers_share_the_rsync_user_home_lock() {

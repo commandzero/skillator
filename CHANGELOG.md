@@ -6,7 +6,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ### Added
 
-- Synchronize library skills and user selections across configured SSH hosts with exact-commit Git bootstrap, explicit conflict and missing-file policies, read-only previews, and recoverable publication.
+- Synchronize library content across configured SSH hosts with batched transfers, exact-commit Git bootstrap, explicit conflict and missing-file policies, read-only previews, and recoverable publication; user selections and materializations stay local (#32).
 - Update Library repositories with fast-forward-only pulls using `skillator library update`, with a preview before making changes (#31).
 - Automatically synchronize newly populated linked worktrees with an opt-in Git hook installed by `skillator hook install` (#20).
 

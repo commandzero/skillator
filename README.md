@@ -77,7 +77,7 @@ skillator targets prune --check
 skillator sync --check
 skillator sync
 
-# Synchronize libraries and user selections with configured SSH hosts.
+# Synchronize library content with configured SSH hosts; user selections stay local.
 skillator library rsync --check
 skillator library rsync --hosts build,development
 

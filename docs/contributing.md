@@ -42,7 +42,7 @@ Changes to broader draft standards do not silently change this contract.
 Keep the product as one crate until a real consumer or dependency boundary justifies a split.
 The repository checker is a Cargo example using existing development dependencies; it adds no installed command.
 
-Unsafe code is denied by default. The private filesystem module calls atomic rename APIs absent from the standard library.
+Unsafe code is denied by default. The private filesystem module uses atomic rename APIs and descriptor-relative directory operations absent from the standard library. Remote transport binds rsync subprocesses to verified directory descriptors with `fchdir`, so replacing a staging path cannot redirect a transfer.
 The private update-process module uses POSIX signal handlers, process-group signals, and nonblocking pipe flags to bound Git pull subprocesses.
 Keep CString lifetime, signal ownership, descriptor lifetime, and platform-flag safety explanations next to each unsafe block. Expand this exception only with a documented need and focused behavior tests.
 

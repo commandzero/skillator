@@ -3,9 +3,7 @@ use super::{
     state::{self, Entry, History},
 };
 use crate::app::AppPaths;
-use crate::config::{
-    LibraryConfig, LibraryConfigCodec, LoadResult, RepositoryConfig, RepositoryConfigCodec,
-};
+use crate::config::{LibraryConfig, LibraryConfigCodec, LoadResult};
 use crate::library::{SkillValidity, SourceKind, scan_library};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,11 +56,7 @@ pub(super) struct Snapshot {
     pub physical_paths: BTreeMap<String, String>,
     #[serde(default)]
     pub acquisition_aliases: BTreeMap<String, String>,
-    pub user_directories: BTreeSet<String>,
-    pub user: BTreeMap<String, String>,
-    pub user_present: bool,
     pub library_hash: Option<String>,
-    pub user_hash: Option<String>,
     pub problems: Vec<String>,
 }
 
@@ -103,78 +97,6 @@ fn parse_load<T: Clone>(loaded: LoadResult<T>, empty: T) -> Result<T> {
     }
 }
 
-pub(super) fn user(paths: &AppPaths) -> Result<RepositoryConfig> {
-    parse_load(
-        state::read_contained(paths.home(), ".agents/skillator.yaml")?
-            .as_deref()
-            .map(RepositoryConfigCodec::parse)
-            .unwrap_or(LoadResult::Missing),
-        RepositoryConfig::empty(),
-    )
-}
-
-pub(super) fn user_entries(config: &RepositoryConfig) -> Result<BTreeMap<String, String>> {
-    let mut entries = BTreeMap::new();
-    for directory in config.skill_directories() {
-        entries.insert(
-            format!("directory/{}", directory.key()),
-            serde_json::to_string(&(directory.path().as_str(), directory.label()))
-                .map_err(Error::input_display)?,
-        );
-    }
-    for enablement in config.enablements() {
-        let key = serde_json::to_string(&(
-            enablement.directory().as_str(),
-            enablement.skill().source().as_str(),
-            enablement.skill().path().as_str(),
-        ))
-        .map_err(Error::input_display)?;
-        entries.insert(
-            format!("enablement/{key}"),
-            serde_json::to_string(&enablement.materialization()).map_err(Error::input_display)?,
-        );
-    }
-    Ok(entries)
-}
-
-pub(super) fn user_from_entries(entries: &BTreeMap<String, String>) -> Result<RepositoryConfig> {
-    use crate::config::SkillDirectoryConfig;
-    use crate::domain::{
-        Enablement, MaterializationKind, RepositoryRelativePath, SkillDirectoryKey, SkillKey,
-        SkillPath, SourceKey,
-    };
-    let mut directories = Vec::new();
-    let mut enablements = Vec::new();
-    for (key, value) in entries {
-        if let Some(key) = key.strip_prefix("directory/") {
-            let (path, label): (String, Option<String>) =
-                serde_json::from_str(value).map_err(Error::input_display)?;
-            directories.push(SkillDirectoryConfig::new(
-                SkillDirectoryKey::parse(key).map_err(Error::input_display)?,
-                RepositoryRelativePath::parse(path).map_err(Error::input_display)?,
-                label,
-            ));
-        } else if let Some(key) = key.strip_prefix("enablement/") {
-            let (directory, source, skill): (String, String, String) =
-                serde_json::from_str(key).map_err(Error::input_display)?;
-            let mode: MaterializationKind =
-                serde_json::from_str(value).map_err(Error::input_display)?;
-            enablements.push(Enablement::new(
-                SkillDirectoryKey::parse(directory).map_err(Error::input_display)?,
-                SkillKey::new(
-                    SourceKey::parse(source).map_err(Error::input_display)?,
-                    SkillPath::parse(skill).map_err(Error::input_display)?,
-                ),
-                mode,
-            ));
-        } else {
-            return Err(Error::input("unknown user state entry"));
-        }
-    }
-    RepositoryConfig::new(directories, enablements)
-        .map_err(|issues| Error::input(format!("invalid merged user state: {issues:?}")))
-}
-
 pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
     let config = library(paths)?;
     let home = paths.home().canonicalize().map_err(Error::input_display)?;
@@ -192,8 +114,6 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
             ));
         }
     }
-    let user_config = user(paths)?;
-    let mut user_directories = user_directories(paths.home(), &user_config)?;
     let history = History::load(paths.home())?;
     let library_snapshot = scan_library(
         &config,
@@ -422,7 +342,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
                     .is_ignore()
         });
         for path in source.committed.keys().cloned().collect::<Vec<_>>() {
-            if !outside_user_directories(paths.home(), &path, &user_directories)? {
+            if !state::transferable(paths.home(), &path)? {
                 source.committed.remove(&path);
             }
         }
@@ -432,8 +352,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
             }
             let logical = root.join(skill);
             let skill_path = state::home_relative(paths.home(), &logical)?;
-            if !outside_user_directories(paths.home(), &skill_path, &user_directories)? {
-                user_directories.insert(skill_path);
+            if !state::transferable(paths.home(), &skill_path)? {
                 continue;
             }
             if !logical.exists() {
@@ -472,7 +391,6 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
                     home: paths.home(),
                     boundary: &real,
                     exclusions: &exclusions,
-                    user_directories: &user_directories,
                     nested_roots: &nested_roots,
                 },
                 &logical,
@@ -482,9 +400,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
         }
         for peer in history.peers.values() {
             for path in peer.files.keys() {
-                if !state::transferable(paths.home(), path)?
-                    || !outside_user_directories(paths.home(), path, &user_directories)?
-                {
+                if !state::transferable(paths.home(), path)? {
                     continue;
                 }
                 if path.starts_with(&format!("{}/", source.root)) {
@@ -508,7 +424,6 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
         }
     }
     sources.sort_by(|a, b| (&a.root, &a.key).cmp(&(&b.root, &b.key)));
-    let user_bytes = state::read_contained(paths.home(), ".agents/skillator.yaml")?;
     let mut physical_paths = BTreeMap::new();
     for source in &sources {
         for (path, entry) in &source.files {
@@ -566,7 +481,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
     }
     Ok(Snapshot {
         available_locations,
-        protocol: 4,
+        protocol: 5,
         version: env!("CARGO_PKG_VERSION").into(),
         home: paths.home().canonicalize().map_err(Error::input_display)?,
         history,
@@ -574,12 +489,8 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
         sources,
         physical_paths,
         acquisition_aliases,
-        user_directories,
-        user: user_entries(&user_config)?,
-        user_present: user_bytes.is_some(),
         library_hash: state::read_contained(paths.home(), ".skillator/library.yaml")?
             .map(|bytes| state::digest(&bytes)),
-        user_hash: user_bytes.map(|bytes| state::digest(&bytes)),
         problems,
     })
 }
@@ -641,7 +552,6 @@ struct CollectionScope<'a> {
     home: &'a Path,
     boundary: &'a Path,
     exclusions: &'a ignore::gitignore::Gitignore,
-    user_directories: &'a BTreeSet<String>,
     nested_roots: &'a BTreeSet<String>,
 }
 
@@ -663,9 +573,7 @@ fn collect(
     if within_nested_source(&path, scope.nested_roots) {
         return Ok(());
     }
-    if !state::transferable(scope.home, &path)?
-        || !outside_user_directories(scope.home, &path, scope.user_directories)?
-    {
+    if !state::transferable(scope.home, &path)? {
         return Ok(());
     }
     let actual = state::contained(scope.home, &path)?;
@@ -722,61 +630,12 @@ fn collect(
     Ok(())
 }
 
-pub(super) fn user_directories(home: &Path, config: &RepositoryConfig) -> Result<BTreeSet<String>> {
-    let mut directories = BTreeSet::from([".agents/skills".into()]);
-    directories.extend(
-        config
-            .skill_directories()
-            .iter()
-            .map(|directory| directory.path().as_str().to_owned()),
-    );
-    for directory in directories.clone() {
-        if let Some(path) = state::observation_path(home, &directory)? {
-            let physical = if path.exists() {
-                path.canonicalize().map_err(Error::input_display)?
-            } else {
-                path
-            };
-            directories.insert(state::home_relative(home, &physical)?);
-        }
-    }
-    Ok(directories)
-}
-
-pub(super) fn outside_user_directories(
-    home: &Path,
-    path: &str,
-    directories: &BTreeSet<String>,
-) -> Result<bool> {
-    let protected = |path: &Path| {
-        directories
-            .iter()
-            .any(|directory| path.starts_with(directory))
-    };
-    if protected(state::relative(path)?) {
-        return Ok(false);
-    }
-    let Some(actual) = state::observation_path(home, path)? else {
-        return Ok(true);
-    };
-    let physical = if actual.exists() {
-        actual.canonicalize().map_err(Error::input_display)?
-    } else {
-        actual
-    };
-    Ok(!protected(
-        physical
-            .strip_prefix(home.canonicalize().map_err(Error::input_display)?)
-            .map_err(Error::input_display)?,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn symlinked_library_and_user_configuration_are_rejected_before_snapshot() {
+    fn user_configuration_is_not_a_snapshot_input() {
         let home = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let paths = AppPaths::new(home.path().into());
@@ -787,23 +646,40 @@ mod tests {
             "version: 1\nlocations: []\n",
         )
         .unwrap();
-        fs::write(
-            outside.path().join("skillator.yaml"),
-            "version: 1\nskill_directories: []\nenablements: []\n",
-        )
-        .unwrap();
+        fs::write(outside.path().join("skillator.yaml"), "not valid YAML: [").unwrap();
         std::os::unix::fs::symlink(outside.path().join("library.yaml"), paths.library_config())
             .unwrap();
         std::os::unix::fs::symlink(outside.path().join("skillator.yaml"), paths.user_config())
             .unwrap();
-        assert!(library(&paths).is_err());
-        assert!(user(&paths).is_err());
         assert!(inspect(&paths, &[]).is_err());
         fs::remove_file(paths.library_config()).unwrap();
-        assert!(inspect(&paths, &[]).is_err());
+        assert!(inspect(&paths, &[]).is_ok());
+        fs::remove_file(paths.user_config()).unwrap();
+        fs::write(paths.user_config(), "invalid: [").unwrap();
+        assert!(inspect(&paths, &[]).is_ok());
         assert_eq!(
             fs::read_to_string(outside.path().join("library.yaml")).unwrap(),
             "version: 1\nlocations: []\n"
+        );
+    }
+
+    #[test]
+    fn default_user_materializations_are_not_library_content() {
+        let home = tempfile::tempdir().unwrap();
+        super::super::test_support::write_skill(home.path(), ".agents/skills/demo", "local");
+        super::super::test_support::configure_library(home.path(), ".agents/skills");
+        fs::create_dir_all(home.path().join(".agents")).unwrap();
+        fs::write(home.path().join(".agents/skillator.yaml"), "invalid: [").unwrap();
+        let observed = inspect(&AppPaths::new(home.path().into()), &[]).unwrap();
+        assert!(
+            observed
+                .sources
+                .iter()
+                .all(|source| source.files.is_empty())
+        );
+        assert_eq!(
+            fs::read_to_string(home.path().join(".agents/skills/demo/SKILL.md")).unwrap(),
+            "---\nname: demo\ndescription: A demonstration skill\n---\nlocal\n"
         );
     }
 
@@ -856,13 +732,11 @@ mod tests {
         let mut files = BTreeMap::new();
 
         std::os::unix::fs::symlink("assets", skill.join("shortcut")).unwrap();
-        let user_directories = BTreeSet::new();
         let nested_roots = BTreeSet::new();
         let scope = CollectionScope {
             home: home.path(),
             boundary: &boundary,
             exclusions: &exclusions,
-            user_directories: &user_directories,
             nested_roots: &nested_roots,
         };
         collect(&scope, &skill.join("shortcut"), &mut files, true).unwrap();
@@ -1211,7 +1085,6 @@ mod tests {
                 ..
             })
         )));
-        assert!(observed.user.is_empty());
     }
     #[test]
     fn environment_paths_are_portable_and_unmerged_indexes_block_the_source() {

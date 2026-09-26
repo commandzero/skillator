@@ -216,26 +216,6 @@ pub fn scan_library(
     home: &Path,
     environment: &BTreeMap<String, String>,
 ) -> LibrarySnapshot {
-    scan_library_with_limit(config, config_path, home, environment, None)
-}
-
-pub(crate) fn scan_library_within(
-    config: &LibraryConfig,
-    config_path: &Path,
-    home: &Path,
-    environment: &BTreeMap<String, String>,
-    boundary: &Path,
-) -> LibrarySnapshot {
-    scan_library_with_limit(config, config_path, home, environment, Some(boundary))
-}
-
-fn scan_library_with_limit(
-    config: &LibraryConfig,
-    config_path: &Path,
-    home: &Path,
-    environment: &BTreeMap<String, String>,
-    boundary: Option<&Path>,
-) -> LibrarySnapshot {
     let mut snapshot = LibrarySnapshot {
         locations: Vec::new(),
         sources: BTreeMap::new(),
@@ -298,19 +278,6 @@ fn scan_library_with_limit(
                 continue;
             }
         };
-        if boundary.is_some_and(|home| canonical == home || !canonical.starts_with(home)) {
-            snapshot.locations.push(LibraryLocation {
-                expression: location_config.path().to_owned(),
-                resolved: Some(canonical.clone()),
-                available: false,
-            });
-            snapshot.diagnostics.push(LibraryDiagnostic {
-                code: "location_outside_home",
-                message: "remote library location is outside the user home".into(),
-                path: Some(canonical),
-            });
-            continue;
-        }
         for (other_index, other, other_allowed) in &resolved_locations {
             if path_overlap(&canonical, other) {
                 let allowed = location_config.allow_overlap() && *other_allowed;

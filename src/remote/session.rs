@@ -1,9 +1,10 @@
 use super::{
     Error, Result, process,
     snapshot::{self, Location, Snapshot, Source},
+    stage::Stage,
     state::{self, Baseline, Entry, History},
 };
-use crate::app::{AppPaths, CommandReport, UserScopeWorkflow};
+use crate::app::AppPaths;
 #[cfg(test)]
 use crate::config::save_library;
 use crate::config::{Fingerprint, LibraryConfigCodec, LibraryLocationConfig};
@@ -56,11 +57,6 @@ pub(super) enum Request {
         locations: Vec<Location>,
         expected: Option<String>,
     },
-    User {
-        entries: BTreeMap<String, String>,
-        expected: Option<String>,
-        check: bool,
-    },
     Acknowledge {
         peers: BTreeMap<String, Baseline>,
         aliases: BTreeMap<String, String>,
@@ -87,9 +83,6 @@ pub(super) enum Response {
     Exported {
         path: String,
     },
-    User {
-        report: CommandReport,
-    },
     Ok,
     Error {
         code: u8,
@@ -100,12 +93,10 @@ pub(super) enum Response {
 pub(super) struct Session {
     pub paths: AppPaths,
     last: Option<(Snapshot, Vec<Source>, String)>,
-    stage: Option<PathBuf>,
-    stage_identity: Option<(u64, u64)>,
+    stage: Option<Stage>,
     stage_parent: Option<Directory>,
     session_lock: Option<File>,
     user_lock: Option<TargetLocks>,
-    user_reconciled: bool,
     history: History,
     history_expected: Fingerprint,
 }
@@ -116,11 +107,9 @@ impl Session {
             paths,
             last: None,
             stage: None,
-            stage_identity: None,
             stage_parent: None,
             session_lock: None,
             user_lock: None,
-            user_reconciled: false,
             history: History::default(),
             history_expected: Fingerprint::Absent,
         }
@@ -186,8 +175,8 @@ impl Session {
                 }
                 let stage_dir = self.open_stage()?;
                 let name = state::new_id()?;
-                let stage = self.stage.as_ref().unwrap().join(&name);
-                copy_entry_at(
+                let stage = self.stage.as_ref().unwrap().path().join(&name);
+                state::copy_entry_at(
                     &source_parent,
                     source_name,
                     &stage_dir,
@@ -226,62 +215,6 @@ impl Session {
                 self.register(&locations, expected)?;
                 Ok(Response::Ok)
             }
-            Request::User {
-                entries,
-                expected,
-                check,
-            } => {
-                let library_bytes =
-                    state::read_contained(self.paths.home(), ".skillator/library.yaml")?;
-                if library_bytes.as_ref().map(|bytes| state::digest(bytes))
-                    != self
-                        .last
-                        .as_ref()
-                        .ok_or_else(|| Error::input("inspect before reconciling user state"))?
-                        .0
-                        .library_hash
-                {
-                    return Err(Error::input(
-                        "library configuration changed after observation",
-                    ));
-                }
-                let library = snapshot::library_from_bytes(library_bytes.as_deref())?;
-                let bytes = state::read_contained(self.paths.home(), ".agents/skillator.yaml")?;
-                if bytes.as_ref().map(|bytes| state::digest(bytes)) != expected {
-                    return Err(Error::input("user configuration changed after observation"));
-                }
-                let fingerprint = bytes
-                    .as_deref()
-                    .map(Fingerprint::for_bytes)
-                    .unwrap_or(Fingerprint::Absent);
-                let desired = snapshot::user_from_entries(&entries)?;
-                let target = Target::user(self.paths.home()).map_err(Error::input_display)?;
-                let locks = if check {
-                    TargetLocks::acquire(&[&target]).map_err(|_| Error::busy())?
-                } else {
-                    self.require_active()?;
-                    if self.user_reconciled {
-                        return Err(Error::input(
-                            "user state already reconciled in this session",
-                        ));
-                    }
-                    self.user_reconciled = true;
-                    self.user_lock
-                        .as_ref()
-                        .ok_or_else(|| Error::input("user-home lock was not reserved"))?
-                        .clone()
-                };
-                let report = UserScopeWorkflow::save_remote(
-                    &self.paths,
-                    desired,
-                    fingerprint,
-                    locks,
-                    check,
-                    &library,
-                )
-                .map_err(Error::input_display)?;
-                Ok(Response::User { report })
-            }
             Request::Acknowledge {
                 peers,
                 aliases,
@@ -311,12 +244,6 @@ impl Session {
                             return Err(Error::input("content changed before acknowledgement"));
                         }
                     }
-                    let user = snapshot::user_entries(&snapshot::user(&self.paths)?)?;
-                    for (key, value) in &baseline.user {
-                        if user.get(key) != value.as_ref() {
-                            return Err(Error::input("user state changed before acknowledgement"));
-                        }
-                    }
                 }
                 for (root, reference) in &provenance {
                     let observed = self
@@ -342,7 +269,6 @@ impl Session {
                     let target = self.history.peers.entry(peer).or_default();
                     target.files.extend(baseline.files);
                     target.contexts.extend(baseline.contexts);
-                    target.user.extend(baseline.user);
                 }
                 if aliases.values().any(|id| !state::valid_id(id)) {
                     return Err(Error::input("invalid alias identity"));
@@ -382,8 +308,7 @@ impl Session {
             self.user_lock = None;
             return Err(Error::input("participant changed after preflight; retry"));
         }
-        // An earlier session can still hold its history lock after user reconciliation.
-        // Reserve an existing lock without creating persistent state during this phase.
+        // Reserve an existing history lock without creating persistent state during this phase.
         if self.session_lock.is_none() {
             let root = state::contained(self.paths.home(), ".skillator/rsync/session.lock")?;
             let parent =
@@ -444,15 +369,21 @@ impl Session {
         let opened_stage = parent
             .open_dir(std::ffi::OsStr::new(&stage_name))
             .map_err(Error::input_display)?;
-        self.stage_identity = Some(opened_stage.identity().map_err(Error::input_display)?);
-        self.stage = Some(stage.clone());
+        let identity = opened_stage.identity().map_err(Error::input_display)?;
+        let home = self
+            .paths
+            .home()
+            .canonicalize()
+            .map_err(Error::input_display)?;
+        let descriptor = Stage::new(&home, &stage, identity)?;
+        descriptor.open()?;
+        self.stage = Some(descriptor);
         self.stage_parent = Some(parent);
-        self.validate_stage_root()?;
         Ok(Response::Begun {
             id,
             stage: stage.to_string_lossy().into_owned(),
-            device: self.stage_identity.unwrap().0,
-            inode: self.stage_identity.unwrap().1,
+            device: identity.0,
+            inode: identity.1,
             recovered,
         })
     }
@@ -467,45 +398,23 @@ impl Session {
     }
 
     fn validate_stage_root(&self) -> Result<&Path> {
-        self.require_active()?;
-        let stage = self.stage.as_deref().unwrap();
-        let metadata = fs::symlink_metadata(stage).map_err(|_| {
-            Error::input("synchronization stage changed after Begin; abort and recover")
-        })?;
-        if !metadata.file_type().is_dir()
-            || self.stage_identity != Some((metadata.dev(), metadata.ino()))
-            || stage.canonicalize().map_err(Error::input_display)? != stage
-        {
-            return Err(Error::input(
-                "synchronization stage changed after Begin; abort and recover",
-            ));
-        }
-        state::home_relative(self.paths.home(), stage)?;
-        Ok(stage)
+        let stage = self
+            .stage
+            .as_ref()
+            .ok_or_else(|| Error::input("begin after successful preflight before writing"))?;
+        stage.open()?;
+        Ok(stage.path())
     }
 
     fn open_stage(&self) -> Result<Directory> {
-        let stage = self.validate_stage_root()?;
-        let directory = self
-            .stage_parent
+        self.stage
             .as_ref()
-            .unwrap()
-            .open_dir(stage.file_name().unwrap())
-            .map_err(Error::input_display)?;
-        if Some(directory.identity().map_err(Error::input_display)?) != self.stage_identity {
-            return Err(Error::input(
-                "synchronization stage changed after Begin; abort and recover",
-            ));
-        }
-        Ok(directory)
+            .ok_or_else(|| Error::input("begin after successful preflight before writing"))?
+            .open()
     }
 
     fn authorize_path(&self, path: &str) -> Result<()> {
-        let directories =
-            snapshot::user_directories(self.paths.home(), &snapshot::user(&self.paths)?)?;
-        if !state::transferable(self.paths.home(), path)?
-            || !snapshot::outside_user_directories(self.paths.home(), path, &directories)?
-        {
+        if !state::transferable(self.paths.home(), path)? {
             return Err(Error::input("administrative paths cannot be transferred"));
         }
         let snapshot = &self
@@ -1006,7 +915,7 @@ impl Session {
                 if state::observe_at(&stage_dir, stage_name)?.as_ref() != Some(desired) {
                     return Err(Error::input("staged content does not match planned value"));
                 }
-                copy_entry_at(&stage_dir, stage_name, &directory, sibling_name, desired)?;
+                state::copy_entry_at(&stage_dir, stage_name, &directory, sibling_name, desired)?;
             }
         }
         if !matches!(state::contained(self.paths.home(), path), Ok(current) if current == destination)
@@ -1103,9 +1012,9 @@ impl Session {
         {
             (|| -> Result<()> {
                 let parent = self.stage_parent.as_ref().unwrap();
-                let name = stage.file_name().unwrap();
+                let name = stage.path().file_name().unwrap();
                 let opened = parent.open_dir(name).map_err(Error::input_display)?;
-                if Some(opened.identity().map_err(Error::input_display)?) != self.stage_identity {
+                if opened.identity().map_err(Error::input_display)? != stage.identity() {
                     return Err(Error::input("synchronization stage changed during cleanup"));
                 }
                 if !opened
@@ -1123,9 +1032,7 @@ impl Session {
         };
         self.stage = None;
         self.stage_parent = None;
-        self.stage_identity = None;
         self.user_lock = None;
-        self.user_reconciled = false;
         self.session_lock = None;
         stage_valid.and(cleanup)
     }
@@ -1371,38 +1278,6 @@ fn hash_optional(path: &Path) -> Result<Option<String>> {
     Ok(state::read_optional(path)?.map(|bytes| state::digest(&bytes)))
 }
 
-fn copy_entry_at(
-    source_parent: &Directory,
-    source_name: &std::ffi::OsStr,
-    parent: &Directory,
-    name: &std::ffi::OsStr,
-    entry: &Entry,
-) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    match entry {
-        Entry::File { executable, .. } => {
-            let mut input = source_parent
-                .open_file(source_name)
-                .map_err(Error::input_display)?;
-            let mut output = parent.create_file(name).map_err(Error::input_display)?;
-            std::io::copy(&mut input, &mut output).map_err(Error::input_display)?;
-            output
-                .set_permissions(fs::Permissions::from_mode(if *executable {
-                    0o755
-                } else {
-                    0o644
-                }))
-                .map_err(Error::input_display)?;
-            output.sync_all().map_err(Error::input_display)?;
-        }
-        Entry::Link { target } => parent
-            .symlink(name, std::ffi::OsStr::new(target))
-            .map_err(Error::input_display)?,
-        Entry::Directory => parent.create_dir(name).map_err(Error::input_display)?,
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1411,14 +1286,8 @@ mod tests {
     fn alias_publication_rejects_administrative_and_staging_names() {
         let home = tempfile::tempdir().unwrap();
         let local = home.path().join(".skillator/library");
-        let external = home.path().join("Development/skills/demo");
         fs::create_dir_all(&local).unwrap();
-        fs::create_dir_all(&external).unwrap();
-        fs::write(
-            external.join("SKILL.md"),
-            "---\nname: demo\ndescription: External skill\n---\n",
-        )
-        .unwrap();
+        super::super::test_support::write_skill(home.path(), "Development/skills/demo", "");
         fs::write(
             home.path().join(".skillator/library.yaml"),
             "version: 1\nlocations:\n - path: '~/.skillator/library'\n - path: '~/Development/skills'\n",
@@ -1448,18 +1317,9 @@ mod tests {
     fn setup() -> (tempfile::TempDir, Session, PathBuf) {
         let home = tempfile::tempdir().unwrap();
         let skill = home.path().join(".skillator/library/demo");
-        fs::create_dir_all(&skill).unwrap();
-        fs::write(
-            skill.join("SKILL.md"),
-            "---\nname: demo\ndescription: Session test\n---\n",
-        )
-        .unwrap();
+        super::super::test_support::write_skill(home.path(), ".skillator/library/demo", "");
         fs::write(skill.join("data"), "original").unwrap();
-        fs::write(
-            home.path().join(".skillator/library.yaml"),
-            "version: 1\nlocations:\n - path: './library'\n",
-        )
-        .unwrap();
+        super::super::test_support::configure_library(home.path(), ".skillator/library");
         let mut session = Session::new(AppPaths::new(home.path().into()));
         let Response::Snapshot { token, .. } = session
             .handle(Request::Inspect {
@@ -1654,55 +1514,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_user_save_rejects_edits_after_the_request_fingerprint_check() {
-        for present in [false, true] {
-            let home = tempfile::tempdir().unwrap();
-            let paths = AppPaths::new(home.path().into());
-            fs::create_dir_all(paths.user_config().parent().unwrap()).unwrap();
-            let original = crate::config::RepositoryConfigCodec::render(
-                &crate::config::RepositoryConfig::user_first_run(),
-            )
-            .unwrap();
-            if present {
-                fs::write(paths.user_config(), &original).unwrap();
-            }
-            let session = UserScopeWorkflow::load(&paths).unwrap();
-            let expected = state::fingerprint(&paths.user_config()).unwrap();
-            let edited = [b"# concurrent edit\n".as_slice(), original.as_bytes()].concat();
-            fs::write(paths.user_config(), &edited).unwrap();
-            let target = Target::user(home.path()).unwrap();
-            let locks = TargetLocks::acquire(&[&target]).unwrap();
-            let error = UserScopeWorkflow::save_remote(
-                &paths,
-                session.config,
-                expected,
-                locks,
-                false,
-                &crate::config::LibraryConfig::empty(),
-            )
-            .unwrap_err();
-            assert!(
-                error.to_string().contains("changed after observation"),
-                "{error}"
-            );
-            assert_eq!(fs::read(paths.user_config()).unwrap(), edited);
-        }
-    }
-
-    #[test]
     fn user_home_lock_stays_held_through_acknowledgement_and_finish() {
         let (home, mut session, _) = setup();
-        let desired = crate::config::RepositoryConfig::user_first_run();
-        let Response::User { .. } = session
-            .handle(Request::User {
-                entries: snapshot::user_entries(&desired).unwrap(),
-                expected: None,
-                check: false,
-            })
-            .unwrap()
-        else {
-            panic!("expected user reconciliation")
-        };
         let target = Target::user(home.path()).unwrap();
         assert!(TargetLocks::acquire(&[&target]).is_err());
         session
@@ -1713,60 +1526,8 @@ mod tests {
             })
             .unwrap();
         assert!(TargetLocks::acquire(&[&target]).is_err());
-        assert!(
-            session
-                .handle(Request::User {
-                    entries: snapshot::user_entries(&desired).unwrap(),
-                    expected: None,
-                    check: false,
-                })
-                .is_err()
-        );
         session.handle(Request::Finish).unwrap();
         assert!(TargetLocks::acquire(&[&target]).is_ok());
-    }
-
-    #[test]
-    fn remote_user_reconciliation_rejects_a_replaced_library_configuration() {
-        let (home, mut session, _) = setup();
-        let outside = tempfile::tempdir().unwrap();
-        let config = home.path().join(".skillator/library.yaml");
-        fs::write(
-            outside.path().join("library.yaml"),
-            format!(
-                "version: 1\nlocations: [{{path: '{}'}}]\n",
-                outside.path().display()
-            ),
-        )
-        .unwrap();
-        fs::rename(&config, config.with_extension("saved")).unwrap();
-        std::os::unix::fs::symlink(outside.path().join("library.yaml"), &config).unwrap();
-        let error = session
-            .handle(Request::User {
-                entries: BTreeMap::new(),
-                expected: None,
-                check: false,
-            })
-            .unwrap_err();
-        assert!(
-            error.message.contains("link") || error.message.contains("symbolic"),
-            "{error}"
-        );
-        assert!(!home.path().join(".agents/skillator.yaml").exists());
-        fs::remove_file(&config).unwrap();
-        fs::write(&config, "version: 1\nlocations: []\n").unwrap();
-        let error = session
-            .handle(Request::User {
-                entries: BTreeMap::new(),
-                expected: None,
-                check: false,
-            })
-            .unwrap_err();
-        assert!(
-            error.message.contains("changed after observation"),
-            "{error}"
-        );
-        assert!(!home.path().join(".agents/skillator.yaml").exists());
     }
 
     #[test]
@@ -1821,35 +1582,20 @@ mod tests {
     }
 
     #[test]
-    fn configured_user_materializations_and_physical_aliases_are_excluded() {
-        use crate::config::RepositoryConfigCodec;
+    fn static_user_materializations_and_physical_aliases_are_excluded() {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir_all(home.path().join(".skillator/library")).unwrap();
-        fs::create_dir_all(home.path().join(".agents")).unwrap();
-        let config = snapshot::user_from_entries(&BTreeMap::from([(
-            "directory/custom".into(),
-            r#"["Library/user-skills",null]"#.into(),
-        )]))
-        .unwrap();
-        fs::write(
-            home.path().join(".agents/skillator.yaml"),
-            RepositoryConfigCodec::render(&config).unwrap(),
-        )
-        .unwrap();
-        for root in [".agents/skills/demo", "Library/user-skills/demo"] {
-            fs::create_dir_all(home.path().join(root)).unwrap();
-            fs::write(
-                home.path().join(root).join("SKILL.md"),
-                "---\nname: demo\ndescription: User copy\n---\n",
-            )
-            .unwrap();
-        }
+        super::super::test_support::write_skill(home.path(), ".agents/skills/demo", "");
         std::os::unix::fs::symlink(
-            home.path().join("Library/user-skills/demo"),
+            home.path().join(".agents/skills/demo"),
             home.path().join(".skillator/library/alias"),
         )
         .unwrap();
-        fs::write(home.path().join(".skillator/library.yaml"), "version: 1\nlocations: [{path: '~/.skillator/library'}, {path: '~/.agents'}, {path: '~/Library'}]\n").unwrap();
+        fs::write(
+            home.path().join(".skillator/library.yaml"),
+            "version: 1\nlocations: [{path: '~/.skillator/library'}, {path: '~/.agents'}]\n",
+        )
+        .unwrap();
         let mut session = Session::new(AppPaths::new(home.path().into()));
         let Response::Snapshot { snapshot, .. } = session
             .handle(Request::Inspect { sources: vec![] })
@@ -1859,7 +1605,6 @@ mod tests {
         };
         for path in [
             ".agents/skills/demo/SKILL.md",
-            "Library/user-skills/demo/SKILL.md",
             ".skillator/library/alias/SKILL.md",
         ] {
             assert!(
@@ -2132,7 +1877,7 @@ mod tests {
             Directory::open_existing_parent(home.path(), &home.path().canonicalize().unwrap())
                 .unwrap();
         assert!(
-            copy_entry_at(
+            state::copy_entry_at(
                 &directory,
                 std::ffi::OsStr::new("source"),
                 &directory,

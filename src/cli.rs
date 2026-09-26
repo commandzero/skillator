@@ -44,7 +44,7 @@ enum Commands {
         #[arg(long)]
         inode: u64,
         #[arg(long)]
-        name: OsString,
+        names_hex: String,
         #[arg(last = true)]
         server_args: Vec<OsString>,
     },
@@ -84,7 +84,7 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum LibraryCommand {
-    /// Synchronize library skills and user selections with configured SSH hosts.
+    /// Synchronize library skill content with configured SSH hosts.
     Rsync(RsyncArgs),
     /// Add a directory of skills to the Library.
     Add {
@@ -375,14 +375,14 @@ pub fn run() -> ExitCode {
             stage_hex,
             device,
             inode,
-            name,
+            names_hex,
             server_args,
         }) => match crate::remote::serve_transfer(
             paths.home(),
             &stage_hex,
             device,
             inode,
-            &name,
+            &names_hex,
             &server_args,
         ) {
             Ok(()) => ExitCode::SUCCESS,

@@ -1,9 +1,11 @@
 use super::{
     Error, Result, process,
     session::{Request, Response, Session},
+    stage::Stage,
+    state,
 };
 use crate::app::AppPaths;
-use crate::fs_safety::{Directory, bind_directory};
+use crate::fs_safety::bind_directory;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -41,12 +43,6 @@ pub(super) struct Remote {
     written: Receiver<std::result::Result<(), String>>,
     output: Receiver<std::result::Result<Vec<u8>, String>>,
     destination: String,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct StageRef<'a> {
-    pub home: &'a Path,
-    pub identity: (u64, u64),
 }
 
 const SSH_OPTIONS: &[&str] = &[
@@ -210,7 +206,7 @@ impl Endpoint {
                 };
                 serde_json::from_slice(&bytes).map_err(|_| {
                     Error::input(
-                        "invalid remote response or incompatible Skillator; protocol 4 is required",
+                        "invalid remote response or incompatible Skillator; protocol 5 is required",
                     )
                 })?
             }
@@ -218,31 +214,57 @@ impl Endpoint {
         checked_response(response)
     }
 
-    pub fn pull(
-        &self,
-        exported: &str,
-        local: &Path,
-        source_stage: StageRef<'_>,
-        local_stage: StageRef<'_>,
-    ) -> Result<()> {
-        transfer(self, exported, local, false, source_stage, local_stage)
+    pub fn pull_batch(&mut self, names: &[String], source: &Stage, local: &Stage) -> Result<()> {
+        self.transfer_batch(names, source, local, false)
     }
 
-    pub fn push(
+    pub fn push_batch(&mut self, names: &[String], local: &Stage, target: &Stage) -> Result<()> {
+        self.transfer_batch(names, target, local, true)
+    }
+
+    fn transfer_batch(
         &mut self,
-        local: &Path,
-        staged: &str,
-        local_stage: StageRef<'_>,
-        target_stage: StageRef<'_>,
+        names: &[String],
+        endpoint_stage: &Stage,
+        local_stage: &Stage,
+        push: bool,
     ) -> Result<()> {
-        if !matches!(self.request(Request::ValidateStage)?, Response::Ok) {
-            return Err(Error::input("unexpected stage validation response"));
+        if names.is_empty() {
+            return Ok(());
         }
-        transfer(self, staged, local, true, target_stage, local_stage)?;
-        if !matches!(self.request(Request::ValidateStage)?, Response::Ok) {
-            return Err(Error::input("unexpected stage validation response"));
+        let mut seen = std::collections::BTreeSet::new();
+        if names.len() > 64
+            || names
+                .iter()
+                .any(|name| !state::valid_id(name) || !seen.insert(name))
+        {
+            return Err(Error::input("invalid transfer manifest"));
         }
-        Ok(())
+        self.request_stage_validation()?;
+        if matches!(self, Endpoint::Local(_)) {
+            endpoint_stage.open()?;
+        }
+        local_stage.open()?;
+        let transfer_result = transfer(self, names, endpoint_stage, local_stage, push);
+        let local_validation = local_stage.open();
+        let endpoint_validation = if matches!(self, Endpoint::Local(_)) {
+            endpoint_stage.open().map(|_| ())
+        } else {
+            Ok(())
+        };
+        let remote_validation = self.request_stage_validation();
+        transfer_result?;
+        local_validation?;
+        endpoint_validation?;
+        remote_validation
+    }
+
+    fn request_stage_validation(&mut self) -> Result<()> {
+        if matches!(self.request(Request::ValidateStage)?, Response::Ok) {
+            Ok(())
+        } else {
+            Err(Error::input("unexpected stage validation response"))
+        }
     }
 }
 
@@ -253,7 +275,7 @@ fn checked_response(response: Response) -> Result<Response> {
             message,
         } => Err(Error { code, message }),
         Response::Error { .. } => Err(Error::input(
-            "invalid remote error status or incompatible Skillator; protocol 4 is required",
+            "invalid remote error status or incompatible Skillator; protocol 5 is required",
         )),
         response => Ok(response),
     }
@@ -296,7 +318,7 @@ fn probe_version(remote: &Remote) -> Error {
                 Error::input("Skillator is not installed on remote host")
             } else {
                 Error::input(format!(
-                    "Skillator version {version:?} is incompatible; synchronization protocol 4 is required on remote host"
+                    "Skillator version {version:?} is incompatible; synchronization protocol 5 is required on remote host"
                 ))
             }
         }
@@ -308,53 +330,33 @@ fn probe_version(remote: &Remote) -> Error {
 
 fn transfer(
     endpoint: &Endpoint,
-    endpoint_path: &str,
-    local: &Path,
+    names: &[String],
+    endpoint_stage: &Stage,
+    local_stage: &Stage,
     push: bool,
-    endpoint_stage: StageRef<'_>,
-    local_stage: StageRef<'_>,
 ) -> Result<()> {
     #[cfg(test)]
     if let Endpoint::Fault { inner, fault } = endpoint {
         if matches!(fault, Fault::Transfer) {
             return Err(Error::input("injected transfer failure"));
         }
-        return transfer(
-            inner,
-            endpoint_path,
-            local,
-            push,
-            endpoint_stage,
-            local_stage,
-        );
+        return transfer(inner, names, endpoint_stage, local_stage, push);
     }
-    let opened_local_stage = open_transfer_stage(local_stage.home, local, local_stage.identity)?;
-    let local_name = transfer_name(local)?;
-    let endpoint_path = Path::new(endpoint_path);
-    let endpoint_name = transfer_name(endpoint_path)?;
+    let opened_local_stage = local_stage.open()?;
     if matches!(endpoint, Endpoint::Local(_)) {
-        let opened_endpoint_stage =
-            open_transfer_stage(endpoint_stage.home, endpoint_path, endpoint_stage.identity)?;
-        let (source, source_name, target, target_name) = if push {
-            (
-                &opened_local_stage,
-                local_name,
-                &opened_endpoint_stage,
-                endpoint_name,
-            )
+        let opened_endpoint_stage = endpoint_stage.open()?;
+        let (source, target) = if push {
+            (&opened_local_stage, &opened_endpoint_stage)
         } else {
-            (
-                &opened_endpoint_stage,
-                endpoint_name,
-                &opened_local_stage,
-                local_name,
-            )
+            (&opened_endpoint_stage, &opened_local_stage)
         };
-        return copy_local_entry(source, source_name, target, target_name);
+        for name in names {
+            state::copy_transfer_entry_at(source, name.as_ref(), target, name.as_ref())?;
+        }
+        return Ok(());
     }
     let mut command = Command::new("rsync");
-    // We quote the remote pathname as one shell argument below. Newer rsync
-    // otherwise escapes those quotes a second time; older rsync ignores this.
+    // Older and newer rsync both receive the quoted stage as one literal path.
     command.env("RSYNC_OLD_ARGS", "1");
     command.args([
         "--links",
@@ -371,113 +373,49 @@ fn transfer(
             command
                 .arg("-e")
                 .arg(format!("ssh {}", SSH_OPTIONS.join(" ")));
-            let stage = endpoint_path.parent().unwrap();
+            let manifest = names.join("\n");
             command.arg("--rsync-path").arg(format!(
-                "skillator __rsync-server --stage-hex {} --device {} --inode {} --name {} --",
-                hex_encode(stage.as_os_str().as_bytes()),
-                endpoint_stage.identity.0,
-                endpoint_stage.identity.1,
-                endpoint_name.to_string_lossy(),
+                "skillator __rsync-server --stage-hex {} --device {} --inode {} --names-hex {} --",
+                state::hex(endpoint_stage.path().as_os_str().as_bytes()),
+                endpoint_stage.identity().0,
+                endpoint_stage.identity().1,
+                state::hex(manifest.as_bytes()),
             ));
-            // rsync passes this path through the remote shell; quote it as one literal.
             format!(
                 "{}:{}",
                 remote.destination,
-                shell_quote(&endpoint_path.to_string_lossy())
+                shell_quote(&format!("{}/", endpoint_stage.path().display()))
             )
         }
     };
     bind_directory(&mut command, opened_local_stage.as_file());
-    command.arg("--");
     if push {
-        command.arg(local_name).arg(endpoint_arg);
+        command.arg("--");
+        for name in names {
+            command.arg(name);
+        }
+        command.arg(endpoint_arg);
     } else {
-        command.arg(endpoint_arg).arg(local_name);
+        // Rsync accepts one remote source argument. An explicit flat file list is
+        // provided by --files-from without consuming its protocol stdin.
+        let manifest_name = state::new_id()?;
+        let mut manifest_file = opened_local_stage
+            .create_file(manifest_name.as_ref())
+            .map_err(Error::input_display)?;
+        for name in names {
+            writeln!(manifest_file, "{name}").map_err(Error::input_display)?;
+        }
+        manifest_file.sync_all().map_err(Error::input_display)?;
+        command.arg(format!("--files-from={manifest_name}"));
+        command.arg("--").arg(endpoint_arg).arg("./");
+        let result = process::capture(&mut command);
+        opened_local_stage
+            .remove(manifest_name.as_ref())
+            .map_err(Error::input_display)?;
+        result?;
+        return Ok(());
     }
     process::capture(&mut command)?;
-    Ok(())
-}
-
-fn transfer_name(path: &Path) -> Result<&std::ffi::OsStr> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| Error::input("invalid transfer path"))?;
-    if !super::state::valid_id(&name.to_string_lossy()) {
-        return Err(Error::input("invalid transfer entry name"));
-    }
-    Ok(name)
-}
-
-fn open_transfer_stage(home: &Path, path: &Path, identity: (u64, u64)) -> Result<Directory> {
-    let stage = path
-        .parent()
-        .ok_or_else(|| Error::input("invalid transfer stage"))?;
-    let root = stage
-        .parent()
-        .ok_or_else(|| Error::input("invalid transfer stage"))?;
-    let canonical_home = home.canonicalize().map_err(Error::input_display)?;
-    if !home.is_absolute()
-        || !path.is_absolute()
-        || (root != home.join(".skillator/rsync")
-            && root != canonical_home.join(".skillator/rsync"))
-        || !stage
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .strip_prefix("stage-")
-            .is_some_and(super::state::valid_id)
-    {
-        return Err(Error::input("invalid transfer stage"));
-    }
-    let checked_stage = canonical_home
-        .join(".skillator/rsync")
-        .join(stage.file_name().unwrap());
-    let directory = Directory::open_existing_parent(&canonical_home, &checked_stage)
-        .map_err(Error::input_display)?;
-    if directory.identity().map_err(Error::input_display)? != identity {
-        return Err(Error::input(
-            "synchronization stage changed after Begin; abort and recover",
-        ));
-    }
-    Ok(directory)
-}
-
-fn copy_local_entry(
-    source: &Directory,
-    source_name: &std::ffi::OsStr,
-    target: &Directory,
-    target_name: &std::ffi::OsStr,
-) -> Result<()> {
-    let metadata = source.metadata(source_name).map_err(Error::input_display)?;
-    match metadata.st_mode & libc::S_IFMT {
-        libc::S_IFREG => {
-            let mut input = source
-                .open_file(source_name)
-                .map_err(Error::input_display)?;
-            let mut output = target
-                .create_file(target_name)
-                .map_err(Error::input_display)?;
-            std::io::copy(&mut input, &mut output).map_err(Error::input_display)?;
-            output
-                .set_permissions(
-                    input
-                        .metadata()
-                        .map_err(Error::input_display)?
-                        .permissions(),
-                )
-                .map_err(Error::input_display)?;
-            output.sync_all().map_err(Error::input_display)?;
-        }
-        libc::S_IFLNK => {
-            let link = source
-                .read_link(source_name)
-                .map_err(Error::input_display)?;
-            target
-                .symlink(target_name, &link)
-                .map_err(Error::input_display)?;
-        }
-        _ => return Err(Error::input("unsupported transfer entry")),
-    }
     Ok(())
 }
 
@@ -486,33 +424,110 @@ pub(crate) fn serve_transfer(
     stage_hex: &str,
     device: u64,
     inode: u64,
-    name: &std::ffi::OsStr,
+    names_hex: &str,
     server_args: &[std::ffi::OsString],
 ) -> Result<()> {
     let stage_text = String::from_utf8(hex_decode(stage_hex)?).map_err(Error::input_display)?;
-    let stage = Path::new(&stage_text);
-    let path = stage.join(name);
-    transfer_name(&path)?;
+    let home = home.canonicalize().map_err(Error::input_display)?;
+    let stage = Stage::new(&home, Path::new(&stage_text), (device, inode))?;
+    let names = String::from_utf8(hex_decode(names_hex)?).map_err(Error::input_display)?;
+    let names: Vec<&str> = names.split('\n').collect();
+    let mut unique = std::collections::BTreeSet::new();
+    if names.is_empty()
+        || names.len() > 64
+        || names
+            .iter()
+            .any(|name| !state::valid_id(name) || !unique.insert(*name))
+    {
+        return Err(Error::input("invalid transfer manifest"));
+    }
+    let stage_path = format!("{}/", stage.path().display());
+    let sender = server_args.get(1).is_some_and(|arg| arg == "--sender");
     if server_args.first().is_none_or(|arg| arg != "--server")
-        || server_args.last().is_none_or(|arg| arg != path.as_os_str())
+        || server_args
+            .last()
+            .is_none_or(|arg| arg.as_os_str() != std::ffi::OsStr::new(&stage_path))
+        || server_args.len() < 4
+        || server_args[server_args.len() - 2] != "."
+        || server_args[1..server_args.len() - 2].iter().any(|arg| {
+            let arg = arg.to_string_lossy();
+            // GNU rsync appends protocol capabilities after `e.`. Their `L`
+            // does not enable --copy-links; an `L` before that suffix does.
+            let options = arg
+                .split_once("e.")
+                .map_or(arg.as_ref(), |(options, _)| options);
+            // --files-from implicitly enables these sender options. The file
+            // list is still confined to the isolated, explicit payload view.
+            if sender
+                && matches!(
+                    arg.as_ref(),
+                    "--files-from=-" | "--from0" | "--relative" | "--dirs"
+                )
+            {
+                return false;
+            }
+            (arg != "--sender" && !arg.starts_with('-'))
+                || arg.contains('/')
+                || arg.contains("delete")
+                || arg.contains("files-from")
+                || arg.contains("relative")
+                || arg.contains("recursive")
+                || arg.contains("copy-links")
+                || arg.contains("copy-dirlinks")
+                || (arg.starts_with('-') && !arg.starts_with("--") && options.contains('L'))
+        })
     {
         return Err(Error::input("invalid rsync server request"));
     }
-    let directory = open_transfer_stage(home, &path, (device, inode))?;
-    let mut command = Command::new("rsync");
-    command
-        .args(&server_args[..server_args.len() - 1])
-        .arg(name);
-    bind_directory(&mut command, directory.as_file());
-    let status = command.status().map_err(Error::input_display)?;
-    if !status.success() {
-        return Err(Error::input(format!("rsync server failed with {status}")));
-    }
-    Ok(())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    let directory = stage.open()?;
+    // Rsync's sender trusts its client's file list. Restrict its filesystem view
+    // to this manifest, so a forged file list cannot read other stage exports.
+    // Likewise, a receiver cannot write any sibling in the real stage.
+    let view_name = format!("batch-{}", state::new_id()?);
+    directory
+        .create_dir(view_name.as_ref())
+        .map_err(Error::input_display)?;
+    let result = (|| {
+        let view = directory
+            .open_dir(view_name.as_ref())
+            .map_err(Error::input_display)?;
+        if sender {
+            for name in &names {
+                state::copy_transfer_entry_at(&directory, name.as_ref(), &view, name.as_ref())?;
+            }
+        }
+        let mut command = Command::new("rsync");
+        command
+            .args(&server_args[..server_args.len() - 1])
+            .arg("./");
+        bind_directory(&mut command, view.as_file());
+        let status = command.status().map_err(Error::input_display)?;
+        if !status.success() {
+            return Err(Error::input(format!("rsync server failed with {status}")));
+        }
+        stage.open()?;
+        if !sender {
+            let found = view.entries().map_err(Error::input_display)?;
+            if found.len() != names.len()
+                || found
+                    .iter()
+                    .any(|name| !unique.contains(name.to_string_lossy().as_ref()))
+            {
+                return Err(Error::input(
+                    "rsync transferred unlisted or missing payloads",
+                ));
+            }
+            for name in &names {
+                state::copy_transfer_entry_at(&view, name.as_ref(), &directory, name.as_ref())?;
+            }
+        }
+        Ok(())
+    })();
+    let cleanup = directory
+        .remove_tree(view_name.as_ref())
+        .map_err(Error::input_display);
+    result?;
+    cleanup
 }
 
 fn hex_decode(value: &str) -> Result<Vec<u8>> {
@@ -649,7 +664,8 @@ mod tests {
         else {
             panic!()
         };
-        let payload = Path::new(&source_stage).join(super::super::state::new_id().unwrap());
+        let name = super::super::state::new_id().unwrap();
+        let payload = Path::new(&source_stage).join(&name);
         std::fs::write(&payload, "private skill content").unwrap();
         let mut endpoint = Endpoint::local(AppPaths::new(home.path().into()));
         let Response::Snapshot { token, .. } = endpoint
@@ -669,26 +685,57 @@ mod tests {
         else {
             panic!()
         };
+        let source_stage = Stage::new(
+            &source_home.path().canonicalize().unwrap(),
+            Path::new(&source_stage),
+            (source_dev, source_ino),
+        )
+        .unwrap();
+        let target_stage = Stage::new(
+            &home.path().canonicalize().unwrap(),
+            Path::new(&stage),
+            (device, inode),
+        )
+        .unwrap();
         let saved = format!("{stage}-saved");
         std::fs::rename(&stage, &saved).unwrap();
         std::os::unix::fs::symlink(outside.path(), &stage).unwrap();
-        let target = format!("{stage}/incoming");
         let error = endpoint
-            .push(
-                &payload,
-                &target,
-                StageRef {
-                    home: source_home.path(),
-                    identity: (source_dev, source_ino),
-                },
-                StageRef {
-                    home: home.path(),
-                    identity: (device, inode),
-                },
-            )
+            .push_batch(&[name], &source_stage, &target_stage)
             .unwrap_err();
         assert!(error.message.contains("stage changed"), "{error}");
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn remote_server_rejects_link_dereferencing_and_external_manifests() {
+        let home = tempfile::tempdir().unwrap();
+        let stage = home
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(".skillator/rsync")
+            .join(format!("stage-{}", state::new_id().unwrap()));
+        let encoded = state::hex(stage.as_os_str().as_bytes());
+        let names = state::hex(state::new_id().unwrap().as_bytes());
+        for option in [
+            "-L",
+            "-ltpcLe.LsfxCIvu",
+            "--copy-links",
+            "--copy-dirlinks",
+            "--files-from=/etc/passwd",
+        ] {
+            let arguments = [
+                "--server".into(),
+                "--sender".into(),
+                option.into(),
+                ".".into(),
+                format!("{}/", stage.display()).into(),
+            ];
+            let error =
+                serve_transfer(home.path(), &encoded, 0, 0, &names, &arguments).unwrap_err();
+            assert_eq!(error.message, "invalid rsync server request", "{option}");
+        }
     }
 
     #[test]
@@ -697,19 +744,22 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let stage = home
             .path()
+            .canonicalize()
+            .unwrap()
             .join(".skillator/rsync")
             .join(format!("stage-{}", super::super::state::new_id().unwrap()));
         std::fs::create_dir_all(&stage).unwrap();
         let metadata = stage.metadata().unwrap();
         use std::os::unix::fs::MetadataExt;
         let name = super::super::state::new_id().unwrap();
-        let path = stage.join(&name);
         let arguments = [
             "--server".into(),
+            "-log".into(),
             ".".into(),
-            path.as_os_str().to_os_string(),
+            format!("{}/", stage.display()).into(),
         ];
-        let encoded = hex_encode(stage.as_os_str().as_bytes());
+        let encoded = state::hex(stage.as_os_str().as_bytes());
+        let names = state::hex(name.as_bytes());
         std::fs::rename(&stage, stage.with_extension("saved")).unwrap();
         std::fs::create_dir(&stage).unwrap();
         let error = serve_transfer(
@@ -717,7 +767,7 @@ mod tests {
             &encoded,
             metadata.dev(),
             metadata.ino(),
-            name.as_ref(),
+            &names,
             &arguments,
         )
         .unwrap_err();
@@ -730,7 +780,7 @@ mod tests {
                 &encoded,
                 metadata.dev(),
                 metadata.ino(),
-                name.as_ref(),
+                &names,
                 &arguments
             )
             .is_err()
@@ -750,18 +800,18 @@ mod tests {
         std::fs::create_dir_all(&stage).unwrap();
         let identity = stage.metadata().unwrap();
         let name = super::super::state::new_id().unwrap();
-        let path = stage.join(&name);
         let args = [
             "--server".into(),
+            "-log".into(),
             ".".into(),
-            path.as_os_str().to_os_string(),
+            format!("{}/", stage.display()).into(),
         ];
         let error = serve_transfer(
             home.path(),
-            &hex_encode(stage.as_os_str().as_bytes()),
+            &state::hex(stage.as_os_str().as_bytes()),
             identity.dev(),
             identity.ino(),
-            name.as_ref(),
+            &state::hex(name.as_bytes()),
             &args,
         )
         .unwrap_err();
