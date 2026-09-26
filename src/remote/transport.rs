@@ -43,6 +43,12 @@ pub(super) struct Remote {
     destination: String,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct StageRef<'a> {
+    pub home: &'a Path,
+    pub identity: (u64, u64),
+}
+
 const SSH_OPTIONS: &[&str] = &[
     "-oBatchMode=yes",
     "-oStrictHostKeyChecking=yes",
@@ -216,30 +222,23 @@ impl Endpoint {
         &self,
         exported: &str,
         local: &Path,
-        source_identity: (u64, u64),
-        local_identity: (u64, u64),
+        source_stage: StageRef<'_>,
+        local_stage: StageRef<'_>,
     ) -> Result<()> {
-        transfer(
-            self,
-            exported,
-            local,
-            false,
-            source_identity,
-            local_identity,
-        )
+        transfer(self, exported, local, false, source_stage, local_stage)
     }
 
     pub fn push(
         &mut self,
         local: &Path,
         staged: &str,
-        local_identity: (u64, u64),
-        target_identity: (u64, u64),
+        local_stage: StageRef<'_>,
+        target_stage: StageRef<'_>,
     ) -> Result<()> {
         if !matches!(self.request(Request::ValidateStage)?, Response::Ok) {
             return Err(Error::input("unexpected stage validation response"));
         }
-        transfer(self, staged, local, true, target_identity, local_identity)?;
+        transfer(self, staged, local, true, target_stage, local_stage)?;
         if !matches!(self.request(Request::ValidateStage)?, Response::Ok) {
             return Err(Error::input("unexpected stage validation response"));
         }
@@ -312,8 +311,8 @@ fn transfer(
     endpoint_path: &str,
     local: &Path,
     push: bool,
-    endpoint_identity: (u64, u64),
-    local_identity: (u64, u64),
+    endpoint_stage: StageRef<'_>,
+    local_stage: StageRef<'_>,
 ) -> Result<()> {
     #[cfg(test)]
     if let Endpoint::Fault { inner, fault } = endpoint {
@@ -325,20 +324,31 @@ fn transfer(
             endpoint_path,
             local,
             push,
-            endpoint_identity,
-            local_identity,
+            endpoint_stage,
+            local_stage,
         );
     }
-    let local_stage = open_transfer_stage(local, local_identity)?;
+    let opened_local_stage = open_transfer_stage(local_stage.home, local, local_stage.identity)?;
     let local_name = transfer_name(local)?;
     let endpoint_path = Path::new(endpoint_path);
     let endpoint_name = transfer_name(endpoint_path)?;
     if matches!(endpoint, Endpoint::Local(_)) {
-        let endpoint_stage = open_transfer_stage(endpoint_path, endpoint_identity)?;
+        let opened_endpoint_stage =
+            open_transfer_stage(endpoint_stage.home, endpoint_path, endpoint_stage.identity)?;
         let (source, source_name, target, target_name) = if push {
-            (&local_stage, local_name, &endpoint_stage, endpoint_name)
+            (
+                &opened_local_stage,
+                local_name,
+                &opened_endpoint_stage,
+                endpoint_name,
+            )
         } else {
-            (&endpoint_stage, endpoint_name, &local_stage, local_name)
+            (
+                &opened_endpoint_stage,
+                endpoint_name,
+                &opened_local_stage,
+                local_name,
+            )
         };
         return copy_local_entry(source, source_name, target, target_name);
     }
@@ -365,8 +375,8 @@ fn transfer(
             command.arg("--rsync-path").arg(format!(
                 "skillator __rsync-server --stage-hex {} --device {} --inode {} --name {} --",
                 hex_encode(stage.as_os_str().as_bytes()),
-                endpoint_identity.0,
-                endpoint_identity.1,
+                endpoint_stage.identity.0,
+                endpoint_stage.identity.1,
                 endpoint_name.to_string_lossy(),
             ));
             // rsync passes this path through the remote shell; quote it as one literal.
@@ -377,7 +387,7 @@ fn transfer(
             )
         }
     };
-    bind_directory(&mut command, local_stage.as_file());
+    bind_directory(&mut command, opened_local_stage.as_file());
     command.arg("--");
     if push {
         command.arg(local_name).arg(endpoint_arg);
@@ -398,15 +408,18 @@ fn transfer_name(path: &Path) -> Result<&std::ffi::OsStr> {
     Ok(name)
 }
 
-fn open_transfer_stage(path: &Path, identity: (u64, u64)) -> Result<Directory> {
+fn open_transfer_stage(home: &Path, path: &Path, identity: (u64, u64)) -> Result<Directory> {
     let stage = path
         .parent()
         .ok_or_else(|| Error::input("invalid transfer stage"))?;
     let root = stage
         .parent()
         .ok_or_else(|| Error::input("invalid transfer stage"))?;
-    if root.file_name() != Some(std::ffi::OsStr::new("rsync"))
-        || root.parent().and_then(Path::file_name) != Some(std::ffi::OsStr::new(".skillator"))
+    let canonical_home = home.canonicalize().map_err(Error::input_display)?;
+    if !home.is_absolute()
+        || !path.is_absolute()
+        || (root != home.join(".skillator/rsync")
+            && root != canonical_home.join(".skillator/rsync"))
         || !stage
             .file_name()
             .unwrap()
@@ -416,12 +429,11 @@ fn open_transfer_stage(path: &Path, identity: (u64, u64)) -> Result<Directory> {
     {
         return Err(Error::input("invalid transfer stage"));
     }
-    let home = root.parent().unwrap().parent().unwrap();
-    let relative = stage.strip_prefix(home).map_err(Error::input_display)?;
-    let canonical_home = home.canonicalize().map_err(Error::input_display)?;
-    let directory =
-        Directory::open_existing_parent(&canonical_home, &canonical_home.join(relative))
-            .map_err(Error::input_display)?;
+    let checked_stage = canonical_home
+        .join(".skillator/rsync")
+        .join(stage.file_name().unwrap());
+    let directory = Directory::open_existing_parent(&canonical_home, &checked_stage)
+        .map_err(Error::input_display)?;
     if directory.identity().map_err(Error::input_display)? != identity {
         return Err(Error::input(
             "synchronization stage changed after Begin; abort and recover",
@@ -470,6 +482,7 @@ fn copy_local_entry(
 }
 
 pub(crate) fn serve_transfer(
+    home: &Path,
     stage_hex: &str,
     device: u64,
     inode: u64,
@@ -485,7 +498,7 @@ pub(crate) fn serve_transfer(
     {
         return Err(Error::input("invalid rsync server request"));
     }
-    let directory = open_transfer_stage(&path, (device, inode))?;
+    let directory = open_transfer_stage(home, &path, (device, inode))?;
     let mut command = Command::new("rsync");
     command
         .args(&server_args[..server_args.len() - 1])
@@ -661,7 +674,18 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), &stage).unwrap();
         let target = format!("{stage}/incoming");
         let error = endpoint
-            .push(&payload, &target, (source_dev, source_ino), (device, inode))
+            .push(
+                &payload,
+                &target,
+                StageRef {
+                    home: source_home.path(),
+                    identity: (source_dev, source_ino),
+                },
+                StageRef {
+                    home: home.path(),
+                    identity: (device, inode),
+                },
+            )
             .unwrap_err();
         assert!(error.message.contains("stage changed"), "{error}");
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
@@ -689,6 +713,7 @@ mod tests {
         std::fs::rename(&stage, stage.with_extension("saved")).unwrap();
         std::fs::create_dir(&stage).unwrap();
         let error = serve_transfer(
+            home.path(),
             &encoded,
             metadata.dev(),
             metadata.ino(),
@@ -701,6 +726,7 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), &stage).unwrap();
         assert!(
             serve_transfer(
+                home.path(),
                 &encoded,
                 metadata.dev(),
                 metadata.ino(),
@@ -710,6 +736,37 @@ mod tests {
             .is_err()
         );
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn remote_server_rejects_a_stage_beneath_another_home() {
+        use std::os::unix::fs::MetadataExt;
+        let home = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let stage = other
+            .path()
+            .join(".skillator/rsync")
+            .join(format!("stage-{}", super::super::state::new_id().unwrap()));
+        std::fs::create_dir_all(&stage).unwrap();
+        let identity = stage.metadata().unwrap();
+        let name = super::super::state::new_id().unwrap();
+        let path = stage.join(&name);
+        let args = [
+            "--server".into(),
+            ".".into(),
+            path.as_os_str().to_os_string(),
+        ];
+        let error = serve_transfer(
+            home.path(),
+            &hex_encode(stage.as_os_str().as_bytes()),
+            identity.dev(),
+            identity.ino(),
+            name.as_ref(),
+            &args,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("invalid transfer stage"), "{error}");
+        assert!(std::fs::read_dir(&stage).unwrap().next().is_none());
     }
 
     #[test]

@@ -377,7 +377,14 @@ pub fn run() -> ExitCode {
             inode,
             name,
             server_args,
-        }) => match crate::remote::serve_transfer(&stage_hex, device, inode, &name, &server_args) {
+        }) => match crate::remote::serve_transfer(
+            paths.home(),
+            &stage_hex,
+            device,
+            inode,
+            &name,
+            &server_args,
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => diagnostic(error.code, &error.to_string()),
         },

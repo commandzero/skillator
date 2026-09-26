@@ -185,15 +185,8 @@ fn save_contained_bytes_with(
             .unwrap_or(Fingerprint::Absent)
             != expected
         {
-            if parent.rename_exchange(stage_name, name).is_ok() {
-                stage_contains_prior = false;
-                let _ = parent.as_file().sync_all();
-                return Err(Error::input(
-                    "synchronization history changed during saving",
-                ));
-            }
             return Err(Error::input(format!(
-                "synchronization history changed and rollback failed; recover it from {}",
+                "synchronization history changed during saving; preserve the exchanged entries and recover them from {}",
                 path.parent().unwrap().join(stage_name).display()
             )));
         }
@@ -631,6 +624,53 @@ mod tests {
             .collect();
         assert_eq!(stages.len(), 1);
         assert_eq!(fs::read(&stages[0]).unwrap(), prior);
+    }
+
+    #[test]
+    fn history_save_retains_both_entries_when_the_exchanged_backup_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let history = History {
+            id: Some(new_id().unwrap()),
+            ..History::default()
+        };
+        history.save(home.path(), &Fingerprint::Absent).unwrap();
+        let path = home.path().join(".skillator/rsync/state.json");
+        let prior = fs::read(&path).unwrap();
+        let mut updated = history.clone();
+        updated.peers.insert(new_id().unwrap(), Baseline::default());
+        let error = updated
+            .save_with(home.path(), &Fingerprint::for_bytes(&prior), || {
+                let backup = fs::read_dir(path.parent().unwrap())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with(".skillator-rsync-")
+                    })
+                    .unwrap();
+                fs::write(backup, "intervening backup").unwrap();
+                fs::write(&path, "intervening live state").unwrap();
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("preserve the exchanged entries"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "intervening live state");
+        let backups: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".skillator-rsync-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            fs::read_to_string(&backups[0]).unwrap(),
+            "intervening backup"
+        );
     }
 
     #[test]

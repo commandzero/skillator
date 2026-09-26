@@ -1202,8 +1202,14 @@ fn sync_files(
                     match peers[*index].endpoint.pull(
                         &export,
                         &local,
-                        peers[*index].stage_identity.unwrap(),
-                        peers[0].stage_identity.unwrap(),
+                        super::transport::StageRef {
+                            home: &peers[*index].snapshot.home,
+                            identity: peers[*index].stage_identity.unwrap(),
+                        },
+                        super::transport::StageRef {
+                            home: &peers[0].snapshot.home,
+                            identity: peers[0].stage_identity.unwrap(),
+                        },
                     ) {
                         Ok(()) => {
                             if let Err(error) = peers[0].request_ok(Request::ValidateStage) {
@@ -1293,11 +1299,19 @@ fn sync_files(
                     peers[*index].stage.as_ref().unwrap(),
                     state::new_id()?
                 );
+                let local_home = peers[0].snapshot.home.clone();
+                let target_home = peers[*index].snapshot.home.clone();
                 if let Err(error) = peers[*index].endpoint.push(
                     payload,
                     &stage,
-                    peers[0].stage_identity.unwrap(),
-                    peers[*index].stage_identity.unwrap(),
+                    super::transport::StageRef {
+                        home: &local_home,
+                        identity: peers[0].stage_identity.unwrap(),
+                    },
+                    super::transport::StageRef {
+                        home: &target_home,
+                        identity: peers[*index].stage_identity.unwrap(),
+                    },
                 ) {
                     report.problem(
                         &peers[*index].alias,
