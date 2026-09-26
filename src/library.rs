@@ -406,7 +406,10 @@ fn scan_location(
         discovered.push(local);
     }
 
-    for discovered_source in discovered {
+    for mut discovered_source in discovered {
+        snapshot
+            .diagnostics
+            .append(&mut discovered_source.diagnostics);
         insert_discovered_source(snapshot, location_index, discovered_source);
     }
 }

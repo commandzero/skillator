@@ -20,6 +20,7 @@ Setup installs pinned Actionlint, OpenSpec, and OKF under the ignored `.tools` d
 ShellCheck and ripgrep must be on PATH. Rustup selects Rust 1.97.1 even when a system Cargo comes first on PATH.
 
 The full preflight runs formatting, strict Clippy, locked behavior tests, library doctests, shell and workflow checks, documentation-bundle validation, main-spec validation, and repository-tool tests.
+Preflight runs Rust tests serially within each test binary. Parallel tests that write executable fixtures and spawn subprocesses can briefly retain writable descriptors across a fork on Linux, causing `Text file busy` when another test executes a new hook. CI platform jobs still run in parallel.
 There are no optional Cargo features, so default and minimal feature sets are identical.
 
 Use `bash scripts/preflight.sh test` for another supported host or compiler.
@@ -41,8 +42,9 @@ Changes to broader draft standards do not silently change this contract.
 Keep the product as one crate until a real consumer or dependency boundary justifies a split.
 The repository checker is a Cargo example using existing development dependencies; it adds no installed command.
 
-Unsafe code is denied by default. The only exception is the private filesystem module, which calls atomic rename APIs absent from the standard library.
-Keep its CString lifetime and platform-flag safety explanations next to each unsafe block. Expand this exception only with a documented need and focused behavior tests.
+Unsafe code is denied by default. The private filesystem module calls atomic rename APIs absent from the standard library.
+The private update-process module uses POSIX signal handlers, process-group signals, and nonblocking pipe flags to bound Git pull subprocesses.
+Keep CString lifetime, signal ownership, descriptor lifetime, and platform-flag safety explanations next to each unsafe block. Expand this exception only with a documented need and focused behavior tests.
 
 ## Commits and history
 

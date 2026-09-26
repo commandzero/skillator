@@ -88,6 +88,8 @@ enum LibraryCommand {
     },
     /// Remove registered directories that no longer exist.
     Prune(MutationOutputArgs),
+    /// Fast-forward clean Library repositories; skip submodules and preserve copies.
+    Update(LibraryUpdateArgs),
     /// List directories registered with the Library.
     Locations(OutputArgs),
     /// List available skills, optionally filtered by source.
@@ -96,6 +98,15 @@ enum LibraryCommand {
         #[command(flatten)]
         output: OutputArgs,
     },
+}
+
+#[derive(Debug, clap::Args)]
+struct LibraryUpdateArgs {
+    /// Limit each pull, including transports and hooks, to this many seconds.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
+    timeout: u32,
+    #[command(flatten)]
+    output: MutationOutputArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -429,6 +440,19 @@ fn run_library_command(paths: &AppPaths, command: LibraryCommand) -> ExitCode {
                 Err(error) => diagnostic(error.code, &error.to_string()),
             }
         }
+        LibraryCommand::Update(arguments) => {
+            if let Err(code) = validate_output(&arguments.output.output) {
+                return code;
+            }
+            finish_report(
+                crate::library_update::run(
+                    paths,
+                    arguments.output.check,
+                    std::time::Duration::from_secs(u64::from(arguments.timeout)),
+                ),
+                &arguments.output.output,
+            )
+        }
         LibraryCommand::Add {
             location,
             allow_overlap,
@@ -709,6 +733,7 @@ fn hook_state_name(state: HookState) -> &'static str {
 
 fn hook_outcome_name(outcome: crate::app::ReportOutcome) -> &'static str {
     match outcome {
+        crate::app::ReportOutcome::Unchanged => "unchanged",
         crate::app::ReportOutcome::WouldApply => "would_apply",
         crate::app::ReportOutcome::WouldRequireForce => "would_require_force",
         crate::app::ReportOutcome::Applied => "applied",
@@ -993,6 +1018,12 @@ fn color_enabled(color: ColorPolicy) -> bool {
 }
 
 pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
+    if report.mode == "library_update" || report.mode == "library_update_check" {
+        return crate::library_update::render_text(
+            report,
+            is_terminal::is_terminal(std::io::stdout()),
+        );
+    }
     let color = color_enabled(color);
     if report.status == ReportStatus::InSync
         && report.changes.is_empty()
@@ -1006,6 +1037,7 @@ pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
     }
     for change in &report.changes {
         let marker = match change.outcome {
+            crate::app::ReportOutcome::Unchanged => "Unchanged",
             crate::app::ReportOutcome::WouldApply => "Would change",
             crate::app::ReportOutcome::WouldRequireForce => "Needs --force",
             crate::app::ReportOutcome::Applied => "Saved",
