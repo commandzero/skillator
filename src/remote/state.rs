@@ -514,7 +514,7 @@ pub(super) fn observe(path: &Path) -> Result<Option<Entry>> {
 }
 
 fn observe_with(path: &Path, after_metadata: impl FnOnce()) -> Result<Option<Entry>> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(error)
@@ -534,13 +534,13 @@ fn observe_with(path: &Path, after_metadata: impl FnOnce()) -> Result<Option<Ent
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
             .map_err(Error::input_display)?;
-        let meta = file.metadata().map_err(Error::input_display)?;
-        if !meta.is_file() {
-            return Err(Error::input("observed entry is no longer a regular file"));
+        let opened = file.metadata().map_err(Error::input_display)?;
+        if !opened.is_file() || (opened.dev(), opened.ino()) != (meta.dev(), meta.ino()) {
+            return Err(Error::input("file changed while observing its contents"));
         }
         Entry::File {
             hash: digest_reader(file)?,
-            executable: meta.permissions().mode() & 0o111 != 0,
+            executable: opened.mode() & 0o111 != 0,
         }
     } else if meta.is_dir() {
         Entry::Directory
@@ -622,6 +622,33 @@ pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_observation_rejects_replaced_inodes() {
+        for replace_parent in [true, false] {
+            let home = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let parent = home.path().join("source");
+            fs::create_dir(&parent).unwrap();
+            let path = parent.join("payload");
+            fs::write(&path, "original").unwrap();
+            fs::write(outside.path().join("payload"), "private content").unwrap();
+            let observed = observe_with(&path, || {
+                if replace_parent {
+                    fs::rename(&parent, home.path().join("retained")).unwrap();
+                    std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
+                } else {
+                    let replacement = home.path().join("replacement");
+                    fs::write(&replacement, "replacement").unwrap();
+                    fs::rename(replacement, &path).unwrap();
+                }
+            });
+            assert!(
+                observed.is_err(),
+                "parent swap: {replace_parent}; {observed:?}"
+            );
+        }
+    }
 
     #[test]
     fn descriptor_observation_rechecks_inode_and_mode() {

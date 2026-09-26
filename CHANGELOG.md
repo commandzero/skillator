@@ -21,7 +21,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ### Fixed
 
-- Reject files replaced by symlinks or special entries during library synchronization instead of following or blocking on them (#32).
+- Reject concurrent file or ancestor replacements before reading synchronization content, and reject special files without blocking (#32).
 - Preserve concurrent executable-mode changes during file observation (#32).
 - Require conflict resolution when different present values have mixed known and unknown synchronization history (#32).
 - Removing a user skill before user configuration exists returns an unchanged result.

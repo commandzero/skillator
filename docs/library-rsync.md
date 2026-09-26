@@ -110,7 +110,7 @@ Protocol 5 uses history format 2. Earlier unreleased protocol and history versio
 
 Each publication verifies staged content and rechecks the observed source and destination. A stale entry is preserved and reported for retry. Concurrent initiators, Library configuration saves, and `library update` share the user-home write lock.
 
-File reads reject a final symlink and validate the opened descriptor as a regular file before consuming content. Nonblocking opens prevent a concurrently substituted FIFO from hanging synchronization.
+File reads reject a final symlink and validate the opened descriptor as a regular file before consuming content. Its device and inode must match the initial metadata inspection, preventing a replacement between that inspection and opening from redirecting the read. Nonblocking opens prevent a concurrently substituted FIFO from hanging synchronization.
 
 After interruption, rerun the command. It inspects retained publication journals, restores recoverable originals where safe, and refuses to overwrite later edits. Preserve any reported journal and backup when manual recovery is required. Once the old and current values are reconciled, retry. Successful entries retain their own acknowledgements; a failed host does not cause all other hosts to roll back.
 
