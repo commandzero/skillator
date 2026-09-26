@@ -1438,6 +1438,14 @@ pub struct LibrarySession {
 
 pub struct LibraryWorkflow;
 
+/// Library writes share the user-home lock with User Scope and library rsync.
+pub(crate) fn lock_library_write(paths: &AppPaths) -> Result<TargetLocks, WorkflowError> {
+    let target = Target::user(paths.home()).map_err(|error| WorkflowError::InvalidInput {
+        message: error.to_string(),
+    })?;
+    Ok(TargetLocks::acquire(&[&target])?)
+}
+
 impl LibraryWorkflow {
     pub fn load(paths: &AppPaths) -> Result<LibrarySession, WorkflowError> {
         match load_library(&paths.library_config()).map_err(fatal)? {
@@ -1479,6 +1487,7 @@ impl LibraryWorkflow {
         if !confirmed {
             return Err(WorkflowError::Cancelled);
         }
+        let _lock = lock_library_write(paths)?;
         let snapshot = Self::snapshot(paths, staged);
         if snapshot
             .diagnostics()
@@ -1622,6 +1631,9 @@ impl LibraryWorkflow {
         allow_overlap: bool,
         mode: SyncMode,
     ) -> Result<CommandReport, WorkflowError> {
+        let _lock = (mode != SyncMode::Check)
+            .then(|| lock_library_write(paths))
+            .transpose()?;
         let session = Self::load_cli(paths)?;
         let candidate = expand_location(
             &expression,
@@ -1695,6 +1707,9 @@ impl LibraryWorkflow {
         expression: &str,
         mode: SyncMode,
     ) -> Result<CommandReport, WorkflowError> {
+        let _lock = (mode != SyncMode::Check)
+            .then(|| lock_library_write(paths))
+            .transpose()?;
         let session = Self::load_cli(paths)?;
         let original_snapshot = Self::snapshot(paths, &session.config);
         let supplied = expand_location(
@@ -1766,6 +1781,9 @@ impl LibraryWorkflow {
         paths: &AppPaths,
         mode: SyncMode,
     ) -> Result<CommandReport, WorkflowError> {
+        let _lock = (mode != SyncMode::Check)
+            .then(|| lock_library_write(paths))
+            .transpose()?;
         let session = Self::load_cli(paths)?;
         let original_snapshot = Self::snapshot(paths, &session.config);
         let library_config_path = paths.library_config();
@@ -2956,6 +2974,33 @@ fn load_target_repository(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn library_writers_share_the_rsync_user_home_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        let session = LibraryWorkflow::load(&paths).unwrap();
+        let target = Target::user(home.path()).unwrap();
+        let _lock = TargetLocks::acquire(&[&target]).unwrap();
+        assert!(matches!(
+            LibraryWorkflow::save(&paths, &session, &session.config, true),
+            Err(WorkflowError::Busy)
+        ));
+        assert!(matches!(
+            LibraryWorkflow::add_location(
+                &paths,
+                "~/skills".into(),
+                false,
+                SyncMode::Apply { force: false },
+            ),
+            Err(WorkflowError::Busy)
+        ));
+        assert!(matches!(
+            crate::library_update::run(&paths, false, std::time::Duration::from_secs(1)),
+            Err(WorkflowError::Busy)
+        ));
+        assert!(!paths.library_config().exists());
+    }
 
     #[test]
     fn canonical_skill_selector_uses_the_final_colon_boundary() {

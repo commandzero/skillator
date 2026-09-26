@@ -317,7 +317,13 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
             sources.push(source);
         }
     }
+    let source_roots: Vec<_> = sources.iter().map(|source| source.root.clone()).collect();
     for source in &mut sources {
+        let nested_roots: BTreeSet<String> = source_roots
+            .iter()
+            .filter(|root| root.starts_with(&format!("{}/", source.root)))
+            .cloned()
+            .collect();
         let root = paths.home().join(&source.root);
         let location = paths.home().join(&source.location);
         let physical_location = location.canonicalize().unwrap_or(location);
@@ -389,7 +395,10 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
         }
         let exclusions = exclusions.build().map_err(Error::input_display)?;
         source.skills.retain(|skill| {
-            !exclusions
+            !within_nested_source(
+                &Path::new(&source.root).join(skill).to_string_lossy(),
+                &nested_roots,
+            ) && !exclusions
                 .matched_path_or_any_parents(root.join(skill), true)
                 .is_ignore()
         });
@@ -398,6 +407,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
             .retain(|skill| source.skills.contains(skill));
         source.committed.retain(|path, _| {
             !state::administrative(Path::new(path))
+                && !within_nested_source(path, &nested_roots)
                 && !exclusions
                     .matched_path_or_any_parents(paths.home().join(path), false)
                     .is_ignore()
@@ -449,12 +459,15 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
                 continue;
             }
             collect(
-                paths.home(),
+                &CollectionScope {
+                    home: paths.home(),
+                    boundary: &real,
+                    exclusions: &exclusions,
+                    user_directories: &user_directories,
+                    nested_roots: &nested_roots,
+                },
                 &logical,
-                &real,
-                &exclusions,
                 &mut source.files,
-                &user_directories,
                 true,
             )?;
         }
@@ -466,6 +479,9 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
                     continue;
                 }
                 if path.starts_with(&format!("{}/", source.root)) {
+                    if within_nested_source(path, &nested_roots) {
+                        continue;
+                    }
                     let logical = paths.home().join(path);
                     if exclusions
                         .matched_path_or_any_parents(&logical, false)
@@ -606,13 +622,24 @@ fn in_skills(path: &str, skills: &BTreeSet<String>) -> bool {
         .any(|skill| skill.is_empty() || path == skill || path.starts_with(&format!("{skill}/")))
 }
 
+fn within_nested_source(path: &str, nested_roots: &BTreeSet<String>) -> bool {
+    nested_roots
+        .iter()
+        .any(|root| path == root || path.starts_with(&format!("{root}/")))
+}
+
+struct CollectionScope<'a> {
+    home: &'a Path,
+    boundary: &'a Path,
+    exclusions: &'a ignore::gitignore::Gitignore,
+    user_directories: &'a BTreeSet<String>,
+    nested_roots: &'a BTreeSet<String>,
+}
+
 fn collect(
-    home: &Path,
+    scope: &CollectionScope<'_>,
     logical: &Path,
-    boundary: &Path,
-    exclusions: &ignore::gitignore::Gitignore,
     files: &mut BTreeMap<String, Entry>,
-    user_directories: &BTreeSet<String>,
     root: bool,
 ) -> Result<()> {
     if logical.file_name().is_some_and(|name| {
@@ -623,13 +650,16 @@ fn collect(
     }) {
         return Ok(());
     }
-    let path = state::home_relative(home, logical)?;
-    if !state::transferable(home, &path)?
-        || !outside_user_directories(home, &path, user_directories)?
+    let path = state::home_relative(scope.home, logical)?;
+    if within_nested_source(&path, scope.nested_roots) {
+        return Ok(());
+    }
+    if !state::transferable(scope.home, &path)?
+        || !outside_user_directories(scope.home, &path, scope.user_directories)?
     {
         return Ok(());
     }
-    let actual = state::contained(home, &path)?;
+    let actual = state::contained(scope.home, &path)?;
     let entry = if root {
         Some(Entry::Directory)
     } else {
@@ -638,7 +668,8 @@ fn collect(
     let Some(entry) = entry else {
         return Ok(());
     };
-    if exclusions
+    if scope
+        .exclusions
         .matched_path_or_any_parents(logical, matches!(entry, Entry::Directory))
         .is_ignore()
     {
@@ -647,18 +678,15 @@ fn collect(
     match &entry {
         Entry::Directory => {
             let resolved = logical.canonicalize().map_err(Error::input_display)?;
-            if !resolved.starts_with(boundary) {
+            if !resolved.starts_with(scope.boundary) {
                 return Err(Error::input("internal skill directory escapes the skill"));
             }
             files.insert(path, entry.clone());
             for child in fs::read_dir(logical).map_err(Error::input_display)? {
                 collect(
-                    home,
+                    scope,
                     &child.map_err(Error::input_display)?.path(),
-                    boundary,
-                    exclusions,
                     files,
-                    user_directories,
                     false,
                 )?;
             }
@@ -673,7 +701,7 @@ fn collect(
                 .join(target)
                 .canonicalize()
                 .map_err(Error::input_display)?;
-            if !resolved.starts_with(boundary) {
+            if !resolved.starts_with(scope.boundary) {
                 return Err(Error::input("internal skill link escapes the skill"));
             }
             files.insert(path, entry);
@@ -787,29 +815,20 @@ mod tests {
         let mut files = BTreeMap::new();
 
         std::os::unix::fs::symlink("assets", skill.join("shortcut")).unwrap();
-        collect(
-            home.path(),
-            &skill.join("shortcut"),
-            &boundary,
-            &exclusions,
-            &mut files,
-            &BTreeSet::new(),
-            true,
-        )
-        .unwrap();
+        let user_directories = BTreeSet::new();
+        let nested_roots = BTreeSet::new();
+        let scope = CollectionScope {
+            home: home.path(),
+            boundary: &boundary,
+            exclusions: &exclusions,
+            user_directories: &user_directories,
+            nested_roots: &nested_roots,
+        };
+        collect(&scope, &skill.join("shortcut"), &mut files, true).unwrap();
         assert!(files.contains_key("library/demo/shortcut/inside.txt"));
 
         std::os::unix::fs::symlink(&unrelated, skill.join("escape")).unwrap();
-        let error = collect(
-            home.path(),
-            &skill.join("escape"),
-            &boundary,
-            &exclusions,
-            &mut files,
-            &BTreeSet::new(),
-            true,
-        )
-        .unwrap_err();
+        let error = collect(&scope, &skill.join("escape"), &mut files, true).unwrap_err();
         assert!(error.message.contains("directory escapes the skill"));
         assert!(!files.contains_key("library/demo/escape"));
         assert!(!files.contains_key("library/demo/escape/private.txt"));
@@ -1067,6 +1086,63 @@ mod tests {
                 .sources
                 .iter()
                 .all(|source| source.files.keys().all(|path| !path.contains(".git")))
+        );
+    }
+
+    #[test]
+    fn parent_skill_does_not_collect_nested_git_source_content() {
+        let home = tempfile::tempdir().unwrap();
+        let parent = home.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        fs::write(
+            parent.join("SKILL.md"),
+            "---\nname: parent\ndescription: Parent skill\n---\n",
+        )
+        .unwrap();
+        fs::write(parent.join("parent.txt"), "parent content").unwrap();
+        let nested = parent.join("nested");
+        repository(&nested);
+        fs::write(nested.join("unrelated.txt"), "outside nested skill").unwrap();
+        let paths = AppPaths::new(home.path().into());
+        fs::create_dir(home.path().join(".skillator")).unwrap();
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/parent'}]\n",
+        )
+        .unwrap();
+        let observed = inspect(&paths, &[]).unwrap();
+        let parent_source = observed
+            .sources
+            .iter()
+            .find(|source| source.root == "parent")
+            .unwrap();
+        let nested_source = observed
+            .sources
+            .iter()
+            .find(|source| source.root == "parent/nested")
+            .unwrap();
+        assert!(parent_source.files.contains_key("parent/parent.txt"));
+        assert!(
+            parent_source
+                .files
+                .keys()
+                .all(|path| !path.starts_with("parent/nested"))
+        );
+        assert!(
+            parent_source
+                .committed
+                .keys()
+                .all(|path| !path.starts_with("parent/nested"))
+        );
+        assert!(
+            nested_source
+                .files
+                .contains_key("parent/nested/demo/SKILL.md")
+        );
+        assert!(
+            !nested_source
+                .files
+                .contains_key("parent/nested/unrelated.txt")
         );
     }
 

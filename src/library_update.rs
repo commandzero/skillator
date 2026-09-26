@@ -244,6 +244,9 @@ pub(crate) fn run(
     check: bool,
     timeout: Duration,
 ) -> Result<CommandReport, WorkflowError> {
+    let _lock = (!check)
+        .then(|| crate::app::lock_library_write(paths))
+        .transpose()?;
     let config =
         match load_library(&paths.library_config()).map_err(|e| WorkflowError::InvalidInput {
             message: e.to_string(),

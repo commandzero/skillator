@@ -437,6 +437,13 @@ impl Session {
             .sources
             .iter()
             .filter(|source| {
+                if snapshot.sources.iter().any(|nested| {
+                    nested.root.len() > source.root.len()
+                        && Path::new(&nested.root).starts_with(&source.root)
+                        && Path::new(path).starts_with(&nested.root)
+                }) {
+                    return false;
+                }
                 source.skills.iter().any(|skill| {
                     let root = Path::new(&source.root).join(skill);
                     Path::new(path).starts_with(&root)

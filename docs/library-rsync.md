@@ -106,7 +106,7 @@ JSON and YAML use the normal report envelope with `mode: library_rsync`. Changes
 
 Synchronization identity and acknowledged history live under `~/.skillator/rsync/`. Do not copy this state directory between machines. A duplicated identity or replaced host is an error. Restore the original state if available. If a host was deliberately replaced, back up the initiating state and remove only that host's saved entry from the `aliases` map to permit conservative first contact. Lost shared history never authorizes automatic deletion.
 
-Each publication verifies staged content and rechecks the observed source and destination. A stale entry is preserved and reported for retry. Concurrent initiators cannot hold the same participant lock.
+Each publication verifies staged content and rechecks the observed source and destination. A stale entry is preserved and reported for retry. Concurrent initiators, Library configuration saves, and `library update` share the user-home write lock.
 
 After interruption, rerun the command. It inspects retained publication journals, restores recoverable originals where safe, and refuses to overwrite later edits. Preserve any reported journal and backup when manual recovery is required. Once the old and current values are reconciled, retry. Successful entries retain their own acknowledgements; a failed host does not cause all other hosts to roll back.
 

@@ -44,11 +44,15 @@ Store versioned synchronization state beneath `~/.skillator/rsync/`, outside the
 
 Use per-participant acknowledgements rather than one global success marker. Unselected or failed hosts retain their last acknowledged base. Baseline loss means first contact, which cannot authorize historical deletion. This costs more bookkeeping than two sequential rsync calls but prevents host order and partial failure from choosing the winner.
 
+Reserve the same user-home write lock used by Library Configuration saves and `library update` before creating session stages or publishing skill content. Release all participant locks when the session finishes or aborts. Discovery may run before lock reservation, but the locked phase reobserves every participant before planning writes.
+
 ### Paths, inventory, and transfer units
 
 Resolve existing expressions on the originating machine, prove home containment, then transfer the home-relative suffix. Preserve matching receiving registrations and append missing registrations after successful preparation. Existing exclusion or overlap disagreements block the affected Location. Registration removal is deferred; it must not imply deleting a source tree.
 
 Scope file comparison by source and skill-relative path. Include complete discovered skill trees plus historical synchronized paths so removing a manifest does not hide deletion. Keep executable bits; do not synchronize ownership, timestamps as identity, or arbitrary repository metadata. Never recurse into `.git` through rsync.
+
+Treat nested Git checkouts as independent Source boundaries. A parent skill tree cannot collect, compare, or publish files owned by a nested checkout, including paths remembered in older synchronization history. The nested source is handled under its own origin and commit validation.
 
 Materialize acquired library links as physical content on receivers and write incoming changes through the validated originating skill target without replacing its library link. Require the physical target to remain within home. Apply the existing self-contained rule to internal skill links. Deduplicate physically identical transfer targets; inconsistent logical mappings block publication.
 
