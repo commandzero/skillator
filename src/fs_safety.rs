@@ -177,14 +177,21 @@ impl Directory {
             libc::openat(
                 self.0.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
             )
         };
         if fd < 0 {
             Err(io::Error::last_os_error())
         } else {
             // SAFETY: openat returned a new descriptor owned by this File.
-            Ok(unsafe { File::from_raw_fd(fd) })
+            let file = unsafe { File::from_raw_fd(fd) };
+            if !file.metadata()?.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "entry is not a regular file",
+                ));
+            }
+            Ok(file)
         }
     }
 
@@ -436,6 +443,38 @@ fn rename_with_mode(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn replaced_regular_file_rejects_special_entries() {
+        let home = tempfile::tempdir().unwrap();
+        let parent = home.path().canonicalize().unwrap();
+        let directory = Directory::open_existing_parent(&parent, &parent).unwrap();
+        let path = parent.join("payload");
+        std::fs::write(&path, "original").unwrap();
+        assert_eq!(
+            directory.metadata(OsStr::new("payload")).unwrap().st_mode & libc::S_IFMT,
+            libc::S_IFREG
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        // Keep both ends open so the regression fails rather than hanging with
+        // the former blocking implementation.
+        let _fifo = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(directory.open_file(OsStr::new("payload")).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(directory.open_file(OsStr::new("payload")).is_err());
+    }
 
     #[test]
     fn opened_parent_keeps_publication_inside_home_after_ancestor_swap() {

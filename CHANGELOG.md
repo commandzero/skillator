@@ -17,6 +17,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ### Fixed
 
+- Reject files replaced by symlinks or special entries during library synchronization instead of following or blocking on them (#32).
 - Removing a user skill before user configuration exists returns an unchanged result.
 - Reject target-registry paths containing redundant separators, `.` or `..` components.
 

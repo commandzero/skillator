@@ -513,7 +513,11 @@ pub(super) fn home_relative(home: &Path, path: &Path) -> Result<String> {
 }
 
 pub(super) fn observe(path: &Path) -> Result<Option<Entry>> {
-    use std::os::unix::fs::PermissionsExt;
+    observe_with(path, || {})
+}
+
+fn observe_with(path: &Path, after_metadata: impl FnOnce()) -> Result<Option<Entry>> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(error)
@@ -526,8 +530,17 @@ pub(super) fn observe(path: &Path) -> Result<Option<Entry>> {
         }
         Err(error) => return Err(Error::input_display(error)),
     };
+    after_metadata();
     let entry = if meta.is_file() {
-        let file = File::open(path).map_err(Error::input_display)?;
+        let file = File::options()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(Error::input_display)?;
+        let meta = file.metadata().map_err(Error::input_display)?;
+        if !meta.is_file() {
+            return Err(Error::input("observed entry is no longer a regular file"));
+        }
         Entry::File {
             hash: digest_reader(file)?,
             executable: meta.permissions().mode() & 0o111 != 0,
@@ -595,6 +608,22 @@ pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replaced_regular_file_never_follows_external_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = home.path().join("payload");
+        let secret = outside.path().join("secret");
+        fs::write(&path, "original").unwrap();
+        fs::write(&secret, "private content").unwrap();
+        let observed = observe_with(&path, || {
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&secret, &path).unwrap();
+        });
+        assert!(observed.is_err(), "{observed:?}");
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "private content");
+    }
     #[test]
     fn history_round_trip_is_conditional_and_versions_are_preserved() {
         let home = tempfile::tempdir().unwrap();
