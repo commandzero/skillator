@@ -24,6 +24,7 @@ pub(super) enum Fault {
     Publish,
     Verification,
     Acknowledge,
+    Register,
     LockBusy,
     Begin,
     InspectActive,
@@ -149,6 +150,7 @@ impl Endpoint {
                         },
                         Fault::Publish
                     ) | (Request::Acknowledge { .. }, Fault::Acknowledge)
+                        | (Request::Register { .. }, Fault::Register)
                 ) {
                     return Err(Error::input("injected operation failure"));
                 }
@@ -188,7 +190,7 @@ impl Endpoint {
                 };
                 serde_json::from_slice(&bytes).map_err(|_| {
                     Error::input(
-                        "invalid remote response or incompatible Skillator; protocol 2 is required",
+                        "invalid remote response or incompatible Skillator; protocol 3 is required",
                     )
                 })?
             }
@@ -245,7 +247,7 @@ fn probe_version(remote: &Remote) -> Error {
                 Error::input("Skillator is not installed on remote host")
             } else {
                 Error::input(format!(
-                    "Skillator version {version:?} is incompatible; synchronization protocol 2 is required on remote host"
+                    "Skillator version {version:?} is incompatible; synchronization protocol 3 is required on remote host"
                 ))
             }
         }

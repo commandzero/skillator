@@ -1739,6 +1739,7 @@ mod tests {
                 commit: "1234567890abcdef1234567890abcdef12345678".into(),
             }),
             skills: Default::default(),
+            invalid_skills: Default::default(),
             files: Default::default(),
             committed: Default::default(),
             problems: Vec::new(),

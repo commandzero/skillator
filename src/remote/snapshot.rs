@@ -4,7 +4,7 @@ use super::{
 };
 use crate::app::AppPaths;
 use crate::config::{LibraryConfig, LoadResult, RepositoryConfig};
-use crate::library::{SourceKind, scan_library};
+use crate::library::{SkillValidity, SourceKind, scan_library};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -36,6 +36,8 @@ pub(super) struct Source {
     #[serde(default)]
     pub branch: Option<String>,
     pub skills: BTreeSet<String>,
+    #[serde(default)]
+    pub invalid_skills: BTreeSet<String>,
     pub files: BTreeMap<String, Entry>,
     pub committed: BTreeMap<String, Entry>,
     pub problems: Vec<String>,
@@ -240,6 +242,17 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
                     }
                 })
                 .collect(),
+            invalid_skills: source
+                .skills()
+                .filter(|skill| skill.validity() == SkillValidity::Invalid)
+                .map(|skill| {
+                    if skill.path() == "." {
+                        String::new()
+                    } else {
+                        skill.path().to_owned()
+                    }
+                })
+                .collect(),
             files: BTreeMap::new(),
             committed: BTreeMap::new(),
             problems: Vec::new(),
@@ -276,6 +289,9 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
             .find(|s| s.root == incoming.root && s.key == incoming.key)
         {
             found.skills.extend(incoming.skills.iter().cloned());
+            found
+                .invalid_skills
+                .extend(incoming.invalid_skills.iter().cloned());
         } else {
             let root = state::contained(paths.home(), &incoming.root)?;
             let mut source = incoming.clone();
@@ -377,6 +393,9 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
                 .matched_path_or_any_parents(root.join(skill), true)
                 .is_ignore()
         });
+        source
+            .invalid_skills
+            .retain(|skill| source.skills.contains(skill));
         source.committed.retain(|path, _| {
             !state::administrative(Path::new(path))
                 && !exclusions
@@ -522,7 +541,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
     }
     Ok(Snapshot {
         available_locations,
-        protocol: 2,
+        protocol: 3,
         version: env!("CARGO_PKG_VERSION").into(),
         home: paths.home().canonicalize().map_err(Error::input_display)?,
         history,
@@ -938,6 +957,7 @@ mod tests {
             git: None,
             branch: None,
             skills: BTreeSet::new(),
+            invalid_skills: BTreeSet::new(),
             files: BTreeMap::new(),
             committed: BTreeMap::new(),
             problems: vec![],

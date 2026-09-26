@@ -154,9 +154,9 @@ impl Participant {
         else {
             return Err(Error::input("remote did not return an observation"));
         };
-        if snapshot.protocol != 2 {
+        if snapshot.protocol != 3 {
             return Err(Error::input(format!(
-                "incompatible Skillator {} on remote host {alias}; protocol 2 is required",
+                "incompatible Skillator {} on remote host {alias}; protocol 3 is required",
                 snapshot.version
             )));
         }
@@ -292,6 +292,9 @@ fn synchronize_inner(
             }
             if let Some(reference) = sources.get_mut(&source.root) {
                 reference.skills.extend(source.skills.iter().cloned());
+                reference
+                    .invalid_skills
+                    .extend(source.invalid_skills.iter().cloned());
             }
         }
     }
@@ -608,7 +611,20 @@ fn synchronize_inner(
                     }
                 }
                 Err(error) => {
-                    report.problem(&peer.alias, "", "registration_failed", error.to_string())
+                    for location in &incoming {
+                        blocked.extend(
+                            sources
+                                .iter()
+                                .filter(|source| source.location == location.path)
+                                .map(|source| source.root.clone()),
+                        );
+                        report.problem(
+                            &peer.alias,
+                            &location.path,
+                            "registration_failed",
+                            error.to_string(),
+                        );
+                    }
                 }
             }
         }
@@ -879,6 +895,16 @@ fn sync_files(
         let mut physical = BTreeMap::<&str, &str>::new();
         for (path, target) in &peer.snapshot.physical_paths {
             if !paths.contains(path) {
+                continue;
+            }
+            // Internal links are independent entries, even when they resolve to a
+            // file elsewhere in the same skill. Only their target content may alias.
+            if peer
+                .snapshot
+                .sources
+                .iter()
+                .any(|source| matches!(source.files.get(path), Some(Entry::Link { .. })))
+            {
                 continue;
             }
             if let Some(previous) = physical.insert(target, path) {
@@ -1278,12 +1304,12 @@ fn blocked_enablement(key: &str, sources: &[Source], blocked: &BTreeSet<String>)
     let Some(value) = key.strip_prefix("enablement/") else {
         return false;
     };
-    let Ok((_, source, _)) = serde_json::from_str::<(String, String, String)>(value) else {
+    let Ok((_, source, skill)) = serde_json::from_str::<(String, String, String)>(value) else {
         return true;
     };
-    sources
-        .iter()
-        .any(|s| blocked.contains(&s.root) && s.key == source)
+    sources.iter().any(|s| {
+        s.key == source && (blocked.contains(&s.root) || s.invalid_skills.contains(&skill))
+    })
 }
 
 fn user_base(peers: &[Participant], index: usize, key: &str) -> Option<Option<String>> {
@@ -1537,6 +1563,14 @@ mod tests {
         fs::write(
             home.join(".skillator/library.yaml"),
             format!("version: 1\nlocations:\n  - path: '~/{location}'\n"),
+        )
+        .unwrap();
+    }
+    fn select_demo_for_user(home: &std::path::Path) {
+        fs::create_dir_all(home.join(".agents")).unwrap();
+        fs::write(
+            home.join(".agents/skillator.yaml"),
+            "version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements:\n  - directory: agents\n    skill:\n      source: local/library\n      path: demo\n    materialization: linked\n",
         )
         .unwrap();
     }
@@ -2141,6 +2175,83 @@ mod tests {
                 .any(|d| d.code == "alias_target_unavailable")
         );
         assert!(!homes[1].path().join(".skillator/library/demo").exists());
+    }
+
+    #[test]
+    fn invalid_discovered_skills_do_not_gain_remote_enablements() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        let skill = homes[0].path().join(".skillator/library/demo");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "missing frontmatter\n").unwrap();
+        select_demo_for_user(homes[0].path());
+        let report = sync(&homes, options(false));
+        assert!(report.exit_status <= 1, "{}", report.text());
+        let remote = super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
+        assert!(remote.enablements().is_empty());
+        let local = super::super::snapshot::user(&AppPaths::new(homes[0].path().into())).unwrap();
+        assert_eq!(local.enablements().len(), 1);
+    }
+
+    #[test]
+    fn failed_registration_blocks_new_dependent_enablements() {
+        use super::super::transport::Fault;
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        select_demo_for_user(homes[0].path());
+        let mut peers = participants(&homes);
+        let inner = std::mem::replace(
+            &mut peers[1].endpoint,
+            Endpoint::local(AppPaths::new(homes[1].path().into())),
+        );
+        peers[1].endpoint = Endpoint::Fault {
+            inner: Box::new(inner),
+            fault: Fault::Register,
+        };
+        let report = synchronize(
+            &AppPaths::new(homes[0].path().into()),
+            peers,
+            options(false),
+        )
+        .unwrap();
+        assert_eq!(report.exit_status, 1, "{}", report.text());
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "registration_failed")
+        );
+        let remote = super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
+        assert!(remote.enablements().is_empty());
+    }
+
+    #[test]
+    fn internal_file_link_is_independent_of_its_target() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        let root = homes[0].path().join(".skillator/library/demo");
+        fs::write(root.join("data.txt"), "payload").unwrap();
+        std::os::unix::fs::symlink("data.txt", root.join("shortcut")).unwrap();
+        let first = sync(&homes, options(false));
+        assert_eq!(first.exit_status, 0, "{}", first.text());
+        let received = homes[1].path().join(".skillator/library/demo");
+        assert_eq!(
+            fs::read_link(received.join("shortcut")).unwrap(),
+            PathBuf::from("data.txt")
+        );
+        fs::write(received.join("data.txt"), "remote edit").unwrap();
+        let second = sync(&homes, options(false));
+        assert_eq!(second.exit_status, 0, "{}", second.text());
+        assert_eq!(
+            fs::read_to_string(root.join("data.txt")).unwrap(),
+            "remote edit"
+        );
+        assert_eq!(
+            fs::read_link(root.join("shortcut")).unwrap(),
+            PathBuf::from("data.txt")
+        );
     }
 
     #[test]
