@@ -855,12 +855,17 @@ fn sync_files(
                 observations.push(Observation {
                     value,
                     base,
+                    // Only matched peer history proves prior presence. The Git tree
+                    // above is a comparison base, not synchronization history.
                     prior_presence: matches!(file_base(peers, index, path), Some(Some(_))),
                 });
                 labels.push(format!("{}:{}", peer.alias, path));
                 addresses.push((index, path.clone()));
             }
         }
+        // Each group names one physical entry across aliases. Distinct values
+        // here mean two subtree choices disagree about that same entry; root
+        // and child entries of one chosen tree belong to different groups.
         let overrides: BTreeSet<_> = group
             .iter()
             .filter_map(|path| type_choices.get(path).cloned())
@@ -2503,6 +2508,53 @@ mod tests {
             assert_eq!(retry.exit_status, 0, "{}", retry.text());
             assert!(retry.changes.is_empty(), "{}", retry.text());
         }
+    }
+
+    #[test]
+    fn first_contact_git_base_does_not_authorize_removing_a_tracked_file() {
+        use super::super::process;
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        let origin = tempfile::tempdir().unwrap();
+        skill(origin.path(), "demo", "base");
+        fs::write(origin.path().join("demo/tracked"), "tracked").unwrap();
+        process::git(origin.path(), &["init", "-q"]).unwrap();
+        process::git(origin.path(), &["add", "."]).unwrap();
+        process::git(
+            origin.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+        )
+        .unwrap();
+        for home in &homes {
+            let checkout = home.path().join("skills");
+            process::capture(
+                std::process::Command::new("git")
+                    .arg("clone")
+                    .arg(origin.path())
+                    .arg(&checkout),
+            )
+            .unwrap();
+            configure(home.path(), "skills");
+        }
+        fs::remove_file(homes[0].path().join("skills/demo/tracked")).unwrap();
+        let mut opts = options(false);
+        opts.missing = MissingPolicy::Remove;
+        let report = sync(&homes, opts);
+        assert_eq!(report.exit_status, 1, "{}", report.text());
+        assert!(homes[1].path().join("skills/demo/tracked").exists());
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "missing_history")
+        );
     }
 
     #[test]

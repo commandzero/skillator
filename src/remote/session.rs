@@ -996,13 +996,15 @@ pub(super) fn valid_origin(origin: &str) -> bool {
         && !origin.starts_with('-')
         && !origin.contains('\0')
         && !origin.contains(['?', '#'])
-        && !origin
-            .split_once('@')
-            .is_some_and(|(prefix, _)| !origin.contains("://") && prefix.contains(':'))
+        && !origin.split_once('@').is_some_and(|(prefix, _)| {
+            !origin.contains("://") && (prefix.contains(':') || prefix.contains('%'))
+        })
         && !origin.split_once("://").is_some_and(|(_, rest)| {
             rest.split('/').next().is_some_and(|authority| {
                 authority.split_once('@').is_some_and(|(userinfo, _)| {
-                    !origin.starts_with("ssh://") || userinfo.contains(':')
+                    !origin.starts_with("ssh://")
+                        || userinfo.contains(':')
+                        || userinfo.contains('%')
                 })
             })
         })
@@ -1401,6 +1403,8 @@ mod tests {
             "bad\0origin",
             "https://user:token@example.test/repo",
             "ssh://user:token@example.test/repo",
+            "ssh://user%3Asecret@example.test/repo",
+            "ssh://user%3asecret@example.test/repo",
             "https://example.test/repo?access_token=secret",
             "user:token@example.test:repo",
         ] {
