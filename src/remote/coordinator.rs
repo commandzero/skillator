@@ -490,6 +490,7 @@ fn synchronize_inner(
             acquisition_aliases.insert(path.clone(), target.clone());
         }
     }
+    let all_acquisition_aliases = acquisition_aliases.clone();
     acquisition_aliases.retain(|path, target| {
         let recognized = sources.iter().any(|source| {
             !blocked.contains(&source.root)
@@ -512,7 +513,7 @@ fn synchronize_inner(
     let failed_sources = sync_files(
         &sources,
         &blocked,
-        &acquisition_aliases,
+        &all_acquisition_aliases,
         peers,
         &options,
         &mut report,
@@ -2115,6 +2116,28 @@ mod tests {
                 "new"
             );
         }
+    }
+
+    #[test]
+    fn unregistered_acquisition_target_is_blocked_without_copying_an_alias_directory() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), "Development/skills/demo", "original");
+        fs::create_dir_all(homes[0].path().join(".skillator/library")).unwrap();
+        std::os::unix::fs::symlink(
+            homes[0].path().join("Development/skills/demo"),
+            homes[0].path().join(".skillator/library/demo"),
+        )
+        .unwrap();
+        let report = sync(&homes, options(false));
+        assert_eq!(report.exit_status, 1, "{}", report.text());
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "alias_target_unavailable")
+        );
+        assert!(!homes[1].path().join(".skillator/library/demo").exists());
     }
 
     #[test]

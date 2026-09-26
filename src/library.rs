@@ -521,7 +521,13 @@ fn discover_tree(
         .collect();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        if entry.file_name() == OsStr::new(".git") {
+        let name = entry.file_name();
+        if name == OsStr::new(".git")
+            || name
+                .to_string_lossy()
+                .strip_prefix(".skillator-alias-")
+                .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
             continue;
         }
         let path = entry.path();

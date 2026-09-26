@@ -627,6 +627,10 @@ fn collect(
     }
     match &entry {
         Entry::Directory => {
+            let resolved = logical.canonicalize().map_err(Error::input_display)?;
+            if !resolved.starts_with(boundary) {
+                return Err(Error::input("internal skill directory escapes the skill"));
+            }
             files.insert(path, entry.clone());
             for child in fs::read_dir(logical).map_err(Error::input_display)? {
                 collect(
@@ -714,6 +718,50 @@ pub(super) fn outside_user_directories(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_collection_stays_inside_the_physical_skill_boundary() {
+        let home = tempfile::tempdir().unwrap();
+        let skill = home.path().join("library/demo");
+        let unrelated = home.path().join("unrelated");
+        fs::create_dir_all(skill.join("assets")).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+        fs::write(skill.join("assets/inside.txt"), "inside").unwrap();
+        fs::write(unrelated.join("private.txt"), "private").unwrap();
+        let exclusions = ignore::gitignore::GitignoreBuilder::new(home.path())
+            .build()
+            .unwrap();
+        let boundary = skill.canonicalize().unwrap();
+        let mut files = BTreeMap::new();
+
+        std::os::unix::fs::symlink("assets", skill.join("shortcut")).unwrap();
+        collect(
+            home.path(),
+            &skill.join("shortcut"),
+            &boundary,
+            &exclusions,
+            &mut files,
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap();
+        assert!(files.contains_key("library/demo/shortcut/inside.txt"));
+
+        std::os::unix::fs::symlink(&unrelated, skill.join("escape")).unwrap();
+        let error = collect(
+            home.path(),
+            &skill.join("escape"),
+            &boundary,
+            &exclusions,
+            &mut files,
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("directory escapes the skill"));
+        assert!(!files.contains_key("library/demo/escape"));
+        assert!(!files.contains_key("library/demo/escape/private.txt"));
+    }
 
     #[test]
     fn credential_bearing_origin_never_enters_a_git_reference() {
