@@ -355,15 +355,22 @@ impl Session {
         // Reserve an existing lock without creating persistent state during this phase.
         if self.session_lock.is_none() {
             let root = state::contained(self.paths.home(), ".skillator/rsync/session.lock")?;
-            match fs::symlink_metadata(&root) {
-                Ok(meta) if meta.is_file() => {
-                    let lock = File::open(root).map_err(Error::input_display)?;
-                    lock.try_lock().map_err(|_| Error::busy())?;
-                    self.session_lock = Some(lock);
+            let parent =
+                match Directory::open_existing_parent(self.paths.home(), root.parent().unwrap()) {
+                    Ok(parent) => Some(parent),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(Error::input_display(error)),
+                };
+            if let Some(parent) = parent {
+                match parent.open_file(root.file_name().unwrap()) {
+                    Ok(lock) if lock.metadata().map_err(Error::input_display)?.is_file() => {
+                        lock.try_lock().map_err(|_| Error::busy())?;
+                        self.session_lock = Some(lock);
+                    }
+                    Ok(_) => return Err(Error::input("session lock must be a regular file")),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(Error::input_display(error)),
                 }
-                Ok(_) => return Err(Error::input("session lock must be a regular file")),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(Error::input_display(error)),
             }
         }
         Ok(())
@@ -1957,6 +1964,34 @@ mod tests {
             fs::read_to_string(outside.path().join("secret")).unwrap(),
             "outside"
         );
+    }
+
+    #[test]
+    fn existing_session_lock_rejects_a_final_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".skillator/rsync")).unwrap();
+        fs::write(outside.path().join("lock"), "outside").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("lock"),
+            home.path().join(".skillator/rsync/session.lock"),
+        )
+        .unwrap();
+        let mut session = Session::new(AppPaths::new(home.path().into()));
+        let Response::Snapshot { token, .. } = session
+            .handle(Request::Inspect {
+                sources: Vec::new(),
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(session.handle(Request::Begin { token }).is_err());
+        assert_eq!(
+            fs::read_to_string(outside.path().join("lock")).unwrap(),
+            "outside"
+        );
+        assert!(session.stage.is_none());
     }
 
     #[test]

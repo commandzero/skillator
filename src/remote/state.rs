@@ -85,6 +85,15 @@ impl History {
     }
 
     pub fn save(&self, home: &Path, expected: &Fingerprint) -> Result<()> {
+        self.save_with(home, expected, || {})
+    }
+
+    fn save_with(
+        &self,
+        home: &Path,
+        expected: &Fingerprint,
+        after_exchange: impl FnOnce(),
+    ) -> Result<()> {
         let path = contained(home, ".skillator/rsync/state.json")?;
         let parent =
             Directory::open_parent(home, path.parent().unwrap()).map_err(Error::input_display)?;
@@ -131,12 +140,18 @@ impl History {
                     .rename_noreplace(stage_name, name)
                     .map_err(Error::input_display)?;
                 parent.as_file().sync_all().map_err(Error::input_display)?;
+                if read_optional_at(&parent, name)?.as_deref() != Some(bytes.as_slice()) {
+                    return Err(Error::input(
+                        "synchronization history changed after publication",
+                    ));
+                }
                 return Ok(());
             }
             parent
                 .rename_exchange(stage_name, name)
                 .map_err(Error::input_display)?;
             stage_contains_prior = true;
+            after_exchange();
             parent.as_file().sync_all().map_err(Error::input_display)?;
             let moved = read_optional_at(&parent, stage_name)?;
             if &moved
@@ -154,6 +169,13 @@ impl History {
                 }
                 return Err(Error::input(format!(
                     "synchronization history changed and rollback failed; recover it from {}",
+                    path.parent().unwrap().join(stage_name).display()
+                )));
+            }
+            let live = read_optional_at(&parent, name)?;
+            if live.as_deref() != Some(bytes.as_slice()) {
+                return Err(Error::input(format!(
+                    "synchronization history changed after publication; preserve the prior version at {} for recovery",
                     path.parent().unwrap().join(stage_name).display()
                 )));
             }
@@ -507,6 +529,39 @@ mod tests {
             fs::read_to_string(outside.path().join("state.json")).unwrap(),
             "outside"
         );
+    }
+
+    #[test]
+    fn history_save_preserves_prior_state_when_live_entry_changes_after_exchange() {
+        let home = tempfile::tempdir().unwrap();
+        let history = History {
+            id: Some(new_id().unwrap()),
+            ..History::default()
+        };
+        history.save(home.path(), &Fingerprint::Absent).unwrap();
+        let path = home.path().join(".skillator/rsync/state.json");
+        let prior = fs::read(&path).unwrap();
+        let mut updated = history.clone();
+        updated.peers.insert(new_id().unwrap(), Baseline::default());
+        let error = updated
+            .save_with(home.path(), &Fingerprint::for_bytes(&prior), || {
+                fs::write(&path, "intervening edit").unwrap();
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("prior version"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), b"intervening edit");
+        let stages: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".skillator-rsync-state-")
+            })
+            .collect();
+        assert_eq!(stages.len(), 1);
+        assert_eq!(fs::read(&stages[0]).unwrap(), prior);
     }
 
     #[test]
