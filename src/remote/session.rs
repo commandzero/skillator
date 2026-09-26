@@ -700,6 +700,14 @@ impl Session {
     }
 
     fn publish_alias(&self, path: &str, target: &str) -> Result<()> {
+        if !state::transferable(self.paths.home(), path)?
+            || Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(crate::library::reserved_temporary)
+        {
+            return Err(Error::input("administrative paths cannot be aliased"));
+        }
         let snapshot = &self
             .last
             .as_ref()
@@ -1149,6 +1157,44 @@ fn copy_entry(source: &Path, destination: &Path, entry: &Entry) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alias_publication_rejects_administrative_and_staging_names() {
+        let home = tempfile::tempdir().unwrap();
+        let local = home.path().join(".skillator/library");
+        let external = home.path().join("Development/skills/demo");
+        fs::create_dir_all(&local).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::write(
+            external.join("SKILL.md"),
+            "---\nname: demo\ndescription: External skill\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            home.path().join(".skillator/library.yaml"),
+            "version: 1\nlocations:\n - path: '~/.skillator/library'\n - path: '~/Development/skills'\n",
+        )
+        .unwrap();
+        let mut session = Session::new(AppPaths::new(home.path().into()));
+        session
+            .handle(Request::Inspect {
+                sources: Vec::new(),
+            })
+            .unwrap();
+        for name in [
+            ".git",
+            ".skillator-rsync-0123456789abcdef0123456789abcdef",
+            ".skillator-clone-0123456789abcdef0123456789abcdef",
+            ".skillator-alias-0123456789abcdef0123456789abcdef",
+        ] {
+            let path = format!(".skillator/library/{name}");
+            let error = session
+                .publish_alias(&path, "Development/skills/demo")
+                .unwrap_err();
+            assert!(error.message.contains("administrative paths"), "{error}");
+            assert!(fs::symlink_metadata(local.join(name)).is_err());
+        }
+    }
 
     fn setup() -> (tempfile::TempDir, Session, PathBuf) {
         let home = tempfile::tempdir().unwrap();
