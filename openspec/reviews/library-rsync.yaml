@@ -1,10 +1,10 @@
 change: library-rsync
 reviewer: Codex
-reviewed_at: 2026-09-26T08:27:19Z
+reviewed_at: 2026-09-26T08:47:35Z
 notes: |
   # Semantic review: library-rsync
   
-  Reviewed the archived delta and combined main specifications at implementation commit d59418f. All 22 affected requirements and 38 scenarios remain present. Twenty-one requirement blocks match their archived delta exactly. The statement of “Skillator composes with Git repository operations” now also names the separately merged, bounded `library update` command; its two rsync scenarios retain their original text. No scenario was dropped from a modified requirement. The new library-rsync main spec retains the delta Purpose. There are no removals or renames.
+  Reviewed the archived delta and combined main specifications at implementation commit 22ee96a. All 22 affected requirements and 38 scenarios remain present. Twenty-one requirement blocks match their archived delta exactly. The statement of “Skillator composes with Git repository operations” now also names the separately merged, bounded `library update` command; its two rsync scenarios retain their original text. No scenario was dropped from a modified requirement. The new library-rsync main spec retains the delta Purpose. There are no removals or renames.
   
   CLI contract: the Git-clone exception is limited to first-time library synchronization at the initiating commit. The merged `library update` command is separately limited to fast-forwarding clean registered checkouts; rsync still never updates existing checkouts. The general Git/worktree ownership rule, shared report envelope, stable host aliases, explicit policies, and exit-status rules remain coherent with both implemented commands.
   
@@ -60,9 +60,11 @@ notes: |
   
   An existing session lock is now opened without following its final symlink, and history publication verifies the live state after create or exchange before reporting success. A deterministic intervening-edit regression preserves both the newer live entry and the old history for recovery.
   
+  A known peer baseline is no longer inferred for a cohort containing a first-contact peer with unknown history; independent content conflicts under the default policy. Library and User Scope configurations are parsed from non-following, contained reads before snapshot serialization, and incoming Library registration uses descriptor-relative conditional publication.
+  
   Finding: the merged main specs faithfully express the completed rsync change alongside the separately merged library update feature. The one combined statement is a deliberate, compatible extension; no rsync scenario or guarantee was lost.
 no_spec_deltas: false
-archive_tree: 91863bec3be15d05e678b5e7e4c95e544734296c
+archive_tree: 228887218959a1e203225931954f8bb4b2c1d0b2
 specs:
   openspec/specs/cli-contract/spec.md: a516856ae88ace60a9d53927f4a80880a6d9e2f4
   openspec/specs/library-management/spec.md: 79659cd637567c7ac811564b50753e512804fdc5
