@@ -27,6 +27,7 @@ pub(super) enum Fault {
     Register,
     LockBusy,
     Begin,
+    StageOutside,
     InspectActive,
     AdvanceGitOnBegin,
 }
@@ -135,6 +136,16 @@ impl Endpoint {
                             &session.paths.home().join("Development/acme/skills"),
                             &["checkout", "next", "--"],
                         )?;
+                        return Ok(response);
+                    }
+                    if matches!(
+                        (&request, *fault),
+                        (Request::Begin { .. }, Fault::StageOutside)
+                    ) {
+                        let mut response = session.handle(request)?;
+                        if let Response::Begun { stage, .. } = &mut response {
+                            *stage = "/tmp/skillator-outside-stage".into();
+                        }
                         return Ok(response);
                     }
                 }

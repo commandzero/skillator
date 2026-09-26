@@ -11,7 +11,7 @@ use crate::app::{AppPaths, ReportDiagnostic};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 pub(crate) struct Options {
     pub hosts: Option<String>,
@@ -196,6 +196,19 @@ impl Participant {
             Err(Error::input("unexpected remote protocol response"))
         }
     }
+}
+
+fn valid_stage(home: &Path, stage: &str) -> bool {
+    let path = Path::new(stage);
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        && path.parent() == Some(home.join(".skillator/rsync").as_path())
+        && name.strip_prefix("stage-").is_some_and(state::valid_id)
 }
 
 pub(crate) fn run(paths: &AppPaths, options: Options) -> Result<Report> {
@@ -397,6 +410,15 @@ fn synchronize_inner(
                     stage,
                     recovered,
                 }) => {
+                    if !valid_stage(&peer.snapshot.home, &stage) {
+                        report.problem(
+                            &peer.alias,
+                            "",
+                            "begin_failed",
+                            "remote returned a staging path outside the observed synchronization directory",
+                        );
+                        return Ok(report);
+                    }
                     peer.id = Some(id);
                     peer.stage = Some(stage);
                     if recovered != 0 {
@@ -410,6 +432,38 @@ fn synchronize_inner(
                     }
                     report.problem(&peer.alias, "", "begin_failed", error.to_string());
                     return Ok(report);
+                }
+            }
+        }
+    }
+    if !options.check {
+        // Begin can take long enough for an external Git operation to advance a
+        // checkout. Recheck the reference before creating any receiving clone.
+        for (index, peer) in peers.iter_mut().enumerate() {
+            if let Err(error) = peer.inspect(&sources) {
+                report.problem(&peer.alias, "", "inspection_failed", error.to_string());
+                return Ok(report);
+            }
+            for reference in &sources {
+                let actual = peer
+                    .snapshot
+                    .sources
+                    .iter()
+                    .find(|source| source.root == reference.root);
+                let occupied_git = actual.is_some_and(|source| source.git.is_some());
+                if (index == 0 || occupied_git)
+                    && (reference.git.is_some() || occupied_git)
+                    && actual.is_none_or(|source| {
+                        source.key != reference.key || source.git != reference.git
+                    })
+                {
+                    blocked.insert(reference.root.clone());
+                    report.problem(
+                        &peer.alias,
+                        &reference.root,
+                        "git_mismatch",
+                        "Git source changed since preflight; align it separately before synchronizing",
+                    );
                 }
             }
         }
@@ -1727,6 +1781,32 @@ mod tests {
     }
 
     #[test]
+    fn invalid_remote_stage_is_rejected_before_any_transfer() {
+        use super::super::transport::Fault;
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        let mut peers = participants(&homes);
+        let inner = std::mem::replace(
+            &mut peers[1].endpoint,
+            Endpoint::local(AppPaths::new(homes[1].path().into())),
+        );
+        peers[1].endpoint = Endpoint::Fault {
+            inner: Box::new(inner),
+            fault: Fault::StageOutside,
+        };
+        let report = synchronize(
+            &AppPaths::new(homes[0].path().into()),
+            peers,
+            options(false),
+        )
+        .unwrap();
+        assert_eq!(report.exit_status, 1, "{}", report.text());
+        assert!(report.diagnostics.iter().any(|d| d.code == "begin_failed"));
+        assert!(!homes[1].path().join(".skillator/library/demo").exists());
+    }
+
+    #[test]
     fn changed_git_revision_after_begin_blocks_publication() {
         use super::super::process;
         let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
@@ -1799,17 +1879,7 @@ mod tests {
                 .any(|diagnostic| diagnostic.code == "git_mismatch")
         );
         let remote = homes[1].path().join("Development/acme/skills");
-        assert_eq!(super::super::snapshot::git_ref(&remote).unwrap(), reference);
-        assert!(
-            fs::read_to_string(remote.join("demo/SKILL.md"))
-                .unwrap()
-                .contains("commit A")
-        );
-        assert!(
-            process::git(&remote, &["diff", "--name-only"])
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!remote.exists(), "stale Git revision must not be cloned");
         assert!(
             fs::read_to_string(root.join("demo/SKILL.md"))
                 .unwrap()

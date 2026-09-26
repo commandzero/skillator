@@ -80,7 +80,7 @@ Keep desired-state publication and materialization results distinct in reports a
 
 1. Load and validate local configuration and host selection. Read-only preflight all selected endpoints and dependencies. Any endpoint failure aborts before persistent writes anywhere.
 2. Gather available inventory, source references, user state, and history from every selected participant. In check mode, report absent-checkout bootstrap and any unverified follow-on work without creating anything.
-3. In apply mode, acquire deterministic participant and local-path locks, then revalidate observations. Prepare exact-commit clones for missing destinations. Origin failures block that source and independent sources can continue.
+3. In apply mode, acquire deterministic participant and local-path locks, then revalidate source references after session start and before any exact-commit clone. Validate each returned staging path beneath its participant's observed home before rsync writes. Prepare clones for missing destinations only after these checks. Origin failures block that source and independent sources can continue.
 4. Build one multi-host plan. Resolve interactive conflicts before publication. Route rsync through initiating-host staging; remote hosts do not connect to each other. Transfer only planned entries with explicit file lists, never broad mirror deletion.
 5. Verify staged hashes and types. Recheck source and destination preconditions immediately before publication, then preserve originals and publish on each filesystem. Reconcile dependent user state.
 6. Verify results, acknowledge each successful entry, and release locks. On failure, attempt local rollback and preserve recoverable state. Report partial completion without claiming all-host atomicity.
