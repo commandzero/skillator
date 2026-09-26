@@ -4,6 +4,7 @@ use super::{
 };
 use crate::app::AppPaths;
 use crate::config::{LibraryConfig, LibraryConfigCodec, LoadResult};
+use crate::fs_safety::Directory;
 use crate::library::{SkillValidity, SourceKind, scan_library};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -415,7 +416,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
                         continue;
                     }
                     if let Some(actual) = state::observation_path(paths.home(), path)?
-                        && let Some(entry) = state::observe(&actual)?
+                        && let Some(entry) = observe_anchored(paths.home(), &actual)?
                     {
                         source.files.entry(path.clone()).or_insert(entry);
                     }
@@ -555,11 +556,45 @@ struct CollectionScope<'a> {
     nested_roots: &'a BTreeSet<String>,
 }
 
+fn observe_anchored(home: &Path, actual: &Path) -> Result<Option<Entry>> {
+    let parent = match Directory::open_existing_parent(home, actual.parent().unwrap()) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Error::input_display(error)),
+    };
+    state::observe_at(&parent, actual.file_name().unwrap())
+}
+
+fn observe_contained_with(
+    home: &Path,
+    boundary: &Path,
+    path: &str,
+    after_contained: impl FnOnce(),
+) -> Result<(PathBuf, Option<Entry>)> {
+    let actual = state::contained(home, path)?;
+    if !actual.starts_with(boundary) {
+        return Err(Error::input("internal skill entry escapes the skill"));
+    }
+    after_contained();
+    let entry = observe_anchored(home, &actual)?;
+    Ok((actual, entry))
+}
+
 fn collect(
     scope: &CollectionScope<'_>,
     logical: &Path,
     files: &mut BTreeMap<String, Entry>,
     root: bool,
+) -> Result<()> {
+    collect_with(scope, logical, files, root, || {})
+}
+
+fn collect_with(
+    scope: &CollectionScope<'_>,
+    logical: &Path,
+    files: &mut BTreeMap<String, Entry>,
+    root: bool,
+    after_contained: impl FnOnce(),
 ) -> Result<()> {
     if logical.file_name().is_some_and(|name| {
         name == ".git"
@@ -576,11 +611,10 @@ fn collect(
     if !state::transferable(scope.home, &path)? {
         return Ok(());
     }
-    let actual = state::contained(scope.home, &path)?;
-    let entry = if root {
-        Some(Entry::Directory)
+    let (actual, entry) = if root {
+        (state::contained(scope.home, &path)?, Some(Entry::Directory))
     } else {
-        state::observe(&actual)?
+        observe_contained_with(scope.home, scope.boundary, &path, after_contained)?
     };
     let Some(entry) = entry else {
         return Ok(());
@@ -598,14 +632,27 @@ fn collect(
             if !resolved.starts_with(scope.boundary) {
                 return Err(Error::input("internal skill directory escapes the skill"));
             }
+            // The physical path was checked above; opening it component-by-component
+            // without following links prevents a concurrent ancestor swap.
+            let directory = Directory::open_existing_parent(scope.home, &resolved)
+                .map_err(Error::input_display)?;
+            if !root {
+                let parent = Directory::open_existing_parent(scope.home, actual.parent().unwrap())
+                    .map_err(Error::input_display)?;
+                let observed = parent
+                    .open_dir(actual.file_name().unwrap())
+                    .map_err(Error::input_display)?;
+                if observed.identity().map_err(Error::input_display)?
+                    != directory.identity().map_err(Error::input_display)?
+                {
+                    return Err(Error::input(
+                        "directory changed while observing its contents",
+                    ));
+                }
+            }
             files.insert(path, entry.clone());
-            for child in fs::read_dir(logical).map_err(Error::input_display)? {
-                collect(
-                    scope,
-                    &child.map_err(Error::input_display)?.path(),
-                    files,
-                    false,
-                )?;
+            for child in directory.entries().map_err(Error::input_display)? {
+                collect(scope, &logical.join(child), files, false)?;
             }
         }
         Entry::Link { target } => {
@@ -741,12 +788,97 @@ mod tests {
         };
         collect(&scope, &skill.join("shortcut"), &mut files, true).unwrap();
         assert!(files.contains_key("library/demo/shortcut/inside.txt"));
+        assert_eq!(
+            files["library/demo/shortcut/inside.txt"],
+            Entry::File {
+                hash: state::digest(b"inside"),
+                executable: false,
+            }
+        );
 
         std::os::unix::fs::symlink(&unrelated, skill.join("escape")).unwrap();
         let error = collect(&scope, &skill.join("escape"), &mut files, true).unwrap_err();
         assert!(error.message.contains("directory escapes the skill"));
         assert!(!files.contains_key("library/demo/escape"));
         assert!(!files.contains_key("library/demo/escape/private.txt"));
+    }
+
+    #[test]
+    fn swapped_ancestor_does_not_observe_or_collect_outside_content() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let skill = home.path().join("library/demo");
+        let assets = skill.join("assets");
+        fs::create_dir_all(&assets).unwrap();
+        fs::write(assets.join("inside.txt"), "inside").unwrap();
+        fs::write(outside.path().join("inside.txt"), "outside secret").unwrap();
+        let boundary = skill.canonicalize().unwrap();
+        let exclusions = ignore::gitignore::GitignoreBuilder::new(home.path())
+            .build()
+            .unwrap();
+        let nested_roots = BTreeSet::new();
+        let scope = CollectionScope {
+            home: home.path(),
+            boundary: &boundary,
+            exclusions: &exclusions,
+            nested_roots: &nested_roots,
+        };
+        let mut files = BTreeMap::new();
+        let result = collect_with(
+            &scope,
+            &assets.join("inside.txt"),
+            &mut files,
+            false,
+            || {
+                fs::rename(&assets, skill.join("retained")).unwrap();
+                std::os::unix::fs::symlink(outside.path(), &assets).unwrap();
+            },
+        );
+        assert!(result.is_err(), "outside file was accepted: {result:?}");
+        assert!(!files.contains_key("library/demo/assets/inside.txt"));
+        assert!(files.is_empty(), "unsafe entry entered snapshot: {files:?}");
+    }
+
+    #[test]
+    fn directory_swap_before_child_containment_cannot_collect_another_home_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let skill = home.path().join("library/demo");
+        let assets = skill.join("assets");
+        let unrelated = home.path().join("unrelated");
+        fs::create_dir_all(&assets).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+        fs::write(assets.join("payload.txt"), "skill content").unwrap();
+        fs::write(unrelated.join("payload.txt"), "unrelated private content").unwrap();
+        let boundary = skill.canonicalize().unwrap();
+        let exclusions = ignore::gitignore::GitignoreBuilder::new(home.path())
+            .build()
+            .unwrap();
+        let nested_roots = BTreeSet::new();
+        let scope = CollectionScope {
+            home: home.path(),
+            boundary: &boundary,
+            exclusions: &exclusions,
+            nested_roots: &nested_roots,
+        };
+        let opened =
+            Directory::open_existing_parent(home.path(), &assets.canonicalize().unwrap()).unwrap();
+        let names = opened.entries().unwrap();
+        assert_eq!(names, [std::ffi::OsString::from("payload.txt")]);
+
+        fs::rename(&assets, skill.join("retained")).unwrap();
+        std::os::unix::fs::symlink(&unrelated, &assets).unwrap();
+        let mut files = BTreeMap::new();
+        let result = collect(&scope, &assets.join(&names[0]), &mut files, false);
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("entry escapes the skill")
+        );
+        assert!(
+            files.is_empty(),
+            "outside entry entered snapshot: {files:?}"
+        );
     }
 
     #[test]

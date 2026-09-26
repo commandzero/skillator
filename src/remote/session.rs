@@ -1128,6 +1128,10 @@ pub(super) fn pending_recovery(home: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn recover_pending(home: &Path) -> Result<usize> {
+    recover_pending_with(home, || {})
+}
+
+fn recover_pending_with(home: &Path, mut before_rename: impl FnMut()) -> Result<usize> {
     let records = pending_recovery(home)?;
     for record in &records {
         let root = record.parent().unwrap().parent().unwrap();
@@ -1177,14 +1181,16 @@ fn recover_pending(home: &Path) -> Result<usize> {
                 )));
             }
         }
-        if actual == recovery.expected {
+        let (restored, cleanup_backup) = if actual == recovery.expected {
             // Publication never happened, or the earlier rollback completed.
             if backup.is_some() && backup != recovery.desired {
                 return Err(Error::input(
                     "recovery backup changed; preserve it for manual recovery",
                 ));
             }
+            (true, backup.is_some())
         } else if actual == recovery.desired && backup == recovery.expected {
+            before_rename();
             match (&recovery.expected, &recovery.desired) {
                 (Some(_), Some(_)) => parent.rename_exchange(sibling_name, destination_name),
                 (Some(_), None) => parent.rename_noreplace(sibling_name, destination_name),
@@ -1192,15 +1198,46 @@ fn recover_pending(home: &Path) -> Result<usize> {
                 _ => Ok(()),
             }
             .map_err(Error::input_display)?;
+            (true, recovery.desired.is_some())
         } else if actual == recovery.desired && backup.is_none() {
             // Verification and backup cleanup completed before the journal was removed.
+            (false, false)
         } else {
             return Err(Error::input(format!(
                 "{} changed after interruption; manual recovery required; inspect recovery journals under ~/.skillator/rsync",
                 recovery.path
             )));
+        };
+        let expected_destination = if restored {
+            recovery.expected.as_ref()
+        } else {
+            recovery.desired.as_ref()
+        };
+        let expected_backup = if cleanup_backup {
+            recovery.desired.as_ref()
+        } else {
+            None
+        };
+        // A writer can replace the destination after the first observation,
+        // including immediately before an exchange moves it into the backup.
+        // Never remove that backup or the journal unless both sides still match.
+        let verified = (|| -> Result<bool> {
+            Ok(state::observe_at(&parent, destination_name)?.as_ref() == expected_destination
+                && state::observe_at(&parent, sibling_name)?.as_ref() == expected_backup
+                && (!matches!(expected_destination, Some(Entry::Directory))
+                    || parent.is_empty_dir(destination_name).map_err(Error::input_display)?)
+                && (!matches!(expected_backup, Some(Entry::Directory))
+                    || parent.is_empty_dir(sibling_name).map_err(Error::input_display)?)
+                && matches!(state::contained(home, &recovery.path), Ok(current) if current == destination))
+        })()
+        .unwrap_or(false);
+        if !verified {
+            return Err(Error::input(format!(
+                "{} changed during recovery; preserve the backup and journal for manual recovery",
+                recovery.path
+            )));
         }
-        if state::observe_at(&parent, sibling_name)?.is_some() {
+        if cleanup_backup {
             parent.remove(sibling_name).map_err(Error::input_display)?;
         }
         stage
@@ -1963,6 +2000,88 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn recovery_preserves_a_destination_written_at_the_rename_boundary() {
+        for operation in ["replace", "create", "delete"] {
+            for intervening in [false, true] {
+                let (home, session, stage) = setup();
+                let path = if operation == "create" {
+                    ".skillator/library/demo/new"
+                } else {
+                    ".skillator/library/demo/data"
+                };
+                let destination = state::contained(home.path(), path).unwrap();
+                let expected = state::observe(&destination).unwrap();
+                let sibling = destination
+                    .parent()
+                    .unwrap()
+                    .join(format!(".skillator-rsync-{}", state::new_id().unwrap()));
+                let desired = if operation == "delete" {
+                    fs::rename(&destination, &sibling).unwrap();
+                    None
+                } else {
+                    fs::write(&sibling, "replacement").unwrap();
+                    let desired = state::observe(&sibling).unwrap();
+                    if operation == "replace" {
+                        rename_exchange(&sibling, &destination).unwrap();
+                    } else {
+                        fs::rename(&sibling, &destination).unwrap();
+                    }
+                    desired
+                };
+                let journal = stage.join("recovery-rename.json");
+                state::write_new(
+                    &journal,
+                    &serde_json::to_vec(&Recovery {
+                        path: path.into(),
+                        expected,
+                        desired,
+                        sibling: sibling.clone(),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+                drop(session);
+                let result = recover_pending_with(home.path(), || {
+                    if intervening {
+                        fs::write(&destination, "external writer").unwrap();
+                    }
+                });
+                if intervening {
+                    assert!(result.is_err(), "{operation}: unexpected recovery success");
+                    assert!(journal.exists(), "{operation}: journal was deleted");
+                    match operation {
+                        "replace" => {
+                            assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
+                            assert_eq!(fs::read_to_string(&sibling).unwrap(), "external writer");
+                        }
+                        "create" => {
+                            assert!(!destination.exists());
+                            assert_eq!(fs::read_to_string(&sibling).unwrap(), "external writer");
+                        }
+                        "delete" => {
+                            assert_eq!(
+                                fs::read_to_string(&destination).unwrap(),
+                                "external writer"
+                            );
+                            assert_eq!(fs::read_to_string(&sibling).unwrap(), "original");
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    assert_eq!(result.unwrap(), 1, "{operation}");
+                    assert!(!journal.exists(), "{operation}: journal was retained");
+                    assert!(!sibling.exists(), "{operation}: backup was retained");
+                    if operation == "create" {
+                        assert!(!destination.exists());
+                    } else {
+                        assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn unobtainable_commit_never_publishes_the_origin_head() {
         let origin = tempfile::tempdir().unwrap();

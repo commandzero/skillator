@@ -112,9 +112,11 @@ Each publication verifies staged content and rechecks the observed source and de
 
 File reads reject a final symlink and validate the opened descriptor as a regular file before consuming content. Its device and inode must match the initial metadata inspection, preventing a replacement between that inspection and opening from redirecting the read. Nonblocking opens prevent a concurrently substituted FIFO from hanging synchronization.
 
+Snapshot collection opens physical parents without following symlinks and reads through held directory descriptors. Entries must remain within the physical skill boundary, including when an ancestor redirects elsewhere inside the home.
+
 Symlink targets are read without following them, and link identity is checked again after the read. Containment or I/O errors while filtering historical paths abort planning with the affected path rather than silently omitting it.
 
-After interruption, rerun the command. It inspects retained publication journals, restores recoverable originals where safe, and refuses to overwrite later edits. Preserve any reported journal and backup when manual recovery is required. Once the old and current values are reconciled, retry. Successful entries retain their own acknowledgements; a failed host does not cause all other hosts to roll back.
+After interruption, rerun the command. It inspects retained publication journals, restores recoverable originals where safe, and refuses to overwrite later edits. Recovery rechecks both sides after a rollback exchange; a mismatch retains the backup and journal rather than deleting a concurrent writer's value. Preserve any reported journal and backup when manual recovery is required. Once the old and current values are reconciled, retry. Successful entries retain their own acknowledgements; a failed host does not cause all other hosts to roll back.
 
 Partial multi-host completion can leave different acknowledged baselines. An all-host retry then reports a history conflict rather than guessing. Retry the failed peer with `--hosts <alias>` against its unchanged baseline, then retry the complete cohort. If history remains inconsistent, preserve the state and reconcile it before proceeding.
 
