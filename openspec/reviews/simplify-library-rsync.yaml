@@ -1,6 +1,6 @@
-change: library-rsync
+change: simplify-library-rsync
 reviewer: openai-codex/gpt-6-astra
-reviewed_at: 2026-09-26T20:08:04Z
+reviewed_at: 2026-09-26T20:08:05Z
 notes: |
   # Skillator PR #32 semantic synchronization review
   
@@ -27,9 +27,8 @@ notes: |
   
   The implementation turn passed pinned Rust 1.97.1 full preflight: 364 tests, formatting, Clippy, shell/workflow checks, OKF documentation validation, 11 main specs and release safeguards. Strict simplification delta validation passed. Actual macOS-to-Linux SSH and GNU-client smoke covered exact-commit bootstrap, dirty index preservation, batched relay, failed transfer preservation and targeted retry, conflicts, deletion, 70-file chunking, no-op convergence, modes/links and unchanged malformed user configurations/copied materializations. No executable code changed after those checks; publication preparation removes only the obsolete uncommitted-receipt note.
 no_spec_deltas: false
-archive_tree: a1921cfcd848c2ab0a35b56f0a57293acca26d37
+archive_tree: 4549b0392187361fb9c27af98c0cdef8e9de967e
 specs:
   openspec/specs/cli-contract/spec.md: 88a33efb14a4ec3312c01ad6eeeacdf58446e258
-  openspec/specs/library-management/spec.md: 79659cd637567c7ac811564b50753e512804fdc5
   openspec/specs/library-rsync/spec.md: 460b39d6277668ba434bce0fc3eff27170c6f75e
   openspec/specs/user-scope-onboarding/spec.md: 9f4b351e208db6ddc9eac9298377c93fc1596d35
