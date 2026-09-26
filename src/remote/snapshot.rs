@@ -52,6 +52,8 @@ pub(super) struct Snapshot {
     pub available_locations: BTreeSet<String>,
     pub sources: Vec<Source>,
     pub physical_paths: BTreeMap<String, String>,
+    #[serde(default)]
+    pub acquisition_aliases: BTreeMap<String, String>,
     pub user_directories: BTreeSet<String>,
     pub user: BTreeMap<String, String>,
     pub user_present: bool,
@@ -475,6 +477,26 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
             physical_paths.insert(path.clone(), physical.to_string_lossy().into_owned());
         }
     }
+    let mut acquisition_aliases = BTreeMap::new();
+    if let Some(local) = locations.first() {
+        for source in &sources {
+            if source.root != local.path {
+                continue;
+            }
+            for (path, entry) in &source.files {
+                if !matches!(entry, Entry::Directory)
+                    || Path::new(path).parent() != Some(Path::new(&local.path))
+                    || !fs::symlink_metadata(paths.home().join(path))
+                        .is_ok_and(|meta| meta.file_type().is_symlink())
+                {
+                    continue;
+                }
+                let target = Path::new(&physical_paths[path]);
+                acquisition_aliases
+                    .insert(path.clone(), state::home_relative(paths.home(), target)?);
+            }
+        }
+    }
     let mut problems: Vec<_> = library_snapshot
         .diagnostics()
         .iter()
@@ -500,13 +522,14 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
     }
     Ok(Snapshot {
         available_locations,
-        protocol: 1,
+        protocol: 2,
         version: env!("CARGO_PKG_VERSION").into(),
         home: paths.home().canonicalize().map_err(Error::input_display)?,
         history,
         locations,
         sources,
         physical_paths,
+        acquisition_aliases,
         user_directories,
         user: user_entries(&user_config)?,
         user_present: user_bytes.is_some(),

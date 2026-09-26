@@ -12,7 +12,7 @@ generated: { by: codex/gpt-6, at: 2026-09-19T00:00:00Z }
 
 ## Configure hosts
 
-Install Skillator with synchronization protocol 1, Git, and rsync on every host. The remote noninteractive shell must find all three on PATH. Skillator reports missing or incompatible dependencies and does not install them.
+Install Skillator with synchronization protocol 2, Git, and rsync on every host. The remote noninteractive shell must find all three on PATH. Skillator reports missing or incompatible dependencies and does not install them.
 
 Create `~/.skillator/config.yaml` on the initiating machine:
 

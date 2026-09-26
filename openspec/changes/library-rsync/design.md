@@ -28,7 +28,7 @@ hosts:
 
 Aliases select participants and label reports. Reserve `local`. Leave port, jump-host, identity-file, and authentication settings to SSH configuration. Do not replicate this file, credentials, or the target registry.
 
-Use a private, versioned Skillator protocol over SSH stdin/stdout, with diagnostics on stderr. Negotiate protocol version 1 and required capabilities before writes. Compatible application releases need not have identical version strings. A hidden internal CLI entry point implements observation, staging, publication, verification, and recovery; it is not a public user workflow.
+Use a private, versioned Skillator protocol over SSH stdin/stdout, with diagnostics on stderr. Negotiate protocol version 2 and required capabilities before writes. Compatible application releases need not have identical version strings. A hidden internal CLI entry point implements observation, staging, publication, verification, and recovery; it is not a public user workflow.
 
 Pass arguments structurally wherever possible. Validate SSH destinations and use a fixed, safely quoted remote entry point; transport paths and protocol payloads must not become shell code. Bound message size and subprocess timeouts. Use the same SSH identity for protocol and rsync operations.
 

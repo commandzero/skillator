@@ -39,6 +39,10 @@ pub(super) enum Request {
         desired: Option<Entry>,
         stage: Option<String>,
     },
+    Alias {
+        path: String,
+        target: String,
+    },
     Register {
         locations: Vec<Location>,
         expected: Option<String>,
@@ -163,6 +167,11 @@ impl Session {
                 self.require_active()?;
                 self.authorize_path(&path)?;
                 self.publish(&path, expected.as_ref(), desired.as_ref(), stage.as_deref())?;
+                Ok(Response::Ok)
+            }
+            Request::Alias { path, target } => {
+                self.require_active()?;
+                self.publish_alias(&path, &target)?;
                 Ok(Response::Ok)
             }
             Request::Register {
@@ -688,6 +697,76 @@ impl Session {
             return Ok(Some(Entry::Directory));
         }
         state::observe(path)
+    }
+
+    fn publish_alias(&self, path: &str, target: &str) -> Result<()> {
+        let snapshot = &self
+            .last
+            .as_ref()
+            .ok_or_else(|| Error::input("no observation"))?
+            .0;
+        let parent = Path::new(path)
+            .parent()
+            .ok_or_else(|| Error::input("invalid alias path"))?;
+        if let Some(local) = snapshot.locations.first() {
+            if parent != Path::new(&local.path) {
+                return Err(Error::input(
+                    "alias is not a direct child of the local library",
+                ));
+            }
+        } else if !snapshot.sources.iter().any(|source| {
+            Path::new(&source.root) == parent
+                && source.location == source.root
+                && source.git.is_none()
+        }) {
+            return Err(Error::input(
+                "alias is not a direct child of the local library",
+            ));
+        }
+        let recognized = snapshot.sources.iter().any(|source| {
+            Path::new(&source.root) != parent
+                && source
+                    .skills
+                    .iter()
+                    .any(|skill| Path::new(&source.root).join(skill) == Path::new(target))
+        });
+        if !recognized {
+            return Err(Error::input("alias target is not a registered skill"));
+        }
+        let destination = state::contained(self.paths.home(), path)?;
+        let physical_target = state::contained(self.paths.home(), target)?;
+        let real_target = physical_target
+            .canonicalize()
+            .map_err(Error::input_display)?;
+        state::home_relative(self.paths.home(), &real_target)?;
+        if !real_target.join("SKILL.md").is_file() {
+            return Err(Error::input("alias target skill is not available"));
+        }
+        match fs::symlink_metadata(&destination) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink()
+                    && destination.canonicalize().map_err(Error::input_display)? == real_target
+                {
+                    return Ok(());
+                }
+                return Err(Error::input(
+                    "alias destination is occupied; preserve it for manual resolution",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::input_display(error)),
+        }
+        fs::create_dir_all(destination.parent().unwrap()).map_err(Error::input_display)?;
+        let sibling = destination
+            .parent()
+            .unwrap()
+            .join(format!(".skillator-alias-{}", state::new_id()?));
+        std::os::unix::fs::symlink(&physical_target, &sibling).map_err(Error::input_display)?;
+        let result = rename_noreplace(&sibling, &destination).map_err(Error::input_display);
+        if result.is_err() {
+            let _ = fs::remove_file(&sibling);
+        }
+        result
     }
 
     fn publish(

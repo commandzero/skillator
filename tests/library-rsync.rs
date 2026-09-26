@@ -106,7 +106,7 @@ fn protocol_observation_is_framed_and_write_free() {
         .clone();
     let value: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(value["result"], "snapshot");
-    assert_eq!(value["snapshot"]["protocol"], 1);
+    assert_eq!(value["snapshot"]["protocol"], 2);
     assert!(fs::read_dir(home.path()).unwrap().next().is_none());
 }
 

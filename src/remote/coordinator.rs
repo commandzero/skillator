@@ -154,9 +154,9 @@ impl Participant {
         else {
             return Err(Error::input("remote did not return an observation"));
         };
-        if snapshot.protocol != 1 {
+        if snapshot.protocol != 2 {
             return Err(Error::input(format!(
-                "incompatible Skillator {} on remote host {alias}; protocol 1 is required",
+                "incompatible Skillator {} on remote host {alias}; protocol 2 is required",
                 snapshot.version
             )));
         }
@@ -472,16 +472,86 @@ fn synchronize_inner(
             }
         }
     }
+    let mut acquisition_aliases = BTreeMap::<String, String>::new();
+    for peer in peers.iter() {
+        for (path, target) in &peer.snapshot.acquisition_aliases {
+            if acquisition_aliases
+                .get(path)
+                .is_some_and(|existing| existing != target)
+            {
+                report.problem(
+                    &peer.alias,
+                    path,
+                    "alias_conflict",
+                    "acquisition alias targets differ; align the links before synchronization",
+                );
+                continue;
+            }
+            acquisition_aliases.insert(path.clone(), target.clone());
+        }
+    }
+    acquisition_aliases.retain(|path, target| {
+        let recognized = sources.iter().any(|source| {
+            !blocked.contains(&source.root)
+                && source.skills.iter().any(|skill| {
+                    PathBuf::from(&source.root).join(skill).as_path()
+                        == std::path::Path::new(target.as_str())
+                })
+        });
+        if !recognized {
+            report.problem(
+                "local",
+                path,
+                "alias_target_unavailable",
+                "alias target must be a registered, available skill location",
+            );
+        }
+        recognized
+    });
     let mut acknowledgements = vec![Baseline::default(); peers.len()];
     let failed_sources = sync_files(
         &sources,
         &blocked,
+        &acquisition_aliases,
         peers,
         &options,
         &mut report,
         &mut acknowledgements,
     )?;
     blocked.extend(failed_sources);
+    for (path, target) in &acquisition_aliases {
+        if sources.iter().any(|source| {
+            blocked.contains(&source.root)
+                && source.skills.iter().any(|skill| {
+                    PathBuf::from(&source.root).join(skill).as_path()
+                        == std::path::Path::new(target)
+                })
+        }) {
+            report.problem(
+                "local",
+                path,
+                "alias_target_unverified",
+                "alias target did not finish synchronization",
+            );
+            continue;
+        }
+        for peer in peers.iter_mut() {
+            if peer.snapshot.acquisition_aliases.get(path) == Some(target) {
+                continue;
+            }
+            if options.check {
+                report.changed(&peer.alias, path, "create_acquisition_alias", true);
+                continue;
+            }
+            match peer.request_ok(Request::Alias {
+                path: path.clone(),
+                target: target.clone(),
+            }) {
+                Ok(()) => report.changed(&peer.alias, path, "create_acquisition_alias", false),
+                Err(error) => report.problem(&peer.alias, path, "alias_failed", error.to_string()),
+            }
+        }
+    }
     let allowed_locations: Vec<_> = locations
         .into_values()
         .filter(|location| {
@@ -503,6 +573,7 @@ fn synchronize_inner(
                         .files
                         .iter()
                         .any(|(path, value)| value.is_some() && within(path))
+                    || acquisition_aliases.keys().any(|path| within(path))
                     || (options.check
                         && report.changes.iter().any(|change| {
                             change.host == peer.alias
@@ -657,6 +728,7 @@ fn file_base(peers: &[Participant], index: usize, path: &str) -> Option<Option<E
 fn sync_files(
     sources: &[Source],
     blocked: &BTreeSet<String>,
+    acquisition_aliases: &BTreeMap<String, String>,
     peers: &mut [Participant],
     options: &Options,
     report: &mut Report,
@@ -672,6 +744,11 @@ fn sync_files(
             paths.extend(base.files.keys().cloned());
         }
     }
+    paths.retain(|path| {
+        !acquisition_aliases
+            .keys()
+            .any(|alias| path == alias || path.starts_with(&format!("{alias}/")))
+    });
     let owner = |path: &str| {
         sources
             .iter()
@@ -2052,8 +2129,26 @@ mod tests {
             homes[0].path().join(".skillator/library/demo"),
         )
         .unwrap();
+        let preview = sync(&homes, options(true));
+        assert!(preview.changes.iter().any(|change| {
+            change.host == "host1" && change.action == "create_acquisition_alias"
+        }));
+        assert!(!homes[1].path().join(".skillator/library/demo").exists());
         let first = sync(&homes, options(false));
         assert_eq!(first.exit_status, 0, "{}", first.text());
+        assert!(homes[1].path().join(".skillator/library/demo").is_symlink());
+        assert_eq!(
+            homes[1]
+                .path()
+                .join(".skillator/library/demo")
+                .canonicalize()
+                .unwrap(),
+            homes[1]
+                .path()
+                .join("Development/skills/demo")
+                .canonicalize()
+                .unwrap()
+        );
         skill(
             homes[1].path(),
             ".skillator/library/demo",

@@ -191,7 +191,7 @@ impl Endpoint {
                 };
                 serde_json::from_slice(&bytes).map_err(|_| {
                     Error::input(
-                        "invalid remote response or incompatible Skillator; protocol 1 is required",
+                        "invalid remote response or incompatible Skillator; protocol 2 is required",
                     )
                 })?
             }
@@ -244,7 +244,7 @@ fn probe_version(remote: &Remote) -> Error {
                 Error::input("Skillator is not installed on remote host")
             } else {
                 Error::input(format!(
-                    "Skillator version {version:?} is incompatible; synchronization protocol 1 is required on remote host"
+                    "Skillator version {version:?} is incompatible; synchronization protocol 2 is required on remote host"
                 ))
             }
         }
