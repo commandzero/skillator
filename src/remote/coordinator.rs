@@ -835,14 +835,31 @@ fn sync_files(
             builder.build().map_err(Error::input_display)?,
         );
     }
+    let mut filter_error = None;
     paths.retain(|path| {
-        state::transferable(&peers[0].snapshot.home, path).unwrap_or(false)
-            && owner(path).is_some_and(|s| {
-                !exclusions[&s.root]
-                    .matched_path_or_any_parents(peers[0].snapshot.home.join(path), false)
-                    .is_ignore()
-            })
+        if filter_error.is_some() {
+            return true;
+        }
+        match state::transferable(&peers[0].snapshot.home, path) {
+            Ok(transferable) => {
+                transferable
+                    && owner(path).is_some_and(|s| {
+                        !exclusions[&s.root]
+                            .matched_path_or_any_parents(peers[0].snapshot.home.join(path), false)
+                            .is_ignore()
+                    })
+            }
+            Err(error) => {
+                filter_error = Some(Error::input(format!(
+                    "cannot inspect synchronization path {path}: {error}"
+                )));
+                true
+            }
+        }
     });
+    if let Some(error) = filter_error {
+        return Err(error);
+    }
     let mut type_choices = BTreeMap::new();
     let mut type_conflicts = BTreeSet::new();
     for root in &paths {
@@ -1463,6 +1480,46 @@ mod tests {
             check,
             interactive: false,
         }
+    }
+
+    #[test]
+    fn redirected_historical_path_is_not_silently_omitted() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        let old = ".skillator/library/demo/old";
+        fs::create_dir(homes[0].path().join(old)).unwrap();
+        fs::write(homes[0].path().join(old).join("payload"), "original").unwrap();
+        let first = sync(&homes, options(false));
+        assert_eq!(first.exit_status, 0, "{}", first.text());
+        for home in &homes {
+            fs::remove_dir_all(home.path().join(old)).unwrap();
+        }
+        let mut peers = participants(&homes);
+        let sources = peers[0].snapshot.sources.clone();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("payload"), "outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), homes[0].path().join(old)).unwrap();
+        let paths = AppPaths::new(homes[0].path().into());
+        let mut report = Report::new(&paths);
+        let mut acknowledgements = vec![Baseline::default(); peers.len()];
+        let error = sync_files(
+            &sources,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &mut peers,
+            &options(true),
+            &mut report,
+            &mut acknowledgements,
+        )
+        .unwrap_err();
+        assert!(error.message.contains(old), "{error}");
+        assert!(report.changes.is_empty(), "{}", report.text());
+        assert_eq!(
+            fs::read_to_string(outside.path().join("payload")).unwrap(),
+            "outside"
+        );
+        assert!(acknowledgements.iter().all(|base| base.files.is_empty()));
     }
 
     #[test]

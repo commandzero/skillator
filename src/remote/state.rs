@@ -545,12 +545,17 @@ fn observe_with(path: &Path, after_metadata: impl FnOnce()) -> Result<Option<Ent
     } else if meta.is_dir() {
         Entry::Directory
     } else if meta.file_type().is_symlink() {
+        let target = fs::read_link(path).map_err(Error::input_display)?;
+        let after = fs::symlink_metadata(path).map_err(Error::input_display)?;
+        if !after.file_type().is_symlink() || (after.dev(), after.ino()) != (meta.dev(), meta.ino())
+        {
+            return Err(Error::input("link changed while observing its target"));
+        }
         Entry::Link {
-            target: fs::read_link(path)
-                .map_err(Error::input_display)?
-                .to_str()
-                .ok_or_else(|| Error::input("non-UTF-8 link"))?
-                .to_owned(),
+            target: target
+                .into_os_string()
+                .into_string()
+                .map_err(|_| Error::input("non-UTF-8 link"))?,
         }
     } else {
         return Err(Error::input(format!(
@@ -594,14 +599,20 @@ fn observe_at_with(
             }
         }
         libc::S_IFDIR => Entry::Directory,
-        libc::S_IFLNK => Entry::Link {
-            target: parent
-                .read_link(name)
-                .map_err(Error::input_display)?
-                .to_str()
-                .ok_or_else(|| Error::input("non-UTF-8 link"))?
-                .to_owned(),
-        },
+        libc::S_IFLNK => {
+            let target = parent.read_link(name).map_err(Error::input_display)?;
+            let after = parent.metadata(name).map_err(Error::input_display)?;
+            if after.st_mode & libc::S_IFMT != libc::S_IFLNK
+                || (after.st_dev, after.st_ino) != (stat.st_dev, stat.st_ino)
+            {
+                return Err(Error::input("link changed while observing its target"));
+            }
+            Entry::Link {
+                target: target
+                    .into_string()
+                    .map_err(|_| Error::input("non-UTF-8 link"))?,
+            }
+        }
         _ => return Err(Error::input("unsupported file type during publication")),
     };
     Ok(Some(entry))
@@ -622,6 +633,29 @@ pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_observation_rejects_replaced_inodes() {
+        for anchored in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let root = home.path().canonicalize().unwrap();
+            let parent = Directory::open_existing_parent(&root, &root).unwrap();
+            let path = root.join("link");
+            std::os::unix::fs::symlink("original", &path).unwrap();
+            let replace = || {
+                let replacement = root.join("replacement");
+                std::os::unix::fs::symlink("changed", &replacement).unwrap();
+                fs::rename(replacement, &path).unwrap();
+            };
+            let observed = if anchored {
+                observe_at_with(&parent, "link".as_ref(), replace)
+            } else {
+                observe_with(&path, replace)
+            };
+            assert!(observed.is_err(), "anchored: {anchored}; {observed:?}");
+            assert_eq!(fs::read_link(&path).unwrap(), Path::new("changed"));
+        }
+    }
 
     #[test]
     fn path_observation_rejects_replaced_inodes() {

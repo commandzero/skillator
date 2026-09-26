@@ -24,6 +24,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 - Reject concurrent file or ancestor replacements before reading synchronization content, and reject special files without blocking (#32).
 - Preserve concurrent executable-mode changes during file observation (#32).
 - Require conflict resolution when different present values have mixed known and unknown synchronization history (#32).
+- Report historical-path containment errors instead of silently dropping entries from library synchronization (#32).
 - Removing a user skill before user configuration exists returns an unchanged result.
 - Reject target-registry paths containing redundant separators, `.` or `..` components.
 
