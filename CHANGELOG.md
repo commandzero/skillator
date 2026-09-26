@@ -4,19 +4,20 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ## [Unreleased]
 
+### Added
+
+- Update Library repositories with fast-forward-only pulls using `skillator library update`, with a preview before making changes (#31).
+- Automatically synchronize newly populated linked worktrees with an opt-in Git hook installed by `skillator hook install` (#20).
+
 ### Changed
 
-- Allow `m` on an inherited user skill to stage a repository link, and Space to remove the override while keeping User Scope enabled.
-
-- Release archives gain a versionless executable, MIT license, and build details. The legacy executable name remains as a hard link for the current Homebrew formula.
-- Release publication verifies the complete platform matrix and uploaded bytes before publishing a draft. Reruns preserve existing assets and fail on differences.
-- Document the next release's macOS 14 and Ubuntu 24.04 binary baselines, compatibility policy, and interrupted-command behavior.
+- Link inherited user skills into a repository with `m`; remove the override with Space without disabling User Scope (#30).
+- Release archives include a versionless `skillator` executable (#21).
 
 ### Fixed
 
-- Treat removal of an account-wide skill before user configuration exists as an unchanged result.
-- Reject noncanonical target-registry paths containing redundant separators, `.` or `..` components.
-- Correct the domain glossary to describe checkout-local configuration and ignore controls.
+- Removing a user skill before user configuration exists returns an unchanged result.
+- Reject target-registry paths containing redundant separators, `.` or `..` components.
 
 ## [0.1.0] - 2026-09-04
 

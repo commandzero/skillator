@@ -50,6 +50,11 @@ skillator library locations
 skillator library list --format json
 skillator library list elastic --format json
 
+# Preview and pull fast-forward updates from configured upstreams.
+skillator library update --check
+skillator library update
+skillator library update --timeout 60 --format json
+
 # Set up this checkout, then inspect or change its selected skills.
 skillator init
 skillator target list
@@ -157,3 +162,22 @@ See [contributor checks](docs/contributing.md), [release procedure](docs/release
 ## License
 
 [MIT](LICENCE.md)
+
+## Update Library repositories
+
+Run `skillator library update` to pull clean repositories beneath registered Library Locations.
+Each pull uses the current branch's upstream and permits only fast-forward updates.
+
+1. Dirty, detached, unconfigured, or diverged checkouts produce a diagnostic. Independent repositories continue.
+2. Submodules are skipped with an advisory. Manage their recorded commits through Git.
+3. Each pull has a 30-second limit, including its transport and hooks. Use `--timeout <seconds>` to change the limit.
+4. A timeout stops that pull's subprocess group and continues. Ctrl+C stops the batch and emits a partial report with exit 130.
+5. Completed updates remain applied after failure or cancellation. A failed pull may have changed Git metadata or working content; Skillator does not roll it back.
+6. Existing skill links expose updated content immediately. Copied skills need a separate synchronization.
+
+`--check` inspects only local eligibility and makes no network request or writes.
+It reports "Would attempt pull; remote state not checked." and returns 1 for a nonempty plan, even if cached tracking refs match HEAD.
+
+Interactive terminal text lists each unchanged repository as `up-to-date`.
+Redirected text uses an unchanged count; JSON and YAML retain per-checkout outcomes.
+Normal updates return 0 for success or an empty Library, and 1 for a partial or blocked batch; submodule skips alone do not cause failure.

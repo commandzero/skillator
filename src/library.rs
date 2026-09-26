@@ -389,7 +389,10 @@ fn scan_location(
         discovered.push(local);
     }
 
-    for discovered_source in discovered {
+    for mut discovered_source in discovered {
+        snapshot
+            .diagnostics
+            .append(&mut discovered_source.diagnostics);
         insert_discovered_source(snapshot, location_index, discovered_source);
     }
 }
@@ -419,6 +422,7 @@ struct DiscoveredSource {
     kind: SourceKind,
     origin: Option<String>,
     skills: Vec<LibrarySkill>,
+    diagnostics: Vec<LibraryDiagnostic>,
 }
 
 impl DiscoveredSource {
@@ -436,6 +440,7 @@ impl DiscoveredSource {
             kind,
             origin,
             skills: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -484,18 +489,34 @@ fn discover_tree(
             .skills
             .push(read_skill(directory, relative_to_source));
     }
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            current.diagnostics.push(discovery_error(directory, error));
+            return;
+        }
     };
-    let mut entries: Vec<_> = entries.flatten().collect();
+    let mut entries: Vec<_> = entries
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                current.diagnostics.push(discovery_error(directory, error));
+                None
+            }
+        })
+        .collect();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         if entry.file_name() == OsStr::new(".git") {
             continue;
         }
         let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
+        let file_type = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) => {
+                current.diagnostics.push(discovery_error(&path, error));
+                continue;
+            }
         };
         if file_type.is_symlink()
             && follow_root_skill_links
@@ -743,4 +764,12 @@ fn key_from_remote(remote: &str) -> Option<String> {
             segments[segments.len() - 1].to_ascii_lowercase()
         )
     })
+}
+
+fn discovery_error(path: &Path, error: std::io::Error) -> LibraryDiagnostic {
+    LibraryDiagnostic {
+        code: "discovery_incomplete",
+        message: format!("cannot inspect {}: {error}", path.display()),
+        path: Some(path.to_owned()),
+    }
 }
