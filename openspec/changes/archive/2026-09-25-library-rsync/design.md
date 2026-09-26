@@ -44,7 +44,7 @@ Store versioned synchronization state beneath `~/.skillator/rsync/`, outside the
 
 Use per-participant acknowledgements rather than one global success marker. Unselected or failed hosts retain their last acknowledged base. Baseline loss means first contact, which cannot authorize historical deletion. This costs more bookkeeping than two sequential rsync calls but prevents host order and partial failure from choosing the winner.
 
-Reserve the same user-home write lock used by Library Configuration saves and `library update` before creating session stages or publishing skill content. Release all participant locks when the session finishes or aborts. Discovery may run before lock reservation, but the locked phase reobserves every participant before planning writes.
+Reserve the same user-home write lock used by Library Configuration saves and `library update` before creating session stages or publishing skill content. Remote user reconciliation may share that lock with its prepared materialization plan, but the session retains its own guard through acknowledgement, history publication, and cleanup. Release all participant locks when the session finishes or aborts. Discovery may run before lock reservation, but the locked phase reobserves every participant before planning writes.
 
 ### Paths, inventory, and transfer units
 

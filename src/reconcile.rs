@@ -379,7 +379,15 @@ pub struct TargetBusy;
 
 /// Locks one or more Targets in canonical root-path order.
 pub struct TargetLocks {
-    locks: Vec<File>,
+    locks: Vec<std::sync::Arc<File>>,
+}
+
+impl Clone for TargetLocks {
+    fn clone(&self) -> Self {
+        Self {
+            locks: self.locks.clone(),
+        }
+    }
 }
 
 impl TargetLocks {
@@ -395,7 +403,7 @@ impl TargetLocks {
         for (_, path) in paths {
             let file = File::open(path).map_err(|_| TargetBusy)?;
             file.try_lock().map_err(|_| TargetBusy)?;
-            locks.push(file);
+            locks.push(std::sync::Arc::new(file));
         }
         Ok(Self { locks })
     }
@@ -404,7 +412,9 @@ impl TargetLocks {
 impl Drop for TargetLocks {
     fn drop(&mut self) {
         for lock in &self.locks {
-            let _ = lock.unlock();
+            if std::sync::Arc::strong_count(lock) == 1 {
+                let _ = lock.unlock();
+            }
         }
     }
 }

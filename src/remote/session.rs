@@ -105,6 +105,7 @@ pub(super) struct Session {
     stage_parent: Option<Directory>,
     session_lock: Option<File>,
     user_lock: Option<TargetLocks>,
+    user_reconciled: bool,
     history: History,
     history_expected: Fingerprint,
 }
@@ -119,6 +120,7 @@ impl Session {
             stage_parent: None,
             session_lock: None,
             user_lock: None,
+            user_reconciled: false,
             history: History::default(),
             history_expected: Fingerprint::Absent,
         }
@@ -258,9 +260,16 @@ impl Session {
                     TargetLocks::acquire(&[&target]).map_err(|_| Error::busy())?
                 } else {
                     self.require_active()?;
-                    self.user_lock.take().ok_or_else(|| {
-                        Error::input("user state already reconciled in this session")
-                    })?
+                    if self.user_reconciled {
+                        return Err(Error::input(
+                            "user state already reconciled in this session",
+                        ));
+                    }
+                    self.user_reconciled = true;
+                    self.user_lock
+                        .as_ref()
+                        .ok_or_else(|| Error::input("user-home lock was not reserved"))?
+                        .clone()
                 };
                 let report = UserScopeWorkflow::save_remote(
                     &self.paths,
@@ -1116,6 +1125,7 @@ impl Session {
         self.stage_parent = None;
         self.stage_identity = None;
         self.user_lock = None;
+        self.user_reconciled = false;
         self.session_lock = None;
         stage_valid.and(cleanup)
     }
@@ -1677,6 +1687,43 @@ mod tests {
             );
             assert_eq!(fs::read(paths.user_config()).unwrap(), edited);
         }
+    }
+
+    #[test]
+    fn user_home_lock_stays_held_through_acknowledgement_and_finish() {
+        let (home, mut session, _) = setup();
+        let desired = crate::config::RepositoryConfig::user_first_run();
+        let Response::User { .. } = session
+            .handle(Request::User {
+                entries: snapshot::user_entries(&desired).unwrap(),
+                expected: None,
+                check: false,
+            })
+            .unwrap()
+        else {
+            panic!("expected user reconciliation")
+        };
+        let target = Target::user(home.path()).unwrap();
+        assert!(TargetLocks::acquire(&[&target]).is_err());
+        session
+            .handle(Request::Acknowledge {
+                peers: BTreeMap::new(),
+                aliases: BTreeMap::new(),
+                provenance: BTreeMap::new(),
+            })
+            .unwrap();
+        assert!(TargetLocks::acquire(&[&target]).is_err());
+        assert!(
+            session
+                .handle(Request::User {
+                    entries: snapshot::user_entries(&desired).unwrap(),
+                    expected: None,
+                    check: false,
+                })
+                .is_err()
+        );
+        session.handle(Request::Finish).unwrap();
+        assert!(TargetLocks::acquire(&[&target]).is_ok());
     }
 
     #[test]
