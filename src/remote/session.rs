@@ -319,11 +319,10 @@ impl Session {
                 };
             if let Some(parent) = parent {
                 match parent.open_file(root.file_name().unwrap()) {
-                    Ok(lock) if lock.metadata().map_err(Error::input_display)?.is_file() => {
+                    Ok((lock, _)) => {
                         lock.try_lock().map_err(|_| Error::busy())?;
                         self.session_lock = Some(lock);
                     }
-                    Ok(_) => return Err(Error::input("session lock must be a regular file")),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(Error::input_display(error)),
                 }
@@ -1141,6 +1140,7 @@ fn recover_pending(home: &Path) -> Result<usize> {
         stage
             .open_file(record.file_name().unwrap())
             .map_err(Error::input_display)?
+            .0
             .read_to_end(&mut bytes)
             .map_err(Error::input_display)?;
         let recovery: Recovery = serde_json::from_slice(&bytes).map_err(Error::input_display)?;

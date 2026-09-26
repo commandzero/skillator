@@ -67,7 +67,11 @@ pub(super) fn decide_group<T: Clone + Ord>(
 
     let contested = changes.len() > 1
         || (deletion && edited)
-        || (changes.is_empty() && present_values.len() > 1);
+        || (changes.is_empty() && present_values.len() > 1)
+        || (present_values.len() > 1
+            && observations
+                .iter()
+                .any(|o| o.base.is_none() && o.value.is_some()));
     if contested {
         return resolve(observations, conflict, local_count);
     }
@@ -144,6 +148,19 @@ mod tests {
     }
     fn run(values: &[Observation<String>], missing: MissingPolicy) -> Decision<String> {
         decide_group(values, ConflictPolicy::Ask, missing, 1)
+    }
+
+    #[test]
+    fn mixed_history_requires_explicit_conflict_resolution() {
+        let known = seen(Some("known"), Some(Some("known")));
+        let unknown = seen(Some("new"), None);
+        for values in [[known.clone(), unknown.clone()], [unknown, known.clone()]] {
+            assert_eq!(run(&values, MissingPolicy::Copy), Decision::Conflict);
+        }
+        assert_eq!(
+            run(&[known, seen(None, None)], MissingPolicy::Copy),
+            Decision::Use(Some("known".into()))
+        );
     }
 
     #[test]

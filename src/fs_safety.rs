@@ -170,7 +170,7 @@ impl Directory {
         &self.0
     }
 
-    pub(crate) fn open_file(&self, name: &OsStr) -> io::Result<File> {
+    pub(crate) fn open_file(&self, name: &OsStr) -> io::Result<(File, std::fs::Metadata)> {
         let name = c_name(name)?;
         // SAFETY: openat receives a live descriptor and a valid C string.
         let fd = unsafe {
@@ -185,13 +185,14 @@ impl Directory {
         } else {
             // SAFETY: openat returned a new descriptor owned by this File.
             let file = unsafe { File::from_raw_fd(fd) };
-            if !file.metadata()?.is_file() {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "entry is not a regular file",
                 ));
             }
-            Ok(file)
+            Ok((file, metadata))
         }
     }
 

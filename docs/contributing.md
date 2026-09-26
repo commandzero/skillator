@@ -57,6 +57,13 @@ Keep historical commits intact; temporary worktree commits do not need rewriting
 Add user-visible changes to the appropriate Unreleased category in CHANGELOG.md.
 Do not add empty categories or require a changelog entry for every internal change.
 
+## Rust API migration
+
+The unreleased removal of `reconcile::prepare_transition_with_locks` is a source-breaking Rust API change and must ship in 0.2.0, not a 0.1.x patch.
+Call `reconcile::prepare_transition_with_locks_and_repository_skills(target, original, staged, library, &RepositorySkillExceptions::new(), locks)` instead, importing `RepositorySkillExceptions` from `skillator::target`.
+This preserves caller-owned lock transfer while explicitly supplying an empty repository-skill exception set. Callers that do not already hold locks can continue using `reconcile::prepare_transition`.
+The CLI reconciliation commands are unchanged by this API removal.
+
 ## OpenSpec completion
 
 Every PR must contain one association field with comma-separated change IDs.

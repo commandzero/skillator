@@ -210,13 +210,10 @@ fn save_contained_bytes_with(
 
 fn read_optional_at(parent: &Directory, name: &std::ffi::OsStr) -> Result<Option<Vec<u8>>> {
     let mut file = match parent.open_file(name) {
-        Ok(file) => file,
+        Ok((file, _)) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(Error::input_display(error)),
     };
-    if !file.metadata().map_err(Error::input_display)?.is_file() {
-        return Err(Error::input("configuration must be a regular file"));
-    }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(Error::input_display)?;
     Ok(Some(bytes))
@@ -323,7 +320,7 @@ fn copy_file_at(
     executable: Option<bool>,
 ) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let mut input = source
+    let (mut input, _) = source
         .open_file(source_name)
         .map_err(Error::input_display)?;
     let mut output = target
@@ -566,17 +563,34 @@ fn observe_with(path: &Path, after_metadata: impl FnOnce()) -> Result<Option<Ent
 
 /// Observe an entry through a held parent inode, independent of pathname swaps.
 pub(super) fn observe_at(parent: &Directory, name: &std::ffi::OsStr) -> Result<Option<Entry>> {
+    observe_at_with(parent, name, || {})
+}
+
+fn observe_at_with(
+    parent: &Directory,
+    name: &std::ffi::OsStr,
+    after_metadata: impl FnOnce(),
+) -> Result<Option<Entry>> {
+    use std::os::unix::fs::MetadataExt;
     let stat = match parent.metadata(name) {
         Ok(stat) => stat,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(Error::input_display(error)),
     };
+    after_metadata();
     let entry = match stat.st_mode & libc::S_IFMT {
         libc::S_IFREG => {
-            let file = parent.open_file(name).map_err(Error::input_display)?;
+            let (file, metadata) = parent.open_file(name).map_err(Error::input_display)?;
+            // libc's device and inode integer types differ across supported OSes.
+            #[allow(clippy::unnecessary_cast)]
+            let same_inode = metadata.dev() as libc::dev_t == stat.st_dev
+                && metadata.ino() as libc::ino_t == stat.st_ino;
+            if !same_inode {
+                return Err(Error::input("file changed while observing its contents"));
+            }
             Entry::File {
                 hash: digest_reader(file)?,
-                executable: stat.st_mode & 0o111 != 0,
+                executable: metadata.mode() & 0o111 != 0,
             }
         }
         libc::S_IFDIR => Entry::Directory,
@@ -608,6 +622,40 @@ pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descriptor_observation_rechecks_inode_and_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        for replace in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let root = home.path().canonicalize().unwrap();
+            let parent = Directory::open_existing_parent(&root, &root).unwrap();
+            let path = root.join("payload");
+            fs::write(&path, "same content").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            let observed = observe_at_with(&parent, "payload".as_ref(), || {
+                if replace {
+                    let replacement = root.join("replacement");
+                    fs::write(&replacement, "same content").unwrap();
+                    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+                    fs::rename(replacement, &path).unwrap();
+                } else {
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+            });
+            if replace {
+                assert!(observed.is_err(), "{observed:?}");
+            } else {
+                assert!(matches!(
+                    observed.unwrap(),
+                    Some(Entry::File {
+                        executable: true,
+                        ..
+                    })
+                ));
+            }
+        }
+    }
 
     #[test]
     fn replaced_regular_file_never_follows_external_symlink() {

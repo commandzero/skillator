@@ -15,9 +15,15 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 - Link inherited user skills into a repository with `m`; remove the override with Space without disabling User Scope (#30).
 - Release archives include a versionless `skillator` executable (#21).
 
+### Removed
+
+- **Breaking Rust API:** replace `reconcile::prepare_transition_with_locks` with the explicit repository-skill-aware entry point; see the [0.2.0 migration](docs/contributing.md#rust-api-migration) (#32).
+
 ### Fixed
 
 - Reject files replaced by symlinks or special entries during library synchronization instead of following or blocking on them (#32).
+- Preserve concurrent executable-mode changes during file observation (#32).
+- Require conflict resolution when different present values have mixed known and unknown synchronization history (#32).
 - Removing a user skill before user configuration exists returns an unchanged result.
 - Reject target-registry paths containing redundant separators, `.` or `..` components.
 
