@@ -473,6 +473,7 @@ fn synchronize_inner(
         }
     }
     let mut acquisition_aliases = BTreeMap::<String, String>::new();
+    let mut conflicting_aliases = BTreeSet::new();
     for peer in peers.iter() {
         for (path, target) in &peer.snapshot.acquisition_aliases {
             if acquisition_aliases
@@ -485,12 +486,14 @@ fn synchronize_inner(
                     "alias_conflict",
                     "acquisition alias targets differ; align the links before synchronization",
                 );
+                conflicting_aliases.insert(path.clone());
                 continue;
             }
             acquisition_aliases.insert(path.clone(), target.clone());
         }
     }
     let all_acquisition_aliases = acquisition_aliases.clone();
+    acquisition_aliases.retain(|path, _| !conflicting_aliases.contains(path));
     acquisition_aliases.retain(|path, target| {
         let recognized = sources.iter().any(|source| {
             !blocked.contains(&source.root)
@@ -2138,6 +2141,54 @@ mod tests {
                 .any(|d| d.code == "alias_target_unavailable")
         );
         assert!(!homes[1].path().join(".skillator/library/demo").exists());
+    }
+
+    #[test]
+    fn conflicting_acquisition_targets_do_not_publish_an_arbitrary_alias() {
+        let homes: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        for (index, target) in ["Development/skills/demo", "Development/other/demo"]
+            .iter()
+            .enumerate()
+        {
+            configure(homes[index].path(), ".skillator/library");
+            fs::write(
+                homes[index].path().join(".skillator/library.yaml"),
+                format!(
+                    "version: 1\nlocations:\n - path: '~/.skillator/library'\n - path: '~/{}'\n",
+                    target.trim_end_matches("/demo")
+                ),
+            )
+            .unwrap();
+            skill(homes[index].path(), target, "original");
+            fs::create_dir_all(homes[index].path().join(".skillator/library")).unwrap();
+            std::os::unix::fs::symlink(
+                homes[index].path().join(target),
+                homes[index].path().join(".skillator/library/demo"),
+            )
+            .unwrap();
+        }
+        let report = sync(&homes, options(false));
+        assert_eq!(report.exit_status, 1, "{}", report.text());
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "alias_conflict")
+        );
+        assert!(!homes[2].path().join(".skillator/library/demo").exists());
+        for (index, target) in ["Development/skills/demo", "Development/other/demo"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                homes[index]
+                    .path()
+                    .join(".skillator/library/demo")
+                    .canonicalize()
+                    .unwrap(),
+                homes[index].path().join(target).canonicalize().unwrap()
+            );
+        }
     }
 
     #[test]
