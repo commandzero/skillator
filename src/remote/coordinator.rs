@@ -271,6 +271,22 @@ fn synchronize_inner(
             )));
         }
     }
+    // A receiving host may later initiate with different local SSH aliases. Its
+    // acknowledged peer identities still protect an established cohort from a
+    // replacement whose new identity has no matching alias on this machine.
+    let history = &peers[0].snapshot.history;
+    if !history.peers.is_empty()
+        && peers.len() - 1 <= history.peers.len()
+        && peers.iter().skip(1).any(|peer| {
+            peer.id
+                .as_ref()
+                .is_none_or(|id| !history.peers.contains_key(id))
+        })
+    {
+        return Err(Error::input(
+            "participant identity changed in the selected host set; restore its history or explicitly reset the saved peer association before first-contact synchronization",
+        ));
+    }
     let mut sources = BTreeMap::<String, Source>::new();
     let mut blocked = BTreeSet::new();
     let local_roots: BTreeSet<_> = peers[0]
@@ -1361,9 +1377,32 @@ fn blocked_enablement(key: &str, sources: &[Source], blocked: &BTreeSet<String>)
     let Ok((_, source, skill)) = serde_json::from_str::<(String, String, String)>(value) else {
         return true;
     };
-    sources.iter().any(|s| {
-        s.key == source && (blocked.contains(&s.root) || s.invalid_skills.contains(&skill))
-    })
+    let normalized_skill = if skill == "." { "" } else { &skill };
+    let Some(source) = sources.iter().find(|s| s.key == source) else {
+        return true;
+    };
+    blocked.contains(&source.root)
+        || source.invalid_skills.contains(normalized_skill)
+        || !source.skills.contains(normalized_skill)
+}
+
+fn report_blocked_enablement(key: &str, peers: &[Participant], report: &mut Report) {
+    if peers
+        .iter()
+        .any(|peer| peer.snapshot.user.contains_key(key))
+        && peers
+            .iter()
+            .any(|peer| !peer.snapshot.user.contains_key(key))
+    {
+        report.problem(
+            "local",
+            ".agents/skillator.yaml",
+            "enablement_source_unavailable",
+            format!(
+                "selection {key} cannot reach another host until its skill source is available"
+            ),
+        );
+    }
 }
 
 fn user_base(peers: &[Participant], index: usize, key: &str) -> Option<Option<String>> {
@@ -1440,6 +1479,12 @@ fn sync_user(
             .iter()
             .any(|key| blocked_enablement(key, sources, blocked))
         {
+            for key in members
+                .iter()
+                .filter(|key| blocked_enablement(key, sources, blocked))
+            {
+                report_blocked_enablement(key, peers, report);
+            }
             continue;
         }
         let observations: Vec<_> = (0..peers.len())
@@ -1513,6 +1558,7 @@ fn sync_user(
             })
             .collect();
         if blocked_enablement(&key, sources, blocked) {
+            report_blocked_enablement(&key, peers, report);
             continue;
         }
         let decision = planner::decide(&observations, options.conflict, options.missing, true);
@@ -2264,6 +2310,56 @@ mod tests {
     }
 
     #[test]
+    fn invalid_source_root_skill_does_not_gain_remote_enablement() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), "development/root");
+        fs::create_dir_all(homes[0].path().join("development/root")).unwrap();
+        fs::write(
+            homes[0].path().join("development/root/SKILL.md"),
+            "missing frontmatter\n",
+        )
+        .unwrap();
+        fs::create_dir_all(homes[0].path().join(".agents")).unwrap();
+        fs::write(
+            homes[0].path().join(".agents/skillator.yaml"),
+            "version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements:\n  - directory: agents\n    skill:\n      source: local/development/root\n      path: .\n    materialization: linked\n",
+        )
+        .unwrap();
+        let report = sync(&homes, options(false));
+        assert!(report.exit_status <= 1, "{}", report.text());
+        let remote = super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
+        assert!(remote.enablements().is_empty());
+        let local = super::super::snapshot::user(&AppPaths::new(homes[0].path().into())).unwrap();
+        assert_eq!(local.enablements().len(), 1);
+    }
+
+    #[test]
+    fn unavailable_selection_source_or_skill_stays_local() {
+        for missing_source in [true, false] {
+            let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+            if !missing_source {
+                configure(homes[0].path(), ".skillator/library");
+                skill(homes[0].path(), ".skillator/library/other", "valid");
+            }
+            select_demo_for_user(homes[0].path());
+            let report = sync(&homes, options(false));
+            assert_eq!(report.exit_status, 1, "{}", report.text());
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| { diagnostic.code == "enablement_source_unavailable" })
+            );
+            let remote =
+                super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
+            assert!(remote.enablements().is_empty());
+            let local =
+                super::super::snapshot::user(&AppPaths::new(homes[0].path().into())).unwrap();
+            assert_eq!(local.enablements().len(), 1);
+        }
+    }
+
+    #[test]
     fn failed_registration_blocks_new_dependent_enablements() {
         use super::super::transport::Fault;
         let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
@@ -2615,6 +2711,49 @@ mod tests {
         );
         assert!(!remote_path.exists());
         fs::write(remote_path, remote_state).unwrap();
+    }
+
+    #[test]
+    fn former_receiver_rejects_replaced_initiator_before_mutation() {
+        let mut homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        assert_eq!(sync(&homes, options(false)).exit_status, 0);
+        let previous = state::History::load(homes[0].path()).unwrap().id.unwrap();
+        let receiver = homes.remove(1);
+        let replacement = tempfile::tempdir().unwrap();
+        let rotated = vec![receiver, replacement];
+        let receiver_state =
+            fs::read(rotated[0].path().join(".skillator/rsync/state.json")).unwrap();
+        let error = synchronize(
+            &AppPaths::new(rotated[0].path().into()),
+            participants(&rotated),
+            options(false),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("identity changed"), "{error}");
+        assert_eq!(
+            fs::read(rotated[0].path().join(".skillator/rsync/state.json")).unwrap(),
+            receiver_state
+        );
+        assert!(!rotated[1].path().join(".skillator/rsync").exists());
+        assert!(
+            state::History::load(rotated[0].path())
+                .unwrap()
+                .peers
+                .contains_key(&previous)
+        );
+    }
+
+    #[test]
+    fn former_receiver_can_initiate_with_the_same_peer() {
+        let mut homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        assert_eq!(sync(&homes, options(false)).exit_status, 0);
+        homes.swap(0, 1);
+        let report = sync(&homes, options(false));
+        assert_eq!(report.exit_status, 0, "{}", report.text());
     }
 
     #[test]

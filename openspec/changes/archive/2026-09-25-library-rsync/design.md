@@ -36,6 +36,8 @@ Pass arguments structurally wherever possible. Validate SSH destinations and use
 
 Persist a stable random participant identity on first successful application, separate from hostname. A cloned state directory or changed identity must be diagnosed rather than silently reusing another participant's history. Preview cannot create this identity.
 
+Each participant retains acknowledged peer identities. A former receiver may later initiate with different local SSH aliases, so identity checking also compares the selected cohort with those peer identities. When a selected cohort is no larger than the previously acknowledged cohort, an unknown identity is treated as a possible replacement and requires explicit recovery or reset before first contact. To add a new host, include the previously acknowledged hosts in the same run.
+
 Store versioned synchronization state beneath `~/.skillator/rsync/`, outside the strict live-inventory library configuration. Record source identity, home-relative path, commit reference where relevant, each participant's acknowledged base, content hash, file type and executable mode, deletion evidence, desired-state entries, and incomplete publication records. Content needed for rollback stays in recoverable staging, not the library registry.
 
 Use per-participant acknowledgements rather than one global success marker. Unselected or failed hosts retain their last acknowledged base. Baseline loss means first contact, which cannot authorize historical deletion. This costs more bookkeeping than two sequential rsync calls but prevents host order and partial failure from choosing the winner.
