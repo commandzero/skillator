@@ -12,6 +12,7 @@ use crate::hooks::{HookReport, HookState, HookWorkflow};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use crossterm::style::Stylize;
 use serde_json::Value;
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -32,6 +33,21 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(name = "__rsync", hide = true)]
+    RemoteProtocol,
+    #[command(name = "__rsync-server", hide = true)]
+    RemoteServer {
+        #[arg(long)]
+        stage_hex: String,
+        #[arg(long)]
+        device: u64,
+        #[arg(long)]
+        inode: u64,
+        #[arg(long)]
+        names_hex: String,
+        #[arg(last = true)]
+        server_args: Vec<OsString>,
+    },
     /// Choose which skills are available in your library.
     Library {
         #[command(subcommand)]
@@ -68,6 +84,8 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum LibraryCommand {
+    /// Synchronize library skill content with configured SSH hosts.
+    Rsync(RsyncArgs),
     /// Add a directory of skills to the Library.
     Add {
         location: String,
@@ -224,6 +242,24 @@ struct OutputArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct RsyncArgs {
+    /// Select configured host aliases, separated by commas. Defaults to all hosts.
+    #[arg(long, value_name = "ALIAS,...")]
+    hosts: Option<String>,
+    /// Choose how competing edits are resolved.
+    #[arg(long, value_enum, default_value = "ask")]
+    conflict: crate::remote::ConflictPolicy,
+    /// Choose how missing skill files are handled.
+    #[arg(long, value_enum, default_value = "copy")]
+    missing: crate::remote::MissingPolicy,
+    /// Inspect without writing on any participant.
+    #[arg(long)]
+    check: bool,
+    #[command(flatten)]
+    output: OutputArgs,
+}
+
+#[derive(Debug, clap::Args)]
 struct MutationOutputArgs {
     /// Show what would change without writing files.
     #[arg(long)]
@@ -331,6 +367,27 @@ pub fn run() -> ExitCode {
     };
     let paths = AppPaths::new(home);
     match cli.command {
+        Some(Commands::RemoteProtocol) => match crate::remote::serve(paths) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => diagnostic(error.code, &error.to_string()),
+        },
+        Some(Commands::RemoteServer {
+            stage_hex,
+            device,
+            inode,
+            names_hex,
+            server_args,
+        }) => match crate::remote::serve_transfer(
+            paths.home(),
+            &stage_hex,
+            device,
+            inode,
+            &names_hex,
+            &server_args,
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => diagnostic(error.code, &error.to_string()),
+        },
         Some(Commands::Init(arguments)) => run_init(&paths, arguments),
         Some(Commands::Sync(arguments)) => run_sync_command(&paths, arguments),
         Some(Commands::Library { command: None }) => {
@@ -388,6 +445,32 @@ fn validate_output(output: &OutputArgs) -> Result<(), ExitCode> {
 
 fn run_library_command(paths: &AppPaths, command: LibraryCommand) -> ExitCode {
     match command {
+        LibraryCommand::Rsync(arguments) => {
+            if let Err(code) = validate_output(&arguments.output) {
+                return code;
+            }
+            let options = crate::remote::Options {
+                hosts: arguments.hosts,
+                conflict: arguments.conflict,
+                missing: arguments.missing,
+                check: arguments.check,
+                interactive: arguments.output.format == OutputFormat::Text
+                    && interactive_terminal(),
+            };
+            match crate::remote::run(paths, options) {
+                Ok(report) => {
+                    let rendered = match arguments.output.format {
+                        OutputFormat::Text => Ok(report.text_with_color(color_enabled(
+                            arguments.output.color.unwrap_or(ColorPolicy::Auto),
+                        ))),
+                        OutputFormat::Json => render_json(&report),
+                        OutputFormat::Yaml => render_serialized_yaml(&report),
+                    };
+                    write_rendered(rendered, report.exit_status)
+                }
+                Err(error) => diagnostic(error.code, &error.to_string()),
+            }
+        }
         LibraryCommand::Update(arguments) => {
             if let Err(code) = validate_output(&arguments.output.output) {
                 return code;
@@ -953,14 +1036,8 @@ fn diagnostic(code: u8, message: &str) -> ExitCode {
     ExitCode::from(code)
 }
 
-pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
-    if report.mode == "library_update" || report.mode == "library_update_check" {
-        return crate::library_update::render_text(
-            report,
-            is_terminal::is_terminal(std::io::stdout()),
-        );
-    }
-    let color = match color {
+fn color_enabled(color: ColorPolicy) -> bool {
+    match color {
         ColorPolicy::Always => true,
         ColorPolicy::Never => false,
         ColorPolicy::Auto => {
@@ -968,7 +1045,17 @@ pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
                 && std::env::var_os("TERM").is_none_or(|term| term != "dumb")
                 && std::env::var_os("NO_COLOR").is_none()
         }
-    };
+    }
+}
+
+pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
+    if report.mode == "library_update" || report.mode == "library_update_check" {
+        return crate::library_update::render_text(
+            report,
+            is_terminal::is_terminal(std::io::stdout()),
+        );
+    }
+    let color = color_enabled(color);
     if report.status == ReportStatus::InSync
         && report.changes.is_empty()
         && report.diagnostics.is_empty()

@@ -1,0 +1,34 @@
+change: simplify-library-rsync
+reviewer: openai-codex/gpt-6-astra
+reviewed_at: 2026-09-26T20:08:05Z
+notes: |
+  # Skillator PR #32 semantic synchronization review
+  
+  Reviewed committed implementation/archive state 887fb1e on 2026-09-26. Reviewer: openai-codex/gpt-6-astra. Repository: commandzero/skillator. Scope: library-rsync and simplify-library-rsync archive deltas against their affected main specifications. This records semantic spec correspondence, not independent code-review approval.
+  
+  ## library-rsync
+  
+  - Main library-rsync requirements preserve explicit host selection, all-host preflight, home-relative containment, full skill content and exclusions, exact-commit bootstrap, index-preserving working-tree synchronization, host-order-independent planning, explicit conflict/missing policies, verified participant history, and recoverable publication. Their original host subset, dependency, path escape, hidden content, upstream advancement, mismatch, unavailable commit, dirty edit, competing edit, remote relay, conflict, missing-file, interruption, preview and stale-destination scenarios remain represented.
+  - Original user-configuration preflight, transferred enablements, rebuilt user links, desired-state history and user-state locking language are intentionally superseded by simplify-library-rsync. Main specs now exclude user configuration from synchronization input and history and keep user materializations local. This is an approved later change, not missing synchronization of the earlier archive.
+  - Main library-management preserves both missing-inventory scenarios, both acquisition-mode scenarios, the explicit rsync exceptions, and remote registration preservation with the incoming-location scenario. Exclusions, overlap choices, location order and live source identity remain required.
+  - Main cli-contract preserves the compact version-1 JSON/YAML envelope, equivalent-format and advisory scenarios, ANSI-free deterministic output, host alias attribution, exit-code rules and partial-source-mismatch scenario. Git composition retains the exact-commit clone exception and ordinary Git clone/worktree scenarios. The existing separate library-update contract deliberately permits bounded fast-forward updates; rsync still cannot update existing checkouts.
+  - Original user-scope remote semantic merge and received-selection reconciliation requirements are deliberately removed by the later simplification. Ordinary first-run, user link/copy/remove/list, guarded reconciliation and repository inheritance requirements remain in main user-scope-onboarding.
+  
+  ## simplify-library-rsync
+  
+  - Every modified library-rsync requirement is reflected in main: user config is not read or validated; full skill-content scope excludes user state/materializations; selections remain local under every missing policy; history stores only verified content outcomes; recovery and locking protect managed library locations/history.
+  - The malformed host-local user configuration scenario is present. Existing dependency, absent-library, hidden-content, copy/remove/delete-vs-edit, interruption, clone-preview and changed-destination scenarios retain their safety outcomes.
+  - The added batched payload requirement and both remote-relay and partial-batch-failure scenarios are present. Batching passes through the initiator and retains per-entry validation/publication/acknowledgement without broad mirror deletion or unverified publication.
+  - Main cli-contract contains the content-only policy/help requirement and unchanged default-command scenario.
+  - Main user-scope-onboarding contains the revised strict machine-local requirement, existing first-save scenario and independent-host-selections scenario. Both explicitly removed remote selection/reconciliation requirements are absent. Existing links can reflect library-target changes, but no user materialization entries are created/replaced/removed by rsync.
+  - No specification files are renamed or removed. Both changes have real spec deltas; no no-delta exemption is appropriate.
+  
+  ## Exercised validation
+  
+  The implementation turn passed pinned Rust 1.97.1 full preflight: 364 tests, formatting, Clippy, shell/workflow checks, OKF documentation validation, 11 main specs and release safeguards. Strict simplification delta validation passed. Actual macOS-to-Linux SSH and GNU-client smoke covered exact-commit bootstrap, dirty index preservation, batched relay, failed transfer preservation and targeted retry, conflicts, deletion, 70-file chunking, no-op convergence, modes/links and unchanged malformed user configurations/copied materializations. No executable code changed after those checks; publication preparation removes only the obsolete uncommitted-receipt note.
+no_spec_deltas: false
+archive_tree: 4549b0392187361fb9c27af98c0cdef8e9de967e
+specs:
+  openspec/specs/cli-contract/spec.md: 88a33efb14a4ec3312c01ad6eeeacdf58446e258
+  openspec/specs/library-rsync/spec.md: 460b39d6277668ba434bce0fc3eff27170c6f75e
+  openspec/specs/user-scope-onboarding/spec.md: 9f4b351e208db6ddc9eac9298377c93fc1596d35

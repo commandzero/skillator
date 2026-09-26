@@ -1,0 +1,1268 @@
+use super::{
+    Error, Result, process,
+    state::{self, Entry, History},
+};
+use crate::app::AppPaths;
+use crate::config::{LibraryConfig, LibraryConfigCodec, LoadResult};
+use crate::fs_safety::Directory;
+use crate::library::{SkillValidity, SourceKind, scan_library};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Location {
+    pub path: String,
+    pub exclusions: Vec<String>,
+    pub allow_overlap: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GitRef {
+    pub origin: String,
+    pub commit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Source {
+    pub key: String,
+    pub root: String,
+    pub location: String,
+    pub exclusions: Vec<String>,
+    pub git: Option<GitRef>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    pub skills: BTreeSet<String>,
+    #[serde(default)]
+    pub invalid_skills: BTreeSet<String>,
+    pub files: BTreeMap<String, Entry>,
+    pub committed: BTreeMap<String, Entry>,
+    pub problems: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Snapshot {
+    pub protocol: u64,
+    pub version: String,
+    pub home: PathBuf,
+    pub history: History,
+    pub locations: Vec<Location>,
+    pub available_locations: BTreeSet<String>,
+    pub sources: Vec<Source>,
+    pub physical_paths: BTreeMap<String, String>,
+    #[serde(default)]
+    pub acquisition_aliases: BTreeMap<String, String>,
+    pub library_hash: Option<String>,
+    pub problems: Vec<String>,
+}
+
+pub(super) fn file_context(snapshot: &Snapshot, path: &str) -> Option<String> {
+    let source = snapshot
+        .sources
+        .iter()
+        .filter(|source| path == source.root || path.starts_with(&format!("{}/", source.root)))
+        .max_by_key(|source| source.root.len())?;
+    Some(state::digest(
+        &serde_json::to_vec(&(&source.key, &source.root, &source.git)).ok()?,
+    ))
+}
+
+pub(super) fn library(paths: &AppPaths) -> Result<LibraryConfig> {
+    library_from_bytes(state::read_contained(paths.home(), ".skillator/library.yaml")?.as_deref())
+}
+
+pub(super) fn library_from_bytes(bytes: Option<&[u8]>) -> Result<LibraryConfig> {
+    parse_load(
+        bytes
+            .map(LibraryConfigCodec::parse)
+            .unwrap_or(LoadResult::Missing),
+        LibraryConfig::empty(),
+    )
+}
+
+fn parse_load<T: Clone>(loaded: LoadResult<T>, empty: T) -> Result<T> {
+    match loaded {
+        LoadResult::Missing => Ok(empty),
+        LoadResult::Valid(value) => Ok(value.value().clone()),
+        LoadResult::Unsupported { version, .. } => Err(Error::input(format!(
+            "unsupported configuration version {version}"
+        ))),
+        LoadResult::Invalid { issues } => {
+            Err(Error::input(format!("invalid configuration: {issues:?}")))
+        }
+    }
+}
+
+pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
+    let config = library(paths)?;
+    let home = paths.home().canonicalize().map_err(Error::input_display)?;
+    for location in config.locations() {
+        let expanded = crate::library::expand_location(
+            location.path(),
+            paths.library_config().parent().unwrap(),
+            paths.home(),
+            paths.environment(),
+        )
+        .map_err(Error::input_display)?;
+        if expanded.canonicalize().is_ok_and(|path| path == home) {
+            return Err(Error::input(
+                "library rsync does not support a home-rooted location; register directories below the user home instead of ~",
+            ));
+        }
+    }
+    let history = History::load(paths.home())?;
+    let library_snapshot = scan_library(
+        &config,
+        &paths.library_config(),
+        paths.home(),
+        paths.environment(),
+    );
+    if let Some(diagnostic) = library_snapshot
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == "discovery_failed")
+    {
+        return Err(Error::input(&diagnostic.message));
+    }
+    let mut locations = Vec::new();
+    for (index, location) in library_snapshot.locations().iter().enumerate() {
+        let resolved = location.resolved().ok_or_else(|| {
+            Error::input(format!(
+                "unresolvable library location {}",
+                location.expression()
+            ))
+        })?;
+        locations.push(Location {
+            path: state::home_relative(paths.home(), resolved)?,
+            exclusions: config.locations()[index].exclusions().to_vec(),
+            allow_overlap: config.locations()[index].allow_overlap(),
+        });
+    }
+    let mut sources = Vec::new();
+    for source in library_snapshot.sources() {
+        let Some(root) = source.root() else {
+            continue;
+        };
+        if root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(crate::library::reserved_temporary)
+        {
+            continue;
+        }
+        let mut observed = Source {
+            key: source.key().to_string(),
+            root: state::home_relative(paths.home(), root)?,
+            location: locations[source.location_index()].path.clone(),
+            exclusions: locations[source.location_index()].exclusions.clone(),
+            git: None,
+            branch: None,
+            skills: source
+                .skills()
+                .map(|skill| {
+                    if skill.path() == "." {
+                        String::new()
+                    } else {
+                        skill.path().to_owned()
+                    }
+                })
+                .collect(),
+            invalid_skills: source
+                .skills()
+                .filter(|skill| skill.validity() == SkillValidity::Invalid)
+                .map(|skill| {
+                    if skill.path() == "." {
+                        String::new()
+                    } else {
+                        skill.path().to_owned()
+                    }
+                })
+                .collect(),
+            files: BTreeMap::new(),
+            committed: BTreeMap::new(),
+            problems: Vec::new(),
+        };
+        if source.key_collision() {
+            observed.problems.push("source identity collision".into());
+        }
+        if source.kind() == SourceKind::Git {
+            match git_ref(root) {
+                Ok(git) => {
+                    observed.git = Some(git);
+                    observed.branch = git_branch(root)?;
+                }
+                Err(error) => observed.problems.push(error.to_string()),
+            }
+        }
+        sources.push(observed);
+    }
+    let known_boundaries: BTreeSet<_> = sources
+        .iter()
+        .flat_map(|source| {
+            source
+                .skills
+                .iter()
+                .map(move |skill| Path::new(&source.root).join(skill))
+        })
+        .collect();
+    for incoming in extra {
+        for path in [&incoming.root, &incoming.location] {
+            state::home_relative(paths.home(), &state::contained(paths.home(), path)?)?;
+        }
+        if let Some(found) = sources
+            .iter_mut()
+            .find(|s| s.root == incoming.root && s.key == incoming.key)
+        {
+            found.skills.extend(incoming.skills.iter().cloned());
+            found
+                .invalid_skills
+                .extend(incoming.invalid_skills.iter().cloned());
+        } else {
+            let root = state::contained(paths.home(), &incoming.root)?;
+            let mut source = incoming.clone();
+            source.files.clear();
+            source.committed.clear();
+            source.problems.clear();
+            source.git = if incoming.git.is_some() && root.exists() {
+                match git_ref(&root) {
+                    Ok(git) => Some(git),
+                    Err(error) => {
+                        source.problems.push(error.to_string());
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            source.branch = if source.git.is_some() {
+                git_branch(&root)?
+            } else {
+                None
+            };
+            sources.push(source);
+        }
+    }
+    let source_roots: Vec<_> = sources.iter().map(|source| source.root.clone()).collect();
+    for source in &mut sources {
+        let nested_roots: BTreeSet<String> = source_roots
+            .iter()
+            .filter(|root| root.starts_with(&format!("{}/", source.root)))
+            .cloned()
+            .collect();
+        let root = paths.home().join(&source.root);
+        let location = paths.home().join(&source.location);
+        let physical_location = location.canonicalize().unwrap_or(location);
+        if library_snapshot.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "overlapping_locations"
+                && diagnostic.path.as_ref().is_some_and(|path| {
+                    path.starts_with(&physical_location) || physical_location.starts_with(path)
+                })
+        }) {
+            source
+                .problems
+                .push("library locations overlap without mutual permission".into());
+        }
+        if let Some(git) = &source.git {
+            let unmerged = process::git(&root, &["ls-files", "-u"])?;
+            if !unmerged.is_empty() {
+                source.problems.push("unmerged Git index".into());
+            }
+            // Committed manifests retain the boundary when a skill manifest was deleted.
+            let tree = process::git(&root, &["ls-tree", "-r", "-z", &git.commit])?;
+            let mut tracked = Vec::new();
+            for record in tree.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+                let record = std::str::from_utf8(record).map_err(Error::input_display)?;
+                let (metadata, path) = record
+                    .split_once('\t')
+                    .ok_or_else(|| Error::input("invalid Git tree record"))?;
+                let fields: Vec<_> = metadata.split(' ').collect();
+                if fields.len() != 3 {
+                    return Err(Error::input("invalid Git tree metadata"));
+                }
+                if path == "SKILL.md" {
+                    source.skills.insert(String::new());
+                } else if let Some(parent) = path.strip_suffix("/SKILL.md") {
+                    source.skills.insert(parent.to_owned());
+                }
+                tracked.push((
+                    fields[0].to_owned(),
+                    fields[1].to_owned(),
+                    fields[2].to_owned(),
+                    path.to_owned(),
+                ));
+            }
+            for (mode, kind, oid, path) in tracked {
+                if kind != "blob" || !in_skills(&path, &source.skills) {
+                    continue;
+                }
+                let bytes = process::git(&root, &["cat-file", "blob", &oid])?;
+                let entry = if mode == "120000" {
+                    Entry::Link {
+                        target: String::from_utf8(bytes).map_err(Error::input_display)?,
+                    }
+                } else {
+                    Entry::File {
+                        hash: state::digest(&bytes),
+                        executable: mode == "100755",
+                    }
+                };
+                source
+                    .committed
+                    .insert(format!("{}/{path}", source.root), entry);
+            }
+        }
+        let mut exclusions =
+            ignore::gitignore::GitignoreBuilder::new(paths.home().join(&source.location));
+        for pattern in &source.exclusions {
+            exclusions
+                .add_line(None, pattern)
+                .map_err(Error::input_display)?;
+        }
+        let exclusions = exclusions.build().map_err(Error::input_display)?;
+        source.skills.retain(|skill| {
+            !within_nested_source(
+                &Path::new(&source.root).join(skill).to_string_lossy(),
+                &nested_roots,
+            ) && !exclusions
+                .matched_path_or_any_parents(root.join(skill), true)
+                .is_ignore()
+        });
+        source
+            .invalid_skills
+            .retain(|skill| source.skills.contains(skill));
+        source.committed.retain(|path, _| {
+            !state::administrative(Path::new(path))
+                && !within_nested_source(path, &nested_roots)
+                && !exclusions
+                    .matched_path_or_any_parents(paths.home().join(path), false)
+                    .is_ignore()
+        });
+        for path in source.committed.keys().cloned().collect::<Vec<_>>() {
+            if !state::transferable(paths.home(), &path)? {
+                source.committed.remove(&path);
+            }
+        }
+        for skill in &source.skills {
+            if !skill.is_empty() {
+                state::relative(skill)?;
+            }
+            let logical = root.join(skill);
+            let skill_path = state::home_relative(paths.home(), &logical)?;
+            if !state::transferable(paths.home(), &skill_path)? {
+                continue;
+            }
+            if !logical.exists() {
+                continue;
+            }
+            let manifest = state::home_relative(paths.home(), &logical.join("SKILL.md"))?;
+            if !known_boundaries.contains(&Path::new(&source.root).join(skill))
+                && !logical.join("SKILL.md").is_file()
+                && !source.committed.contains_key(&manifest)
+                && !history.peers.values().any(|peer| {
+                    peer.files.contains_key(&manifest)
+                        || peer
+                            .files
+                            .get(format!("{}/{}", source.root, skill).trim_end_matches('/'))
+                            == Some(&Some(Entry::Directory))
+                })
+            {
+                source.problems.push(format!(
+                    "incoming skill destination is occupied by an unmanaged directory: {}",
+                    logical.display()
+                ));
+                continue;
+            }
+            let real = logical.canonicalize().map_err(Error::input_display)?;
+            if real == home || !real.starts_with(&home) {
+                return Err(Error::input("skill resolves outside user home"));
+            }
+            if exclusions
+                .matched_path_or_any_parents(&logical, true)
+                .is_ignore()
+            {
+                continue;
+            }
+            collect(
+                &CollectionScope {
+                    home: paths.home(),
+                    boundary: &real,
+                    exclusions: &exclusions,
+                    nested_roots: &nested_roots,
+                },
+                &logical,
+                &mut source.files,
+                true,
+            )?;
+        }
+        for peer in history.peers.values() {
+            for path in peer.files.keys() {
+                if !state::transferable(paths.home(), path)? {
+                    continue;
+                }
+                if path.starts_with(&format!("{}/", source.root)) {
+                    if within_nested_source(path, &nested_roots) {
+                        continue;
+                    }
+                    let logical = paths.home().join(path);
+                    if exclusions
+                        .matched_path_or_any_parents(&logical, false)
+                        .is_ignore()
+                    {
+                        continue;
+                    }
+                    if let Some(actual) = state::observation_path(paths.home(), path)?
+                        && let Some(entry) = observe_anchored(paths.home(), &actual)?
+                    {
+                        source.files.entry(path.clone()).or_insert(entry);
+                    }
+                }
+            }
+        }
+    }
+    sources.sort_by(|a, b| (&a.root, &a.key).cmp(&(&b.root, &b.key)));
+    let mut physical_paths = BTreeMap::new();
+    for source in &sources {
+        for (path, entry) in &source.files {
+            let physical = state::contained(paths.home(), path)?;
+            let physical = if matches!(entry, Entry::Directory) {
+                physical.canonicalize().map_err(Error::input_display)?
+            } else {
+                physical
+            };
+            physical_paths.insert(path.clone(), physical.to_string_lossy().into_owned());
+        }
+    }
+    let mut acquisition_aliases = BTreeMap::new();
+    if let Some(local) = locations.first() {
+        for source in &sources {
+            if source.root != local.path {
+                continue;
+            }
+            for (path, entry) in &source.files {
+                if !matches!(entry, Entry::Directory)
+                    || Path::new(path).parent() != Some(Path::new(&local.path))
+                    || !fs::symlink_metadata(paths.home().join(path))
+                        .is_ok_and(|meta| meta.file_type().is_symlink())
+                {
+                    continue;
+                }
+                let target = Path::new(&physical_paths[path]);
+                acquisition_aliases
+                    .insert(path.clone(), state::home_relative(paths.home(), target)?);
+            }
+        }
+    }
+    let mut problems: Vec<_> = library_snapshot
+        .diagnostics()
+        .iter()
+        .map(|d| d.message.clone())
+        .chain(library_snapshot.sources().flat_map(|source| {
+            source
+                .skills()
+                .flat_map(|skill| skill.diagnostics().iter().cloned())
+        }))
+        .collect();
+    if !super::session::pending_recovery(paths.home())?.is_empty() {
+        problems.push("an interrupted publication needs recovery before new work".into());
+    }
+    let mut available_locations = BTreeSet::new();
+    for location in locations
+        .iter()
+        .map(|location| &location.path)
+        .chain(sources.iter().map(|source| &source.location))
+    {
+        if state::contained(paths.home(), location)?.is_dir() {
+            available_locations.insert(location.clone());
+        }
+    }
+    Ok(Snapshot {
+        available_locations,
+        protocol: 5,
+        version: env!("CARGO_PKG_VERSION").into(),
+        home: paths.home().canonicalize().map_err(Error::input_display)?,
+        history,
+        locations,
+        sources,
+        physical_paths,
+        acquisition_aliases,
+        library_hash: state::read_contained(paths.home(), ".skillator/library.yaml")?
+            .map(|bytes| state::digest(&bytes)),
+        problems,
+    })
+}
+
+fn git_branch(root: &Path) -> Result<Option<String>> {
+    let branch = String::from_utf8(process::git(root, &["rev-parse", "--abbrev-ref", "HEAD"])?)
+        .map_err(Error::input_display)?;
+    let branch = branch.trim();
+    Ok((branch != "HEAD").then(|| branch.to_owned()))
+}
+
+pub(super) fn git_ref(root: &Path) -> Result<GitRef> {
+    let root_text = String::from_utf8(process::git(root, &["rev-parse", "--show-toplevel"])?)
+        .map_err(Error::input_display)?;
+    if Path::new(root_text.trim())
+        .canonicalize()
+        .map_err(Error::input_display)?
+        != root.canonicalize().map_err(Error::input_display)?
+    {
+        return Err(Error::input(
+            "destination is not the expected Git repository root",
+        ));
+    }
+    let origin = String::from_utf8(process::git(
+        root,
+        &["config", "--get", "remote.origin.url"],
+    )?)
+    .map_err(Error::input_display)?
+    .trim()
+    .to_owned();
+    if !super::session::valid_origin(&origin) {
+        return Err(Error::input(
+            "Git origin contains credentials or an unsupported URL; configure a credential-free origin and use host authentication",
+        ));
+    }
+    let commit = String::from_utf8(process::git(
+        root,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?)
+    .map_err(Error::input_display)?
+    .trim()
+    .to_owned();
+    Ok(GitRef { origin, commit })
+}
+
+fn in_skills(path: &str, skills: &BTreeSet<String>) -> bool {
+    skills
+        .iter()
+        .any(|skill| skill.is_empty() || path == skill || path.starts_with(&format!("{skill}/")))
+}
+
+fn within_nested_source(path: &str, nested_roots: &BTreeSet<String>) -> bool {
+    nested_roots
+        .iter()
+        .any(|root| path == root || path.starts_with(&format!("{root}/")))
+}
+
+struct CollectionScope<'a> {
+    home: &'a Path,
+    boundary: &'a Path,
+    exclusions: &'a ignore::gitignore::Gitignore,
+    nested_roots: &'a BTreeSet<String>,
+}
+
+fn observe_anchored(home: &Path, actual: &Path) -> Result<Option<Entry>> {
+    let parent = match Directory::open_existing_parent(home, actual.parent().unwrap()) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Error::input_display(error)),
+    };
+    state::observe_at(&parent, actual.file_name().unwrap())
+}
+
+fn observe_contained_with(
+    home: &Path,
+    boundary: &Path,
+    path: &str,
+    after_contained: impl FnOnce(),
+) -> Result<(PathBuf, Option<Entry>)> {
+    let actual = state::contained(home, path)?;
+    if !actual.starts_with(boundary) {
+        return Err(Error::input("internal skill entry escapes the skill"));
+    }
+    after_contained();
+    let entry = observe_anchored(home, &actual)?;
+    Ok((actual, entry))
+}
+
+fn collect(
+    scope: &CollectionScope<'_>,
+    logical: &Path,
+    files: &mut BTreeMap<String, Entry>,
+    root: bool,
+) -> Result<()> {
+    collect_with(scope, logical, files, root, || {})
+}
+
+fn collect_with(
+    scope: &CollectionScope<'_>,
+    logical: &Path,
+    files: &mut BTreeMap<String, Entry>,
+    root: bool,
+    after_contained: impl FnOnce(),
+) -> Result<()> {
+    if logical.file_name().is_some_and(|name| {
+        name == ".git"
+            || name
+                .to_str()
+                .is_some_and(crate::library::reserved_temporary)
+    }) {
+        return Ok(());
+    }
+    let path = state::home_relative(scope.home, logical)?;
+    if within_nested_source(&path, scope.nested_roots) {
+        return Ok(());
+    }
+    if !state::transferable(scope.home, &path)? {
+        return Ok(());
+    }
+    let (actual, entry) = if root {
+        (state::contained(scope.home, &path)?, Some(Entry::Directory))
+    } else {
+        observe_contained_with(scope.home, scope.boundary, &path, after_contained)?
+    };
+    let Some(entry) = entry else {
+        return Ok(());
+    };
+    if scope
+        .exclusions
+        .matched_path_or_any_parents(logical, matches!(entry, Entry::Directory))
+        .is_ignore()
+    {
+        return Ok(());
+    }
+    match &entry {
+        Entry::Directory => {
+            let resolved = logical.canonicalize().map_err(Error::input_display)?;
+            if !resolved.starts_with(scope.boundary) {
+                return Err(Error::input("internal skill directory escapes the skill"));
+            }
+            // The physical path was checked above; opening it component-by-component
+            // without following links prevents a concurrent ancestor swap.
+            let directory = Directory::open_existing_parent(scope.home, &resolved)
+                .map_err(Error::input_display)?;
+            if !root {
+                let parent = Directory::open_existing_parent(scope.home, actual.parent().unwrap())
+                    .map_err(Error::input_display)?;
+                let observed = parent
+                    .open_dir(actual.file_name().unwrap())
+                    .map_err(Error::input_display)?;
+                if observed.identity().map_err(Error::input_display)?
+                    != directory.identity().map_err(Error::input_display)?
+                {
+                    return Err(Error::input(
+                        "directory changed while observing its contents",
+                    ));
+                }
+            }
+            files.insert(path, entry.clone());
+            for child in directory.entries().map_err(Error::input_display)? {
+                collect(scope, &logical.join(child), files, false)?;
+            }
+        }
+        Entry::Link { target } => {
+            if Path::new(target).is_absolute() {
+                return Err(Error::input("absolute internal skill link"));
+            }
+            let resolved = logical
+                .parent()
+                .unwrap()
+                .join(target)
+                .canonicalize()
+                .map_err(Error::input_display)?;
+            if !resolved.starts_with(scope.boundary) {
+                return Err(Error::input("internal skill link escapes the skill"));
+            }
+            files.insert(path, entry);
+        }
+        Entry::File { .. } => {
+            files.insert(path, entry);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_configuration_is_not_a_snapshot_input() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        fs::create_dir_all(home.path().join(".skillator")).unwrap();
+        fs::create_dir_all(home.path().join(".agents")).unwrap();
+        fs::write(
+            outside.path().join("library.yaml"),
+            "version: 1\nlocations: []\n",
+        )
+        .unwrap();
+        fs::write(outside.path().join("skillator.yaml"), "not valid YAML: [").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("library.yaml"), paths.library_config())
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path().join("skillator.yaml"), paths.user_config())
+            .unwrap();
+        assert!(inspect(&paths, &[]).is_err());
+        fs::remove_file(paths.library_config()).unwrap();
+        assert!(inspect(&paths, &[]).is_ok());
+        fs::remove_file(paths.user_config()).unwrap();
+        fs::write(paths.user_config(), "invalid: [").unwrap();
+        assert!(inspect(&paths, &[]).is_ok());
+        assert_eq!(
+            fs::read_to_string(outside.path().join("library.yaml")).unwrap(),
+            "version: 1\nlocations: []\n"
+        );
+    }
+
+    #[test]
+    fn default_user_materializations_are_not_library_content() {
+        let home = tempfile::tempdir().unwrap();
+        super::super::test_support::write_skill(home.path(), ".agents/skills/demo", "local");
+        super::super::test_support::configure_library(home.path(), ".agents/skills");
+        fs::create_dir_all(home.path().join(".agents")).unwrap();
+        fs::write(home.path().join(".agents/skillator.yaml"), "invalid: [").unwrap();
+        let observed = inspect(&AppPaths::new(home.path().into()), &[]).unwrap();
+        assert!(
+            observed
+                .sources
+                .iter()
+                .all(|source| source.files.is_empty())
+        );
+        assert_eq!(
+            fs::read_to_string(home.path().join(".agents/skills/demo/SKILL.md")).unwrap(),
+            "---\nname: demo\ndescription: A demonstration skill\n---\nlocal\n"
+        );
+    }
+
+    #[test]
+    fn interrupted_publication_entries_are_not_discovered_as_skills() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        let library_path = home.path().join(".skillator/library");
+        fs::create_dir_all(&library_path).unwrap();
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/.skillator/library'}]\n",
+        )
+        .unwrap();
+        for prefix in [
+            ".skillator-alias-",
+            ".skillator-rsync-",
+            ".skillator-clone-",
+        ] {
+            let staged = library_path.join(format!("{prefix}0123456789abcdef0123456789abcdef"));
+            fs::create_dir(&staged).unwrap();
+            fs::write(staged.join("SKILL.md"), "---\nname: staged\n---\n").unwrap();
+        }
+        let observed = scan_library(
+            &library(&paths).unwrap(),
+            &paths.library_config(),
+            home.path(),
+            paths.environment(),
+        );
+        assert!(
+            observed
+                .sources()
+                .all(|source| source.skills().next().is_none())
+        );
+    }
+
+    #[test]
+    fn directory_collection_stays_inside_the_physical_skill_boundary() {
+        let home = tempfile::tempdir().unwrap();
+        let skill = home.path().join("library/demo");
+        let unrelated = home.path().join("unrelated");
+        fs::create_dir_all(skill.join("assets")).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+        fs::write(skill.join("assets/inside.txt"), "inside").unwrap();
+        fs::write(unrelated.join("private.txt"), "private").unwrap();
+        let exclusions = ignore::gitignore::GitignoreBuilder::new(home.path())
+            .build()
+            .unwrap();
+        let boundary = skill.canonicalize().unwrap();
+        let mut files = BTreeMap::new();
+
+        std::os::unix::fs::symlink("assets", skill.join("shortcut")).unwrap();
+        let nested_roots = BTreeSet::new();
+        let scope = CollectionScope {
+            home: home.path(),
+            boundary: &boundary,
+            exclusions: &exclusions,
+            nested_roots: &nested_roots,
+        };
+        collect(&scope, &skill.join("shortcut"), &mut files, true).unwrap();
+        assert!(files.contains_key("library/demo/shortcut/inside.txt"));
+        assert_eq!(
+            files["library/demo/shortcut/inside.txt"],
+            Entry::File {
+                hash: state::digest(b"inside"),
+                executable: false,
+            }
+        );
+
+        std::os::unix::fs::symlink(&unrelated, skill.join("escape")).unwrap();
+        let error = collect(&scope, &skill.join("escape"), &mut files, true).unwrap_err();
+        assert!(error.message.contains("directory escapes the skill"));
+        assert!(!files.contains_key("library/demo/escape"));
+        assert!(!files.contains_key("library/demo/escape/private.txt"));
+    }
+
+    #[test]
+    fn swapped_ancestor_does_not_observe_or_collect_outside_content() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let skill = home.path().join("library/demo");
+        let assets = skill.join("assets");
+        fs::create_dir_all(&assets).unwrap();
+        fs::write(assets.join("inside.txt"), "inside").unwrap();
+        fs::write(outside.path().join("inside.txt"), "outside secret").unwrap();
+        let boundary = skill.canonicalize().unwrap();
+        let exclusions = ignore::gitignore::GitignoreBuilder::new(home.path())
+            .build()
+            .unwrap();
+        let nested_roots = BTreeSet::new();
+        let scope = CollectionScope {
+            home: home.path(),
+            boundary: &boundary,
+            exclusions: &exclusions,
+            nested_roots: &nested_roots,
+        };
+        let mut files = BTreeMap::new();
+        let result = collect_with(
+            &scope,
+            &assets.join("inside.txt"),
+            &mut files,
+            false,
+            || {
+                fs::rename(&assets, skill.join("retained")).unwrap();
+                std::os::unix::fs::symlink(outside.path(), &assets).unwrap();
+            },
+        );
+        assert!(result.is_err(), "outside file was accepted: {result:?}");
+        assert!(!files.contains_key("library/demo/assets/inside.txt"));
+        assert!(files.is_empty(), "unsafe entry entered snapshot: {files:?}");
+    }
+
+    #[test]
+    fn directory_swap_before_child_containment_cannot_collect_another_home_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let skill = home.path().join("library/demo");
+        let assets = skill.join("assets");
+        let unrelated = home.path().join("unrelated");
+        fs::create_dir_all(&assets).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+        fs::write(assets.join("payload.txt"), "skill content").unwrap();
+        fs::write(unrelated.join("payload.txt"), "unrelated private content").unwrap();
+        let boundary = skill.canonicalize().unwrap();
+        let exclusions = ignore::gitignore::GitignoreBuilder::new(home.path())
+            .build()
+            .unwrap();
+        let nested_roots = BTreeSet::new();
+        let scope = CollectionScope {
+            home: home.path(),
+            boundary: &boundary,
+            exclusions: &exclusions,
+            nested_roots: &nested_roots,
+        };
+        let opened =
+            Directory::open_existing_parent(home.path(), &assets.canonicalize().unwrap()).unwrap();
+        let names = opened.entries().unwrap();
+        assert_eq!(names, [std::ffi::OsString::from("payload.txt")]);
+
+        fs::rename(&assets, skill.join("retained")).unwrap();
+        std::os::unix::fs::symlink(&unrelated, &assets).unwrap();
+        let mut files = BTreeMap::new();
+        let result = collect(&scope, &assets.join(&names[0]), &mut files, false);
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("entry escapes the skill")
+        );
+        assert!(
+            files.is_empty(),
+            "outside entry entered snapshot: {files:?}"
+        );
+    }
+
+    #[test]
+    fn credential_bearing_origin_never_enters_a_git_reference() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("repo");
+        repository(&root);
+        process::git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://user:secret@example.invalid/repo.git",
+            ],
+        )
+        .unwrap();
+        let error = git_ref(&root).unwrap_err();
+        assert!(error.message.contains("credential-free origin"));
+        assert!(!error.message.contains("secret"));
+        process::git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "ssh://git@example.invalid/repo.git",
+            ],
+        )
+        .unwrap();
+        assert!(git_ref(&root).is_ok());
+    }
+
+    #[test]
+    fn inaccessible_location_parent_is_not_treated_as_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        let parent = home.path().join("restricted");
+        let root = parent.join("skills");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(home.path().join(".skillator")).unwrap();
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/restricted/skills'}]\n",
+        )
+        .unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).unwrap();
+        let inaccessible = root.canonicalize().is_err();
+        let observed = inspect(&paths, &[]);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        if inaccessible {
+            assert!(
+                observed
+                    .unwrap_err()
+                    .message
+                    .contains("library folder is unavailable")
+            );
+        }
+        fs::remove_dir(&root).unwrap();
+        assert!(inspect(&paths, &[]).is_ok());
+        fs::write(&root, "not a directory").unwrap();
+        assert!(inspect(&paths, &[]).is_err());
+        assert!(!home.path().join(".skillator/rsync").exists());
+    }
+
+    #[test]
+    fn unreadable_discovery_fails_preflight_unless_excluded() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        let directory = home.path().join(".skillator/library/hidden");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: hidden\ndescription: test\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/.skillator/library'}]\n",
+        )
+        .unwrap();
+        assert!(inspect(&paths, &[]).is_ok());
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = fs::read_dir(&directory).is_err();
+        let observed = inspect(&paths, &[]);
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/.skillator/library', exclusions: [hidden]}]\n",
+        )
+        .unwrap();
+        let excluded = inspect(&paths, &[]);
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        if unreadable {
+            assert!(
+                observed
+                    .unwrap_err()
+                    .message
+                    .contains("cannot discover skills")
+            );
+        }
+        assert!(excluded.is_ok(), "{excluded:?}");
+        assert!(!home.path().join(".skillator/rsync").exists());
+    }
+
+    #[test]
+    fn home_rooted_locations_fail_with_specific_guidance_before_observation() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        fs::create_dir(home.path().join(".skillator")).unwrap();
+        std::os::unix::fs::symlink(home.path(), home.path().join("home-alias")).unwrap();
+        for expression in ["~", "~/home-alias"] {
+            fs::write(
+                paths.library_config(),
+                format!("version: 1\nlocations: [{{path: '{expression}'}}]\n"),
+            )
+            .unwrap();
+            let error = inspect(&paths, &[]).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("register directories below the user home"),
+                "{error}"
+            );
+            assert!(!home.path().join(".skillator/rsync").exists());
+        }
+    }
+
+    #[test]
+    fn incoming_source_and_location_aliases_cannot_resolve_to_or_outside_home() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(home.path(), home.path().join("home-alias")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join("outside-alias")).unwrap();
+        fs::create_dir(home.path().join("library")).unwrap();
+        let source = Source {
+            key: "local/library".into(),
+            root: "library".into(),
+            location: "library".into(),
+            exclusions: vec![],
+            git: None,
+            branch: None,
+            skills: BTreeSet::new(),
+            invalid_skills: BTreeSet::new(),
+            files: BTreeMap::new(),
+            committed: BTreeMap::new(),
+            problems: vec![],
+        };
+        let paths = AppPaths::new(home.path().into());
+        for alias in ["home-alias", "outside-alias"] {
+            for location in [false, true] {
+                let mut incoming = source.clone();
+                if location {
+                    incoming.location = alias.into();
+                } else {
+                    incoming.root = alias.into();
+                }
+                assert!(
+                    inspect(&paths, &[incoming]).is_err(),
+                    "{alias} location={location}"
+                );
+            }
+        }
+        assert!(!home.path().join(".skillator").exists());
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    fn repository(root: &Path) {
+        fs::create_dir_all(root.join("demo")).unwrap();
+        fs::write(
+            root.join("demo/SKILL.md"),
+            "---\nname: demo\ndescription: Git observation\n---\n",
+        )
+        .unwrap();
+        process::git(root, &["init", "-q"]).unwrap();
+        process::git(root, &["add", "."]).unwrap();
+        process::git(
+            root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        )
+        .unwrap();
+        process::git(
+            root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/skills.git",
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn worktrees_submodules_and_detached_head_have_independent_source_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("source");
+        repository(&root);
+        let reference = git_ref(&root).unwrap();
+        let worktree = home.path().join("worktree");
+        process::git(
+            &root,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        )
+        .unwrap();
+        assert_eq!(git_ref(&worktree).unwrap(), reference);
+        assert!(worktree.join(".git").is_file());
+        let parent = home.path().join("parent");
+        repository(&parent);
+        process::git(
+            &parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                root.to_str().unwrap(),
+                "nested",
+            ],
+        )
+        .unwrap();
+        let nested = git_ref(&parent.join("nested")).unwrap();
+        assert_eq!(nested.commit, reference.commit);
+        assert_eq!(nested.origin, root.to_string_lossy());
+        assert!(parent.join("nested/.git").is_file());
+        let paths = AppPaths::new(home.path().into());
+        fs::create_dir(home.path().join(".skillator")).unwrap();
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/worktree'}, {path: '~/parent/nested'}]\n",
+        )
+        .unwrap();
+        let observed = inspect(&paths, &[]).unwrap();
+        assert_eq!(observed.sources.len(), 2);
+        assert!(
+            observed
+                .sources
+                .iter()
+                .all(|source| source.git.as_ref().unwrap().commit == reference.commit)
+        );
+        assert!(
+            observed
+                .sources
+                .iter()
+                .all(|source| source.files.keys().all(|path| !path.contains(".git")))
+        );
+    }
+
+    #[test]
+    fn parent_skill_does_not_collect_nested_git_source_content() {
+        let home = tempfile::tempdir().unwrap();
+        let parent = home.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        fs::write(
+            parent.join("SKILL.md"),
+            "---\nname: parent\ndescription: Parent skill\n---\n",
+        )
+        .unwrap();
+        fs::write(parent.join("parent.txt"), "parent content").unwrap();
+        let nested = parent.join("nested");
+        repository(&nested);
+        fs::write(nested.join("unrelated.txt"), "outside nested skill").unwrap();
+        let paths = AppPaths::new(home.path().into());
+        fs::create_dir(home.path().join(".skillator")).unwrap();
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/parent'}]\n",
+        )
+        .unwrap();
+        let observed = inspect(&paths, &[]).unwrap();
+        let parent_source = observed
+            .sources
+            .iter()
+            .find(|source| source.root == "parent")
+            .unwrap();
+        let nested_source = observed
+            .sources
+            .iter()
+            .find(|source| source.root == "parent/nested")
+            .unwrap();
+        assert!(parent_source.files.contains_key("parent/parent.txt"));
+        assert!(
+            parent_source
+                .files
+                .keys()
+                .all(|path| !path.starts_with("parent/nested"))
+        );
+        assert!(
+            parent_source
+                .committed
+                .keys()
+                .all(|path| !path.starts_with("parent/nested"))
+        );
+        assert!(
+            nested_source
+                .files
+                .contains_key("parent/nested/demo/SKILL.md")
+        );
+        assert!(
+            !nested_source
+                .files
+                .contains_key("parent/nested/unrelated.txt")
+        );
+    }
+
+    #[test]
+    fn invalid_hidden_skills_and_mode_changes_are_observed() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        let skill = home.path().join(".skillator/library/.hidden");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/.skillator/library'}]\n",
+        )
+        .unwrap();
+        fs::write(skill.join("SKILL.md"), "invalid manifest").unwrap();
+        fs::write(skill.join("run.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(skill.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        let observed = inspect(&paths, &[]).unwrap();
+        assert!(!observed.problems.is_empty());
+        assert!(observed.sources.iter().any(|source| matches!(
+            source.files.get(".skillator/library/.hidden/run.sh"),
+            Some(Entry::File {
+                executable: true,
+                ..
+            })
+        )));
+    }
+    #[test]
+    fn environment_paths_are_portable_and_unmerged_indexes_block_the_source() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("Development/skills");
+        repository(&root);
+        let paths = AppPaths::with_environment(
+            home.path().into(),
+            BTreeMap::from([("SKILLS_ROOT".into(), root.to_string_lossy().into_owned())]),
+        );
+        fs::create_dir(home.path().join(".skillator")).unwrap();
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '${SKILLS_ROOT}'}]\n",
+        )
+        .unwrap();
+        let first = inspect(&paths, &[]).unwrap();
+        assert_eq!(first.locations[0].path, "Development/skills");
+        let blob =
+            String::from_utf8(process::git(&root, &["rev-parse", "HEAD:demo/SKILL.md"]).unwrap())
+                .unwrap();
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["update-index", "--index-info"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        writeln!(
+            child.stdin.take().unwrap(),
+            "0 {}\tdemo/SKILL.md\n100644 {} 1\tdemo/SKILL.md\n100644 {} 2\tdemo/SKILL.md",
+            "0".repeat(40),
+            blob.trim(),
+            blob.trim()
+        )
+        .unwrap();
+        assert!(child.wait().unwrap().success());
+        let before = fs::read(root.join(".git/index")).unwrap();
+        let observed = inspect(&paths, &[]).unwrap();
+        assert!(observed.sources.iter().any(|source| {
+            source
+                .problems
+                .iter()
+                .any(|message| message.contains("unmerged"))
+        }));
+        assert_eq!(fs::read(root.join(".git/index")).unwrap(), before);
+    }
+}

@@ -379,7 +379,7 @@ pub struct TargetBusy;
 
 /// Locks one or more Targets in canonical root-path order.
 pub struct TargetLocks {
-    locks: Vec<File>,
+    _locks: Vec<File>,
 }
 
 impl TargetLocks {
@@ -397,15 +397,7 @@ impl TargetLocks {
             file.try_lock().map_err(|_| TargetBusy)?;
             locks.push(file);
         }
-        Ok(Self { locks })
-    }
-}
-
-impl Drop for TargetLocks {
-    fn drop(&mut self) {
-        for lock in &self.locks {
-            let _ = lock.unlock();
-        }
+        Ok(Self { _locks: locks })
     }
 }
 
@@ -464,29 +456,13 @@ pub fn prepare_transition(
     staged: &RepositoryConfig,
     library: &LibrarySnapshot,
 ) -> Result<PreparedPlan, TargetBusy> {
-    prepare_transition_with_locks(
-        target,
-        original,
-        staged,
-        library,
-        TargetLocks::acquire(&[target])?,
-    )
-}
-
-pub fn prepare_transition_with_locks(
-    target: &Target,
-    original: &RepositoryConfig,
-    staged: &RepositoryConfig,
-    library: &LibrarySnapshot,
-    locks: TargetLocks,
-) -> Result<PreparedPlan, TargetBusy> {
     prepare_transition_with_locks_and_repository_skills(
         target,
         original,
         staged,
         library,
         &RepositorySkillExceptions::new(),
-        locks,
+        TargetLocks::acquire(&[target])?,
     )
 }
 

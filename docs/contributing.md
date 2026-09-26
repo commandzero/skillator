@@ -42,7 +42,7 @@ Changes to broader draft standards do not silently change this contract.
 Keep the product as one crate until a real consumer or dependency boundary justifies a split.
 The repository checker is a Cargo example using existing development dependencies; it adds no installed command.
 
-Unsafe code is denied by default. The private filesystem module calls atomic rename APIs absent from the standard library.
+Unsafe code is denied by default. The private filesystem module uses atomic rename APIs and descriptor-relative directory operations absent from the standard library. Remote transport binds rsync subprocesses to verified directory descriptors with `fchdir`, so replacing a staging path cannot redirect a transfer.
 The private update-process module uses POSIX signal handlers, process-group signals, and nonblocking pipe flags to bound Git pull subprocesses.
 Keep CString lifetime, signal ownership, descriptor lifetime, and platform-flag safety explanations next to each unsafe block. Expand this exception only with a documented need and focused behavior tests.
 
@@ -56,6 +56,13 @@ Keep historical commits intact; temporary worktree commits do not need rewriting
 
 Add user-visible changes to the appropriate Unreleased category in CHANGELOG.md.
 Do not add empty categories or require a changelog entry for every internal change.
+
+## Rust API migration
+
+The unreleased removal of `reconcile::prepare_transition_with_locks` is a source-breaking Rust API change and must ship in 0.2.0, not a 0.1.x patch.
+Call `reconcile::prepare_transition_with_locks_and_repository_skills(target, original, staged, library, &RepositorySkillExceptions::new(), locks)` instead, importing `RepositorySkillExceptions` from `skillator::target`.
+This preserves caller-owned lock transfer while explicitly supplying an empty repository-skill exception set. Callers that do not already hold locks can continue using `reconcile::prepare_transition`.
+The CLI reconciliation commands are unchanged by this API removal.
 
 ## OpenSpec completion
 

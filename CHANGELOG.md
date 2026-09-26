@@ -6,6 +6,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ### Added
 
+- Synchronize library content across configured SSH hosts with batched transfers, exact-commit Git bootstrap, explicit conflict and missing-file policies, read-only previews, and recoverable publication; user selections and materializations stay local (#32).
 - Update Library repositories with fast-forward-only pulls using `skillator library update`, with a preview before making changes (#31).
 - Automatically synchronize newly populated linked worktrees with an opt-in Git hook installed by `skillator hook install` (#20).
 
@@ -14,8 +15,17 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 - Link inherited user skills into a repository with `m`; remove the override with Space without disabling User Scope (#30).
 - Release archives include a versionless `skillator` executable (#21).
 
+### Removed
+
+- **Breaking Rust API:** replace `reconcile::prepare_transition_with_locks` with the explicit repository-skill-aware entry point; see the [0.2.0 migration](docs/contributing.md#rust-api-migration) (#32).
+
 ### Fixed
 
+- Reject concurrent file or ancestor replacements before reading synchronization content, and reject special files without blocking (#32).
+- Preserve concurrent executable-mode changes during file observation (#32).
+- Require conflict resolution when different present values have mixed known and unknown synchronization history (#32).
+- Report historical-path containment errors instead of silently dropping entries from library synchronization (#32).
+- Preserve concurrent edits and recovery journals when interrupted-publication rollback no longer matches its expected values (#32).
 - Removing a user skill before user configuration exists returns an unchanged result.
 - Reject target-registry paths containing redundant separators, `.` or `..` components.
 
