@@ -52,6 +52,14 @@ pub(crate) struct Directory(File);
 
 impl Directory {
     pub(crate) fn open_parent(home: &Path, parent: &Path) -> io::Result<Self> {
+        Self::open_beneath(home, parent, true)
+    }
+
+    pub(crate) fn open_existing_parent(home: &Path, parent: &Path) -> io::Result<Self> {
+        Self::open_beneath(home, parent, false)
+    }
+
+    fn open_beneath(home: &Path, parent: &Path, create: bool) -> io::Result<Self> {
         let home = home.canonicalize()?;
         let relative = parent.strip_prefix(&home).map_err(|_| {
             io::Error::new(
@@ -71,18 +79,22 @@ impl Directory {
                     "invalid directory component",
                 ));
             };
-            let name = c_name(name)?;
-            // SAFETY: The descriptor and NUL-terminated component are valid for this call.
-            let created = unsafe { libc::mkdirat(directory.0.as_raw_fd(), name.as_ptr(), 0o755) };
-            if created != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
-                return Err(io::Error::last_os_error());
+            if create {
+                let name = c_name(name)?;
+                // SAFETY: The descriptor and NUL-terminated component are valid for this call.
+                let created =
+                    unsafe { libc::mkdirat(directory.0.as_raw_fd(), name.as_ptr(), 0o755) };
+                if created != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists
+                {
+                    return Err(io::Error::last_os_error());
+                }
             }
-            directory = directory.open_dir(OsStr::from_bytes(name.to_bytes()))?;
+            directory = directory.open_dir(name)?;
         }
         Ok(directory)
     }
 
-    fn open_dir(&self, name: &OsStr) -> io::Result<Self> {
+    pub(crate) fn open_dir(&self, name: &OsStr) -> io::Result<Self> {
         let name = c_name(name)?;
         // SAFETY: openat receives a live directory descriptor and a valid C string.
         let fd = unsafe {
@@ -129,6 +141,35 @@ impl Directory {
         }
     }
 
+    pub(crate) fn open_lock(&self, name: &OsStr) -> io::Result<File> {
+        let name = c_name(name)?;
+        // SAFETY: openat receives a live directory descriptor and valid name.
+        let fd = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o644,
+            )
+        };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            // SAFETY: openat returned a new descriptor owned by this File.
+            Ok(unsafe { File::from_raw_fd(fd) })
+        }
+    }
+
+    pub(crate) fn identity(&self) -> io::Result<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = self.0.metadata()?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+
+    pub(crate) fn as_file(&self) -> &File {
+        &self.0
+    }
+
     pub(crate) fn open_file(&self, name: &OsStr) -> io::Result<File> {
         let name = c_name(name)?;
         // SAFETY: openat receives a live descriptor and a valid C string.
@@ -147,9 +188,9 @@ impl Directory {
         }
     }
 
-    pub(crate) fn symlink(&self, name: &OsStr, target: &str) -> io::Result<()> {
+    pub(crate) fn symlink(&self, name: &OsStr, target: &OsStr) -> io::Result<()> {
         let name = c_name(name)?;
-        let target = CString::new(target)
+        let target = CString::new(target.as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "link target contains NUL"))?;
         // SAFETY: Both C strings and the directory descriptor remain valid.
         if unsafe { libc::symlinkat(target.as_ptr(), self.0.as_raw_fd(), name.as_ptr()) } == 0 {
@@ -206,8 +247,19 @@ impl Directory {
 
     pub(crate) fn is_empty_dir(&self, name: &OsStr) -> io::Result<bool> {
         let directory = self.open_dir(name)?;
-        // SAFETY: dup creates a descriptor owned by fdopendir; the original remains live.
-        let duplicate = unsafe { libc::dup(directory.0.as_raw_fd()) };
+        Ok(directory.entries()?.is_empty())
+    }
+
+    pub(crate) fn entries(&self) -> io::Result<Vec<OsString>> {
+        // SAFETY: openat creates an independent directory stream offset while
+        // remaining anchored to this inode. fdopendir takes its descriptor.
+        let duplicate = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
         if duplicate < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -218,23 +270,56 @@ impl Directory {
             unsafe { libc::close(duplicate) };
             return Err(io::Error::last_os_error());
         }
-        let mut empty = true;
+        let mut names = Vec::new();
         loop {
+            #[cfg(target_os = "macos")]
+            // SAFETY: __error returns this thread's writable errno location.
+            unsafe {
+                *libc::__error() = 0
+            };
+            #[cfg(target_os = "linux")]
+            // SAFETY: __errno_location returns this thread's writable errno location.
+            unsafe {
+                *libc::__errno_location() = 0
+            };
             // SAFETY: stream is open until closed below.
             let entry = unsafe { libc::readdir(stream) };
             if entry.is_null() {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(0) {
+                    // SAFETY: stream was opened by fdopendir and is still live.
+                    unsafe { libc::closedir(stream) };
+                    return Err(error);
+                }
                 break;
             }
             // SAFETY: d_name is NUL-terminated within the returned dirent.
             let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
             if name != b"." && name != b".." {
-                empty = false;
-                break;
+                names.push(OsString::from_vec(name.to_vec()));
             }
         }
         // SAFETY: stream was opened by fdopendir and must be closed once.
         unsafe { libc::closedir(stream) };
-        Ok(empty)
+        Ok(names)
+    }
+
+    pub(crate) fn remove_tree(&self, name: &OsStr) -> io::Result<()> {
+        let directory = self.open_dir(name)?;
+        directory.remove_contents()?;
+        self.remove(name)
+    }
+
+    fn remove_contents(&self) -> io::Result<()> {
+        for name in self.entries()? {
+            let stat = self.metadata(&name)?;
+            if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+                self.remove_tree(&name)?;
+            } else {
+                self.remove(&name)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn remove(&self, name: &OsStr) -> io::Result<()> {
@@ -374,6 +459,31 @@ mod tests {
             b"safe"
         );
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+        assert!(Directory::open_parent(home.path(), &parent).is_err());
+    }
+
+    #[test]
+    fn stage_creation_and_cleanup_follow_the_opened_parent() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let parent = home.path().canonicalize().unwrap().join(".skillator/rsync");
+        let directory = Directory::open_parent(home.path(), &parent).unwrap();
+        std::fs::rename(home.path().join(".skillator"), home.path().join("retained")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join(".skillator")).unwrap();
+        directory.create_dir(OsStr::new("stage-test")).unwrap();
+        let stage = directory.open_dir(OsStr::new("stage-test")).unwrap();
+        stage
+            .create_file(OsStr::new("data"))
+            .unwrap()
+            .write_all(b"safe")
+            .unwrap();
+        assert_eq!(
+            std::fs::read(home.path().join("retained/rsync/stage-test/data")).unwrap(),
+            b"safe"
+        );
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+        directory.remove_tree(OsStr::new("stage-test")).unwrap();
+        assert!(!home.path().join("retained/rsync/stage-test").exists());
         assert!(Directory::open_parent(home.path(), &parent).is_err());
     }
 }

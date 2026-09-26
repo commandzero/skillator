@@ -32,7 +32,7 @@ Use a private, versioned Skillator protocol over SSH stdin/stdout, with diagnost
 
 Pass arguments structurally wherever possible. Validate SSH destinations and use a fixed, safely quoted remote entry point; transport paths and protocol payloads must not become shell code. Bound message size and subprocess timeouts. Use the same SSH identity for protocol and rsync operations.
 
-Record the device and inode of each newly created session stage. Validate that the stage remains the same physical directory within the participant's home before every rsync transfer, export, publication, and cleanup. The private stage-validation request requires protocol 4; an older peer is rejected before writes.
+Create each session stage through an opened, non-following parent directory beneath home and record the new directory's device and inode from its open handle. Validate that the stage remains the same physical directory within the participant's home before every rsync transfer, export, publication, and cleanup. Clean stage contents through the held parent handle. The private stage-validation request requires protocol 4; an older peer is rejected before writes.
 
 ### Participant identity and history
 
@@ -60,7 +60,7 @@ Materialize acquired library links as physical content on receivers and write in
 
 The initiating host supplies origin identity and checked-out commit for each Git source. Clone an absent destination into staging, obtain the exact commit, verify it, and publish a complete checkout at the mapped source root. Preserve the branch name as provenance; a detached checkout at the exact commit is the initial representation. Branch movement and update policy belong to future update work.
 
-Create clone staging on the destination filesystem, open it as a directory without following a final symlink, and bind every Git subprocess to that directory handle. Git writes then stay with the opened inode even if an ancestor path is redirected while clone is running. Recheck stage identity and home containment before later Git steps, publication, and cleanup; preserve a changed stage for manual recovery.
+Create clone staging on the destination filesystem through an opened, non-following parent directory, and bind every Git subprocess to the new directory handle. Git writes then stay with the opened inode even if an ancestor path is redirected while clone is running. Recheck stage identity and home containment before later Git steps, publication, and cleanup; preserve a changed stage for manual recovery.
 
 Never copy `.git` directories, hooks, config, indexes, alternates, or worktree control files. A source represented locally by a worktree or submodule becomes an independent checkout remotely. If an exact submodule source commit or an unpublished commit cannot be obtained from origin, report it and leave that source unbootstrapped. Do not forward credentials automatically or use an initiating repository as an implicit Git server.
 

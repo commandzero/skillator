@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(test)]
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -366,6 +368,7 @@ pub(super) fn observe_at(parent: &Directory, name: &std::ffi::OsStr) -> Result<O
     Ok(Some(entry))
 }
 
+#[cfg(test)]
 pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = File::options()
         .write(true)

@@ -5,13 +5,18 @@ use super::{
 };
 use crate::app::{AppPaths, CommandReport, UserScopeWorkflow};
 use crate::config::{Fingerprint, LibraryLocationConfig, save_library};
-use crate::fs_safety::{Directory, bind_directory, rename_exchange, rename_noreplace};
+#[cfg(test)]
+use crate::fs_safety::rename_exchange;
+use crate::fs_safety::{Directory, bind_directory};
 use crate::reconcile::TargetLocks;
 use crate::target::Target;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
+#[cfg(test)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -93,6 +98,7 @@ pub(super) struct Session {
     last: Option<(Snapshot, Vec<Source>, String)>,
     stage: Option<PathBuf>,
     stage_identity: Option<(u64, u64)>,
+    stage_parent: Option<Directory>,
     session_lock: Option<File>,
     user_lock: Option<TargetLocks>,
     history: History,
@@ -106,6 +112,7 @@ impl Session {
             last: None,
             stage: None,
             stage_identity: None,
+            stage_parent: None,
             session_lock: None,
             user_lock: None,
             history: History::default(),
@@ -158,9 +165,11 @@ impl Session {
                 {
                     return Err(Error::input("source changed after observation"));
                 }
-                let stage = self.stage.as_ref().unwrap().join(state::new_id()?);
-                copy_entry(&source, &stage, &expected)?;
-                if state::observe(&stage)? != Some(expected) {
+                let stage_dir = self.open_stage()?;
+                let name = state::new_id()?;
+                let stage = self.stage.as_ref().unwrap().join(&name);
+                copy_entry_at(&source, &stage_dir, std::ffi::OsStr::new(&name), &expected)?;
+                if state::observe_at(&stage_dir, std::ffi::OsStr::new(&name))? != Some(expected) {
                     return Err(Error::input("source changed during export"));
                 }
                 Ok(Response::Exported {
@@ -345,18 +354,15 @@ impl Session {
         self.lock(token)?;
         let observed = self.last.as_ref().unwrap().0.clone();
         let root = state::contained(self.paths.home(), ".skillator/rsync/session.lock")?;
-        fs::create_dir_all(root.parent().unwrap()).map_err(Error::input_display)?;
-        if fs::symlink_metadata(&root).is_ok_and(|meta| !meta.is_file()) {
-            return Err(Error::input("session lock must be a regular file"));
-        }
+        let parent = Directory::open_parent(self.paths.home(), root.parent().unwrap())
+            .map_err(Error::input_display)?;
         if self.session_lock.is_none() {
-            let lock = File::options()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&root)
+            let lock = parent
+                .open_lock(root.file_name().unwrap())
                 .map_err(Error::input_display)?;
+            if !lock.metadata().map_err(Error::input_display)?.is_file() {
+                return Err(Error::input("session lock must be a regular file"));
+            }
             lock.try_lock().map_err(|_| Error::busy())?;
             self.session_lock = Some(lock);
         }
@@ -377,14 +383,17 @@ impl Session {
                 ".skillator/rsync/state.json",
             )?)?;
         }
-        let stage = root
-            .parent()
-            .unwrap()
-            .join(format!("stage-{}", state::new_id()?));
-        fs::create_dir(&stage).map_err(Error::input_display)?;
-        let metadata = fs::symlink_metadata(&stage).map_err(Error::input_display)?;
-        self.stage_identity = Some((metadata.dev(), metadata.ino()));
+        let stage_name = format!("stage-{}", state::new_id()?);
+        let stage = root.parent().unwrap().join(&stage_name);
+        parent
+            .create_dir(std::ffi::OsStr::new(&stage_name))
+            .map_err(Error::input_display)?;
+        let opened_stage = parent
+            .open_dir(std::ffi::OsStr::new(&stage_name))
+            .map_err(Error::input_display)?;
+        self.stage_identity = Some(opened_stage.identity().map_err(Error::input_display)?);
         self.stage = Some(stage.clone());
+        self.stage_parent = Some(parent);
         self.validate_stage_root()?;
         Ok(Response::Begun {
             id,
@@ -418,6 +427,22 @@ impl Session {
         }
         state::home_relative(self.paths.home(), stage)?;
         Ok(stage)
+    }
+
+    fn open_stage(&self) -> Result<Directory> {
+        let stage = self.validate_stage_root()?;
+        let directory = self
+            .stage_parent
+            .as_ref()
+            .unwrap()
+            .open_dir(stage.file_name().unwrap())
+            .map_err(Error::input_display)?;
+        if Some(directory.identity().map_err(Error::input_display)?) != self.stage_identity {
+            return Err(Error::input(
+                "synchronization stage changed after Begin; abort and recover",
+            ));
+        }
+        Ok(directory)
     }
 
     fn authorize_path(&self, path: &str) -> Result<()> {
@@ -562,41 +587,47 @@ impl Session {
             return Err(Error::input("Git bootstrap destination already exists"));
         }
         let parent = destination.parent().unwrap();
-        fs::create_dir_all(parent).map_err(Error::input_display)?;
-        let stage = parent.join(format!(".skillator-clone-{}", state::new_id()?));
-        fs::create_dir(&stage).map_err(Error::input_display)?;
-        let stage_dir = File::options()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(&stage)
+        let directory =
+            Directory::open_parent(self.paths.home(), parent).map_err(Error::input_display)?;
+        let stage_name = format!(".skillator-clone-{}", state::new_id()?);
+        let stage_name = std::ffi::OsStr::new(&stage_name);
+        let stage = parent.join(stage_name);
+        directory
+            .create_dir(stage_name)
+            .map_err(Error::input_display)?;
+        let stage_dir = directory
+            .open_dir(stage_name)
             .map_err(Error::input_display)?;
         let result = (|| {
-            validate_clone_stage(self.paths.home(), &stage, &stage_dir)?;
-            git_in_directory(&stage_dir, &["clone", "--no-checkout", "--", &git.origin, "."])
+            validate_clone_stage(self.paths.home(), &stage, stage_dir.as_file())?;
+            git_in_directory(stage_dir.as_file(), &["clone", "--no-checkout", "--", &git.origin, "."])
                 .map_err(|error| Error::input(format!(
                 "cannot clone Git source {}; verify the configured origin, repository access, credentials, and network connectivity: {error}", source.root
             )))?;
-            validate_clone_stage(self.paths.home(), &stage, &stage_dir)?;
+            validate_clone_stage(self.paths.home(), &stage, stage_dir.as_file())?;
             if git_in_directory(
-                &stage_dir,
+                stage_dir.as_file(),
                 &["cat-file", "-e", &format!("{}^{{commit}}", git.commit)],
             )
             .is_err()
             {
-                git_in_directory(&stage_dir, &["fetch", "--", "origin", &git.commit])
+                git_in_directory(stage_dir.as_file(), &["fetch", "--", "origin", &git.commit])
                     .map_err(|error| Error::input(format!(
                         "cannot fetch exact commit {} for Git source {}; ensure the commit is published and accessible from this host: {error}", git.commit, source.root
                     )))?;
             }
-            validate_clone_stage(self.paths.home(), &stage, &stage_dir)?;
-            git_in_directory(&stage_dir, &["checkout", "--detach", &git.commit, "--"])?;
+            validate_clone_stage(self.paths.home(), &stage, stage_dir.as_file())?;
+            git_in_directory(
+                stage_dir.as_file(),
+                &["checkout", "--detach", &git.commit, "--"],
+            )?;
             let origin = String::from_utf8(git_in_directory(
-                &stage_dir,
+                stage_dir.as_file(),
                 &["remote", "get-url", "origin"],
             )?)
             .map_err(Error::input_display)?;
             let commit = String::from_utf8(git_in_directory(
-                &stage_dir,
+                stage_dir.as_file(),
                 &["rev-parse", "--verify", "HEAD^{commit}"],
             )?)
             .map_err(Error::input_display)?;
@@ -605,14 +636,18 @@ impl Session {
                     "clone did not produce the exact requested Git reference",
                 ));
             }
-            validate_clone_stage(self.paths.home(), &stage, &stage_dir)?;
+            validate_clone_stage(self.paths.home(), &stage, stage_dir.as_file())?;
             if state::contained(self.paths.home(), &source.root)? != destination {
                 return Err(Error::input("clone parent changed"));
             }
-            rename_noreplace(&stage, &destination).map_err(Error::input_display)
+            directory
+                .rename_noreplace(stage_name, destination.file_name().unwrap())
+                .map_err(Error::input_display)
         })();
-        if result.is_err() && validate_clone_stage(self.paths.home(), &stage, &stage_dir).is_ok() {
-            let _ = fs::remove_dir_all(&stage);
+        if result.is_err()
+            && validate_clone_stage(self.paths.home(), &stage, stage_dir.as_file()).is_ok()
+        {
+            let _ = directory.remove_tree(stage_name);
         }
         result
     }
@@ -811,36 +846,34 @@ impl Session {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(Error::input_display(error)),
         }
-        fs::create_dir_all(destination.parent().unwrap()).map_err(Error::input_display)?;
-        if state::contained(self.paths.home(), path)? != destination
-            || state::contained(self.paths.home(), target)?
-                .canonicalize()
-                .map_err(Error::input_display)?
-                != real_target
-        {
+        let directory = Directory::open_parent(self.paths.home(), destination.parent().unwrap())
+            .map_err(Error::input_display)?;
+        let destination_name = destination.file_name().unwrap();
+        let unchanged = || {
+            matches!(state::contained(self.paths.home(), path), Ok(current) if current == destination)
+                && matches!(state::contained(self.paths.home(), target).and_then(|path| path.canonicalize().map_err(Error::input_display)), Ok(current) if current == real_target)
+        };
+        if !unchanged() || state::observe_at(&directory, destination_name)?.is_some() {
             return Err(Error::input(
                 "alias destination or target changed before staging",
             ));
         }
-        let sibling = destination
-            .parent()
-            .unwrap()
-            .join(format!(".skillator-alias-{}", state::new_id()?));
-        std::os::unix::fs::symlink(&physical_target, &sibling).map_err(Error::input_display)?;
-        if state::contained(self.paths.home(), path)? != destination
-            || state::contained(self.paths.home(), target)?
-                .canonicalize()
-                .map_err(Error::input_display)?
-                != real_target
-        {
-            let _ = fs::remove_file(&sibling);
+        let sibling_name = format!(".skillator-alias-{}", state::new_id()?);
+        let sibling_name = std::ffi::OsStr::new(&sibling_name);
+        directory
+            .symlink(sibling_name, physical_target.as_os_str())
+            .map_err(Error::input_display)?;
+        if !unchanged() || state::observe_at(&directory, destination_name)?.is_some() {
+            let _ = directory.remove(sibling_name);
             return Err(Error::input(
                 "alias destination or target changed during staging",
             ));
         }
-        let result = rename_noreplace(&sibling, &destination).map_err(Error::input_display);
+        let result = directory
+            .rename_noreplace(sibling_name, destination_name)
+            .map_err(Error::input_display);
         if result.is_err() {
-            let _ = fs::remove_file(&sibling);
+            let _ = directory.remove(sibling_name);
         }
         result
     }
@@ -912,19 +945,23 @@ impl Session {
             }
             return Err(Error::input("destination changed during staging"));
         }
-        let journal = self
-            .validate_stage_root()?
-            .join(format!("recovery-{}.json", state::new_id()?));
-        state::write_new(
-            &journal,
-            &serde_json::to_vec(&Recovery {
-                path: path.into(),
-                expected: expected.cloned(),
-                desired: desired.cloned(),
-                sibling: sibling.clone(),
-            })
-            .map_err(Error::input_display)?,
-        )?;
+        let stage_dir = self.open_stage()?;
+        let journal_name = format!("recovery-{}.json", state::new_id()?);
+        let mut journal = stage_dir
+            .create_file(std::ffi::OsStr::new(&journal_name))
+            .map_err(Error::input_display)?;
+        journal
+            .write_all(
+                &serde_json::to_vec(&Recovery {
+                    path: path.into(),
+                    expected: expected.cloned(),
+                    desired: desired.cloned(),
+                    sibling: sibling.clone(),
+                })
+                .map_err(Error::input_display)?,
+            )
+            .and_then(|()| journal.sync_all())
+            .map_err(Error::input_display)?;
         let result = match (expected, desired) {
             (None, Some(_)) => directory.rename_noreplace(sibling_name, destination_name),
             (Some(_), Some(_)) => directory.rename_exchange(sibling_name, destination_name),
@@ -970,7 +1007,9 @@ impl Session {
                 .remove(sibling_name)
                 .map_err(Error::input_display)?;
         }
-        fs::remove_file(journal).map_err(Error::input_display)?;
+        stage_dir
+            .remove(std::ffi::OsStr::new(&journal_name))
+            .map_err(Error::input_display)?;
         Ok(())
     }
 
@@ -980,24 +1019,35 @@ impl Session {
         } else {
             Ok(())
         };
-        if let Some(stage) = self.stage.take()
+        let cleanup = if let Some(stage) = self.stage.as_ref()
             && stage_valid.is_ok()
         {
-            let recovery = fs::read_dir(&stage)
-                .map_err(Error::input_display)?
-                .any(|entry| {
-                    entry.is_ok_and(|entry| {
-                        entry.file_name().to_string_lossy().starts_with("recovery-")
-                    })
-                });
-            if !recovery {
-                fs::remove_dir_all(stage).map_err(Error::input_display)?;
-            }
-        }
+            (|| -> Result<()> {
+                let parent = self.stage_parent.as_ref().unwrap();
+                let name = stage.file_name().unwrap();
+                let opened = parent.open_dir(name).map_err(Error::input_display)?;
+                if Some(opened.identity().map_err(Error::input_display)?) != self.stage_identity {
+                    return Err(Error::input("synchronization stage changed during cleanup"));
+                }
+                if !opened
+                    .entries()
+                    .map_err(Error::input_display)?
+                    .iter()
+                    .any(|name| name.to_string_lossy().starts_with("recovery-"))
+                {
+                    parent.remove_tree(name).map_err(Error::input_display)?;
+                }
+                Ok(())
+            })()
+        } else {
+            Ok(())
+        };
+        self.stage = None;
+        self.stage_parent = None;
         self.stage_identity = None;
         self.user_lock = None;
         self.session_lock = None;
-        stage_valid
+        stage_valid.and(cleanup)
     }
 
     fn validate_link(&self, path: &str, target: &str) -> Result<()> {
@@ -1061,21 +1111,29 @@ pub(super) fn pending_recovery(home: &Path) -> Result<Vec<PathBuf>> {
         .parent()
         .unwrap()
         .to_path_buf();
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
+    let directory = match Directory::open_existing_parent(home, &root) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(Error::input_display(error)),
+    };
     let mut records = Vec::new();
-    for entry in fs::read_dir(root).map_err(Error::input_display)? {
-        let entry = entry.map_err(Error::input_display)?;
-        if !entry.file_name().to_string_lossy().starts_with("stage-")
-            || !entry.file_type().map_err(Error::input_display)?.is_dir()
+    for name in directory.entries().map_err(Error::input_display)? {
+        if !name.to_string_lossy().starts_with("stage-") {
+            continue;
+        }
+        if directory
+            .metadata(&name)
+            .map_err(Error::input_display)?
+            .st_mode
+            & libc::S_IFMT
+            != libc::S_IFDIR
         {
             continue;
         }
-        for file in fs::read_dir(entry.path()).map_err(Error::input_display)? {
-            let file = file.map_err(Error::input_display)?;
-            if file.file_name().to_string_lossy().starts_with("recovery-") {
-                records.push(file.path());
+        let stage = directory.open_dir(&name).map_err(Error::input_display)?;
+        for file in stage.entries().map_err(Error::input_display)? {
+            if file.to_string_lossy().starts_with("recovery-") {
+                records.push(root.join(&name).join(file));
             }
         }
     }
@@ -1086,8 +1144,18 @@ pub(super) fn pending_recovery(home: &Path) -> Result<Vec<PathBuf>> {
 fn recover_pending(home: &Path) -> Result<usize> {
     let records = pending_recovery(home)?;
     for record in &records {
-        let bytes = state::read_optional(record)?
-            .ok_or_else(|| Error::input("recovery record disappeared"))?;
+        let root = record.parent().unwrap().parent().unwrap();
+        let stage_parent =
+            Directory::open_existing_parent(home, root).map_err(Error::input_display)?;
+        let stage = stage_parent
+            .open_dir(record.parent().unwrap().file_name().unwrap())
+            .map_err(Error::input_display)?;
+        let mut bytes = Vec::new();
+        stage
+            .open_file(record.file_name().unwrap())
+            .map_err(Error::input_display)?
+            .read_to_end(&mut bytes)
+            .map_err(Error::input_display)?;
         let recovery: Recovery = serde_json::from_slice(&bytes).map_err(Error::input_display)?;
         let destination = state::contained(home, &recovery.path)?;
         if recovery.sibling.parent() != destination.parent()
@@ -1101,16 +1169,20 @@ fn recover_pending(home: &Path) -> Result<usize> {
                 "invalid recovery backup path; manual recovery required",
             ));
         }
-        let actual = state::observe(&destination)?;
-        let backup = state::observe(&recovery.sibling)?;
+        let parent = Directory::open_existing_parent(home, destination.parent().unwrap())
+            .map_err(Error::input_display)?;
+        let destination_name = destination.file_name().unwrap();
+        let sibling_name = recovery.sibling.file_name().unwrap();
+        let actual = state::observe_at(&parent, destination_name)?;
+        let backup = state::observe_at(&parent, sibling_name)?;
         // Published and removed directory entries are empty at the journal boundary.
         // A type-only observation cannot prove that later children are ours to move.
-        for (path, entry) in [(&destination, &actual), (&recovery.sibling, &backup)] {
+        for (path, name, entry) in [
+            (&destination, destination_name, &actual),
+            (&recovery.sibling, sibling_name, &backup),
+        ] {
             if matches!(entry, Some(Entry::Directory))
-                && fs::read_dir(path)
-                    .map_err(Error::input_display)?
-                    .next()
-                    .is_some()
+                && !parent.is_empty_dir(name).map_err(Error::input_display)?
             {
                 return Err(Error::input(format!(
                     "{} contains entries added after interruption; preserve the directory and backup for manual recovery",
@@ -1127,9 +1199,9 @@ fn recover_pending(home: &Path) -> Result<usize> {
             }
         } else if actual == recovery.desired && backup == recovery.expected {
             match (&recovery.expected, &recovery.desired) {
-                (Some(_), Some(_)) => rename_exchange(&recovery.sibling, &destination),
-                (Some(_), None) => rename_noreplace(&recovery.sibling, &destination),
-                (None, Some(_)) => rename_noreplace(&destination, &recovery.sibling),
+                (Some(_), Some(_)) => parent.rename_exchange(sibling_name, destination_name),
+                (Some(_), None) => parent.rename_noreplace(sibling_name, destination_name),
+                (None, Some(_)) => parent.rename_noreplace(destination_name, sibling_name),
                 _ => Ok(()),
             }
             .map_err(Error::input_display)?;
@@ -1141,10 +1213,12 @@ fn recover_pending(home: &Path) -> Result<usize> {
                 recovery.path
             )));
         }
-        if fs::symlink_metadata(&recovery.sibling).is_ok() {
-            remove_entry(&recovery.sibling)?;
+        if state::observe_at(&parent, sibling_name)?.is_some() {
+            parent.remove(sibling_name).map_err(Error::input_display)?;
         }
-        fs::remove_file(record).map_err(Error::input_display)?;
+        stage
+            .remove(record.file_name().unwrap())
+            .map_err(Error::input_display)?;
     }
     Ok(records.len())
 }
@@ -1217,46 +1291,6 @@ fn hash_optional(path: &Path) -> Result<Option<String>> {
     Ok(state::read_optional(path)?.map(|bytes| state::digest(&bytes)))
 }
 
-fn remove_entry(path: &Path) -> Result<()> {
-    let meta = fs::symlink_metadata(path).map_err(Error::input_display)?;
-    if meta.is_dir() {
-        fs::remove_dir(path)
-    } else {
-        fs::remove_file(path)
-    }
-    .map_err(Error::input_display)
-}
-
-fn copy_entry(source: &Path, destination: &Path, entry: &Entry) -> Result<()> {
-    match entry {
-        Entry::File { .. } => {
-            let mut input = File::open(source).map_err(Error::input_display)?;
-            let mut output = File::options()
-                .write(true)
-                .create_new(true)
-                .open(destination)
-                .map_err(Error::input_display)?;
-            std::io::copy(&mut input, &mut output).map_err(Error::input_display)?;
-            output
-                .set_permissions(
-                    input
-                        .metadata()
-                        .map_err(Error::input_display)?
-                        .permissions(),
-                )
-                .map_err(Error::input_display)?;
-            output.sync_all().map_err(Error::input_display)?;
-        }
-        Entry::Link { target } => {
-            std::os::unix::fs::symlink(target, destination).map_err(Error::input_display)?;
-        }
-        Entry::Directory => {
-            fs::create_dir(destination).map_err(Error::input_display)?;
-        }
-    }
-    Ok(())
-}
-
 fn copy_entry_at(
     source: &Path,
     parent: &Directory,
@@ -1278,7 +1312,9 @@ fn copy_entry_at(
                 .map_err(Error::input_display)?;
             output.sync_all().map_err(Error::input_display)?;
         }
-        Entry::Link { target } => parent.symlink(name, target).map_err(Error::input_display)?,
+        Entry::Link { target } => parent
+            .symlink(name, std::ffi::OsStr::new(target))
+            .map_err(Error::input_display)?,
         Entry::Directory => parent.create_dir(name).map_err(Error::input_display)?,
     }
     Ok(())
