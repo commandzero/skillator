@@ -11,6 +11,7 @@ use crate::target::Target;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -23,6 +24,7 @@ pub(super) enum Request {
     Begin {
         token: String,
     },
+    ValidateStage,
     Lock {
         token: String,
     },
@@ -90,6 +92,7 @@ pub(super) struct Session {
     pub paths: AppPaths,
     last: Option<(Snapshot, Vec<Source>, String)>,
     stage: Option<PathBuf>,
+    stage_identity: Option<(u64, u64)>,
     session_lock: Option<File>,
     user_lock: Option<TargetLocks>,
     history: History,
@@ -102,6 +105,7 @@ impl Session {
             paths,
             last: None,
             stage: None,
+            stage_identity: None,
             session_lock: None,
             user_lock: None,
             history: History::default(),
@@ -132,6 +136,10 @@ impl Session {
                 })
             }
             Request::Begin { token } => self.begin(&token),
+            Request::ValidateStage => {
+                self.validate_stage_root()?;
+                Ok(Response::Ok)
+            }
             Request::Lock { token } => {
                 self.lock(&token)?;
                 Ok(Response::Ok)
@@ -143,6 +151,7 @@ impl Session {
             }
             Request::Export { path, expected } => {
                 self.require_active()?;
+                self.validate_stage_root()?;
                 self.authorize_path(&path)?;
                 let source = state::contained(self.paths.home(), &path)?;
                 if self.observed_content(&path, &source, Some(&expected))? != Some(expected.clone())
@@ -165,6 +174,7 @@ impl Session {
                 stage,
             } => {
                 self.require_active()?;
+                self.validate_stage_root()?;
                 self.authorize_path(&path)?;
                 self.publish(&path, expected.as_ref(), desired.as_ref(), stage.as_deref())?;
                 Ok(Response::Ok)
@@ -372,7 +382,10 @@ impl Session {
             .unwrap()
             .join(format!("stage-{}", state::new_id()?));
         fs::create_dir(&stage).map_err(Error::input_display)?;
+        let metadata = fs::symlink_metadata(&stage).map_err(Error::input_display)?;
+        self.stage_identity = Some((metadata.dev(), metadata.ino()));
         self.stage = Some(stage.clone());
+        self.validate_stage_root()?;
         Ok(Response::Begun {
             id,
             stage: stage.to_string_lossy().into_owned(),
@@ -387,6 +400,24 @@ impl Session {
             ));
         }
         Ok(())
+    }
+
+    fn validate_stage_root(&self) -> Result<&Path> {
+        self.require_active()?;
+        let stage = self.stage.as_deref().unwrap();
+        let metadata = fs::symlink_metadata(stage).map_err(|_| {
+            Error::input("synchronization stage changed after Begin; abort and recover")
+        })?;
+        if !metadata.file_type().is_dir()
+            || self.stage_identity != Some((metadata.dev(), metadata.ino()))
+            || stage.canonicalize().map_err(Error::input_display)? != stage
+        {
+            return Err(Error::input(
+                "synchronization stage changed after Begin; abort and recover",
+            ));
+        }
+        state::home_relative(self.paths.home(), stage)?;
+        Ok(stage)
     }
 
     fn authorize_path(&self, path: &str) -> Result<()> {
@@ -765,11 +796,32 @@ impl Session {
             Err(error) => return Err(Error::input_display(error)),
         }
         fs::create_dir_all(destination.parent().unwrap()).map_err(Error::input_display)?;
+        if state::contained(self.paths.home(), path)? != destination
+            || state::contained(self.paths.home(), target)?
+                .canonicalize()
+                .map_err(Error::input_display)?
+                != real_target
+        {
+            return Err(Error::input(
+                "alias destination or target changed before staging",
+            ));
+        }
         let sibling = destination
             .parent()
             .unwrap()
             .join(format!(".skillator-alias-{}", state::new_id()?));
         std::os::unix::fs::symlink(&physical_target, &sibling).map_err(Error::input_display)?;
+        if state::contained(self.paths.home(), path)? != destination
+            || state::contained(self.paths.home(), target)?
+                .canonicalize()
+                .map_err(Error::input_display)?
+                != real_target
+        {
+            let _ = fs::remove_file(&sibling);
+            return Err(Error::input(
+                "alias destination or target changed during staging",
+            ));
+        }
         let result = rename_noreplace(&sibling, &destination).map_err(Error::input_display);
         if result.is_err() {
             let _ = fs::remove_file(&sibling);
@@ -819,7 +871,7 @@ impl Session {
             } else {
                 let stage = staged.ok_or_else(|| Error::input("missing staged content"))?;
                 let stage_path = Path::new(stage);
-                if stage_path.parent() != self.stage.as_deref() {
+                if stage_path.parent() != Some(self.validate_stage_root()?) {
                     return Err(Error::input("invalid staged path"));
                 }
                 if state::observe(stage_path)?.as_ref() != Some(desired) {
@@ -845,9 +897,7 @@ impl Session {
             return Err(Error::input("destination changed during staging"));
         }
         let journal = self
-            .stage
-            .as_ref()
-            .unwrap()
+            .validate_stage_root()?
             .join(format!("recovery-{}.json", state::new_id()?));
         state::write_new(
             &journal,
@@ -906,7 +956,14 @@ impl Session {
     }
 
     fn finish(&mut self) -> Result<()> {
-        if let Some(stage) = self.stage.take() {
+        let stage_valid = if self.stage.is_some() {
+            self.validate_stage_root().map(|_| ())
+        } else {
+            Ok(())
+        };
+        if let Some(stage) = self.stage.take()
+            && stage_valid.is_ok()
+        {
             let recovery = fs::read_dir(&stage)
                 .map_err(Error::input_display)?
                 .any(|entry| {
@@ -918,9 +975,10 @@ impl Session {
                 fs::remove_dir_all(stage).map_err(Error::input_display)?;
             }
         }
+        self.stage_identity = None;
         self.user_lock = None;
         self.session_lock = None;
-        Ok(())
+        stage_valid
     }
 
     fn validate_link(&self, path: &str, target: &str) -> Result<()> {
@@ -1225,6 +1283,51 @@ mod tests {
             panic!()
         };
         (home, session, PathBuf::from(stage))
+    }
+
+    #[test]
+    fn replaced_stage_directory_is_rejected_before_export_or_publication() {
+        for symlink in [true, false] {
+            let (home, mut session, stage) = setup();
+            let preserved = stage.with_extension("preserved");
+            fs::rename(&stage, &preserved).unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            if symlink {
+                std::os::unix::fs::symlink(outside.path(), &stage).unwrap();
+            } else {
+                fs::create_dir(&stage).unwrap();
+            }
+            let error = session.handle(Request::ValidateStage).unwrap_err();
+            assert!(error.message.contains("stage changed"), "{error}");
+            let source = home.path().join(".skillator/library/demo/data");
+            let expected = state::observe(&source).unwrap().unwrap();
+            assert!(
+                session
+                    .handle(Request::Export {
+                        path: ".skillator/library/demo/data".into(),
+                        expected: expected.clone(),
+                    })
+                    .unwrap_err()
+                    .message
+                    .contains("stage changed")
+            );
+            assert!(
+                session
+                    .handle(Request::Publish {
+                        path: ".skillator/library/demo/data".into(),
+                        expected: Some(expected.clone()),
+                        desired: Some(expected),
+                        stage: None,
+                    })
+                    .unwrap_err()
+                    .message
+                    .contains("stage changed")
+            );
+            assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+            assert!(preserved.exists());
+            assert!(session.handle(Request::Finish).is_err());
+            assert!(preserved.exists());
+        }
     }
 
     #[test]

@@ -541,7 +541,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
     }
     Ok(Snapshot {
         available_locations,
-        protocol: 3,
+        protocol: 4,
         version: env!("CARGO_PKG_VERSION").into(),
         home: paths.home().canonicalize().map_err(Error::input_display)?,
         history,

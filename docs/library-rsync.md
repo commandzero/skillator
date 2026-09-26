@@ -12,7 +12,7 @@ generated: { by: codex/gpt-6, at: 2026-09-19T00:00:00Z }
 
 ## Configure hosts
 
-Install Skillator with synchronization protocol 3, Git, and rsync on every host. The remote noninteractive shell must find all three on PATH. Skillator reports missing or incompatible dependencies and does not install them.
+Install Skillator with synchronization protocol 4, Git, and rsync on every host. The remote noninteractive shell must find all three on PATH. Skillator reports missing or incompatible dependencies and does not install them.
 
 Create `~/.skillator/config.yaml` on the initiating machine:
 
@@ -110,6 +110,6 @@ Each publication verifies staged content and rechecks the observed source and de
 
 After interruption, rerun the command. It inspects retained publication journals, restores recoverable originals where safe, and refuses to overwrite later edits. Preserve any reported journal and backup when manual recovery is required. Once the old and current values are reconciled, retry. Successful entries retain their own acknowledgements; a failed host does not cause all other hosts to roll back.
 
-The names `.skillator-rsync-<32 hex digits>` and `.skillator-clone-<32 hex digits>` are reserved temporary entries and excluded from discovery during synchronization. Do not use them for skill content.
+The names `.skillator-rsync-<32 hex digits>`, `.skillator-clone-<32 hex digits>`, and `.skillator-alias-<32 hex digits>` are reserved temporary entries and excluded from discovery during synchronization. Do not use them for skill content.
 
 Removing a host from configuration stops future contact. Removing a library registration is not replicated and does not delete its source tree.

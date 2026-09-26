@@ -201,7 +201,7 @@ impl Endpoint {
                 };
                 serde_json::from_slice(&bytes).map_err(|_| {
                     Error::input(
-                        "invalid remote response or incompatible Skillator; protocol 3 is required",
+                        "invalid remote response or incompatible Skillator; protocol 4 is required",
                     )
                 })?
             }
@@ -216,8 +216,15 @@ impl Endpoint {
         transfer(self, exported, local, false)
     }
 
-    pub fn push(&self, local: &std::path::Path, staged: &str) -> Result<()> {
-        transfer(self, staged, local, true)
+    pub fn push(&mut self, local: &std::path::Path, staged: &str) -> Result<()> {
+        if !matches!(self.request(Request::ValidateStage)?, Response::Ok) {
+            return Err(Error::input("unexpected stage validation response"));
+        }
+        transfer(self, staged, local, true)?;
+        if !matches!(self.request(Request::ValidateStage)?, Response::Ok) {
+            return Err(Error::input("unexpected stage validation response"));
+        }
+        Ok(())
     }
 }
 
@@ -258,7 +265,7 @@ fn probe_version(remote: &Remote) -> Error {
                 Error::input("Skillator is not installed on remote host")
             } else {
                 Error::input(format!(
-                    "Skillator version {version:?} is incompatible; synchronization protocol 3 is required on remote host"
+                    "Skillator version {version:?} is incompatible; synchronization protocol 4 is required on remote host"
                 ))
             }
         }
@@ -375,6 +382,34 @@ mod tests {
         let bytes = (process::LIMIT + 8192) as u64;
         let mut diagnostics = std::io::repeat(b'x').take(bytes);
         assert_eq!(drain_diagnostics(&mut diagnostics).unwrap(), bytes);
+    }
+
+    #[test]
+    fn push_rejects_a_replaced_stage_before_rsync() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let payload = home.path().join("payload");
+        std::fs::write(&payload, "private skill content").unwrap();
+        let mut endpoint = Endpoint::local(AppPaths::new(home.path().into()));
+        let Response::Snapshot { token, .. } = endpoint
+            .request(Request::Inspect {
+                sources: Vec::new(),
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        let Response::Begun { stage, .. } = endpoint.request(Request::Begin { token }).unwrap()
+        else {
+            panic!()
+        };
+        let saved = format!("{stage}-saved");
+        std::fs::rename(&stage, &saved).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &stage).unwrap();
+        let target = format!("{stage}/incoming");
+        let error = endpoint.push(&payload, &target).unwrap_err();
+        assert!(error.message.contains("stage changed"), "{error}");
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
     #[test]

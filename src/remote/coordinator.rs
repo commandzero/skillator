@@ -154,9 +154,9 @@ impl Participant {
         else {
             return Err(Error::input("remote did not return an observation"));
         };
-        if snapshot.protocol != 3 {
+        if snapshot.protocol != 4 {
             return Err(Error::input(format!(
-                "incompatible Skillator {} on remote host {alias}; protocol 3 is required",
+                "incompatible Skillator {} on remote host {alias}; protocol 4 is required",
                 snapshot.version
             )));
         }
@@ -1175,8 +1175,40 @@ fn sync_files(
                 Ok(Response::Exported { path: export }) => {
                     let local =
                         PathBuf::from(peers[0].stage.as_ref().unwrap()).join(state::new_id()?);
+                    if let Err(error) = peers[*index].request_ok(Request::ValidateStage) {
+                        report.problem(
+                            &peers[*index].alias,
+                            path,
+                            "transfer_failed",
+                            error.to_string(),
+                        );
+                        failed.extend(roots);
+                        continue;
+                    }
+                    if let Err(error) = peers[0].request_ok(Request::ValidateStage) {
+                        report.problem("local", path, "transfer_failed", error.to_string());
+                        failed.extend(roots);
+                        continue;
+                    }
                     match peers[*index].endpoint.pull(&export, &local) {
-                        Ok(()) => Some(local),
+                        Ok(()) => {
+                            if let Err(error) = peers[0].request_ok(Request::ValidateStage) {
+                                report.problem("local", path, "transfer_failed", error.to_string());
+                                failed.extend(roots);
+                                continue;
+                            }
+                            if let Err(error) = peers[*index].request_ok(Request::ValidateStage) {
+                                report.problem(
+                                    &peers[*index].alias,
+                                    path,
+                                    "transfer_failed",
+                                    error.to_string(),
+                                );
+                                failed.extend(roots);
+                                continue;
+                            }
+                            Some(local)
+                        }
                         Err(error) => {
                             report.problem(
                                 &peers[*index].alias,
