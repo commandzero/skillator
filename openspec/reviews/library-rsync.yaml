@@ -1,10 +1,10 @@
 change: library-rsync
 reviewer: Codex
-reviewed_at: 2026-09-26T10:44:45Z
+reviewed_at: 2026-09-26T11:02:53Z
 notes: |
   # Semantic review: library-rsync
   
-  Reviewed the archived delta and combined main specifications at implementation commit 2bbd98b. All 22 affected requirements and 38 scenarios remain present. Twenty-one requirement blocks match their archived delta exactly. The statement of “Skillator composes with Git repository operations” now also names the separately merged, bounded `library update` command; its two rsync scenarios retain their original text. No scenario was dropped from a modified requirement. The new library-rsync main spec retains the delta Purpose. There are no removals or renames.
+  Reviewed the archived delta and combined main specifications at implementation commit 5f816e4. All 22 affected requirements and 38 scenarios remain present. Twenty-one requirement blocks match their archived delta exactly. The statement of “Skillator composes with Git repository operations” now also names the separately merged, bounded `library update` command; its two rsync scenarios retain their original text. No scenario was dropped from a modified requirement. The new library-rsync main spec retains the delta Purpose. There are no removals or renames.
   
   CLI contract: the Git-clone exception is limited to first-time library synchronization at the initiating commit. The merged `library update` command is separately limited to fast-forwarding clean registered checkouts; rsync still never updates existing checkouts. The general Git/worktree ownership rule, shared report envelope, stable host aliases, explicit policies, and exit-status rules remain coherent with both implemented commands.
   
@@ -72,9 +72,11 @@ notes: |
   
   The latest follow-up rejects configured library locations whose existing ancestor symlink escapes home even when the final child is absent. The publication interval is covered by deterministic create, replace, and remove tests: atomic no-replace or exchange/move preserves the intervening destination in place or in a recoverable sibling, and verification reports a mismatch before cleanup. The Linux CI Clippy fix copies permissions from the held source file rather than converting a platform-specific mode integer. These changes preserve the same specification guarantees and are recorded in the archived evidence.
   
+  The final lock-lifetime fix retains a session-owned user-home lock through User Scope reconciliation, acknowledgement, history publication, and Finish. Reconciliation shares the underlying file lock while it prepares and executes materializations. A regression proves competing user-home writers stay blocked after User and Acknowledge and are released only at Finish. The archived design and verification evidence record the boundary.
+  
   Finding: the merged main specs faithfully express the completed rsync change alongside the separately merged library update feature. The one combined statement is a deliberate, compatible extension; no rsync scenario or guarantee was lost.
 no_spec_deltas: false
-archive_tree: 03c8f16a44d88b824a900eb1b11c1d49aee0603e
+archive_tree: 4e44608fd33c6eb9c641ed1bc60918b0aba67b42
 specs:
   openspec/specs/cli-contract/spec.md: a516856ae88ace60a9d53927f4a80880a6d9e2f4
   openspec/specs/library-management/spec.md: 79659cd637567c7ac811564b50753e512804fdc5
