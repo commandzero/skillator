@@ -82,6 +82,8 @@ Merge user configuration semantically by Skill Directory key and Enablement iden
 
 Couple directory definition changes to their dependent Enablements. Resolve incompatible edits through the same conflict policy. Do not enable a newly received selection until its library source is usable locally. Reconcile through existing protected mutation workflows so unmanaged materializations cannot be overwritten by a file conflict flag.
 
+Check each receiving participant's acknowledged skill manifest after file reconciliation before sending a new Enablement. In preview, a planned manifest copy can satisfy this check without writing. `--missing ignore` may leave the skill absent, in which case retain existing selections only and report the unavailable receiver.
+
 Keep desired-state publication and materialization results distinct in reports and history. Prefer the prepared rollback-capable mutation path rather than the older save-before-reconcile workflow. An edited copied user materialization remains guarded drift; automatically promoting that edit back into the library is outside this version.
 
 ### Execution and recovery

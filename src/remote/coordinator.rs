@@ -1437,6 +1437,41 @@ fn report_blocked_enablement(key: &str, peers: &[Participant], report: &mut Repo
     }
 }
 
+fn unavailable_selection_host<'a>(
+    key: &str,
+    peers: &'a [Participant],
+    sources: &[Source],
+    acknowledgements: &[Baseline],
+    check: bool,
+    changes: &[Change],
+) -> Option<&'a str> {
+    let value = key.strip_prefix("enablement/")?;
+    let (_, source_key, skill): (String, String, String) = serde_json::from_str(value).ok()?;
+    let source = sources.iter().find(|source| source.key == source_key)?;
+    let skill = if skill == "." { "" } else { &skill };
+    let manifest = Path::new(&source.root)
+        .join(skill)
+        .join("SKILL.md")
+        .to_string_lossy()
+        .into_owned();
+    peers
+        .iter()
+        .enumerate()
+        .filter(|(_, peer)| !peer.snapshot.user.contains_key(key))
+        .find(|(index, peer)| {
+            let acknowledged =
+                matches!(acknowledgements[*index].files.get(&manifest), Some(Some(_)));
+            let planned = check
+                && changes.iter().any(|change| {
+                    change.host == peer.alias
+                        && change.path == manifest
+                        && change.action == "copy_skill_entry"
+                });
+            !acknowledged && !planned
+        })
+        .map(|(_, peer)| peer.alias.as_str())
+}
+
 fn user_base(peers: &[Participant], index: usize, key: &str) -> Option<Option<String>> {
     if !peers[index].snapshot.user_present {
         return None;
@@ -1519,6 +1554,31 @@ fn sync_user(
             }
             continue;
         }
+        let unavailable: Vec<_> = members
+            .iter()
+            .filter_map(|key| {
+                unavailable_selection_host(
+                    key,
+                    peers,
+                    sources,
+                    acknowledgements,
+                    options.check,
+                    &report.changes,
+                )
+                .map(|host| (key, host))
+            })
+            .collect();
+        if !unavailable.is_empty() {
+            for (key, host) in unavailable {
+                report.problem(
+                    host,
+                    ".agents/skillator.yaml",
+                    "enablement_source_unavailable",
+                    format!("selection {key} cannot reach {host} until its skill is available"),
+                );
+            }
+            continue;
+        }
         let observations: Vec<_> = (0..peers.len())
             .map(|index| {
                 let value = peers[index]
@@ -1591,6 +1651,22 @@ fn sync_user(
             .collect();
         if blocked_enablement(&key, sources, blocked) {
             report_blocked_enablement(&key, peers, report);
+            continue;
+        }
+        if let Some(host) = unavailable_selection_host(
+            &key,
+            peers,
+            sources,
+            acknowledgements,
+            options.check,
+            &report.changes,
+        ) {
+            report.problem(
+                host,
+                ".agents/skillator.yaml",
+                "enablement_source_unavailable",
+                format!("selection {key} cannot reach {host} until its skill is available"),
+            );
             continue;
         }
         let decision = planner::decide(&observations, options.conflict, options.missing, true);
@@ -2389,6 +2465,42 @@ mod tests {
                 super::super::snapshot::user(&AppPaths::new(homes[0].path().into())).unwrap();
             assert_eq!(local.enablements().len(), 1);
         }
+    }
+
+    #[test]
+    fn ignored_missing_skill_does_not_send_its_selection() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        select_demo_for_user(homes[0].path());
+        let preview = sync(&homes, options(true));
+        assert!(preview.changes.iter().any(|change| {
+            change.host == "host1" && change.action == "write_user_configuration"
+        }));
+        assert!(!homes[1].path().join(".agents/skillator.yaml").exists());
+        let mut ignore = options(false);
+        ignore.missing = MissingPolicy::Ignore;
+        let report = sync(&homes, ignore);
+        assert_eq!(report.exit_status, 1, "{}", report.text());
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "enablement_source_unavailable"
+                && diagnostic
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.get("host").map(String::as_str) == Some("host1"))
+        }));
+        let remote = super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
+        assert!(remote.enablements().is_empty());
+        assert!(
+            !homes[1]
+                .path()
+                .join(".skillator/library/demo/SKILL.md")
+                .exists()
+        );
+        let copied = sync(&homes, options(false));
+        assert_eq!(copied.exit_status, 0, "{}", copied.text());
+        let remote = super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
+        assert_eq!(remote.enablements().len(), 1);
     }
 
     #[test]
