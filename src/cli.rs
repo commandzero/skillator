@@ -12,6 +12,7 @@ use crate::hooks::{HookReport, HookState, HookWorkflow};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use crossterm::style::Stylize;
 use serde_json::Value;
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -34,6 +35,19 @@ struct Cli {
 enum Commands {
     #[command(name = "__rsync", hide = true)]
     RemoteProtocol,
+    #[command(name = "__rsync-server", hide = true)]
+    RemoteServer {
+        #[arg(long)]
+        stage_hex: String,
+        #[arg(long)]
+        device: u64,
+        #[arg(long)]
+        inode: u64,
+        #[arg(long)]
+        name: OsString,
+        #[arg(last = true)]
+        server_args: Vec<OsString>,
+    },
     /// Choose which skills are available in your library.
     Library {
         #[command(subcommand)]
@@ -354,6 +368,16 @@ pub fn run() -> ExitCode {
     let paths = AppPaths::new(home);
     match cli.command {
         Some(Commands::RemoteProtocol) => match crate::remote::serve(paths) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => diagnostic(error.code, &error.to_string()),
+        },
+        Some(Commands::RemoteServer {
+            stage_hex,
+            device,
+            inode,
+            name,
+            server_args,
+        }) => match crate::remote::serve_transfer(&stage_hex, device, inode, &name, &server_args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => diagnostic(error.code, &error.to_string()),
         },

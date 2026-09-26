@@ -80,6 +80,8 @@ pub(super) enum Response {
     Begun {
         id: String,
         stage: String,
+        device: u64,
+        inode: u64,
         recovered: usize,
     },
     Exported {
@@ -419,6 +421,8 @@ impl Session {
         Ok(Response::Begun {
             id,
             stage: stage.to_string_lossy().into_owned(),
+            device: self.stage_identity.unwrap().0,
+            inode: self.stage_identity.unwrap().1,
             recovered,
         })
     }

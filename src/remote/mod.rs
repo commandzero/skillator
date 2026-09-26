@@ -12,6 +12,7 @@ mod transport;
 pub(crate) use coordinator::{Options, run};
 pub(crate) use planner::{ConflictPolicy, MissingPolicy};
 pub(crate) use transport::serve;
+pub(crate) use transport::serve_transfer;
 
 use std::fmt;
 

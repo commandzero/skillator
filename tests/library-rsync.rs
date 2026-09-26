@@ -247,3 +247,81 @@ fn machine_previews_are_equivalent_and_global_preflight_is_write_free() {
     assert!(fs::read_dir(remote.path()).unwrap().next().is_none());
     assert!(!local.path().join(".skillator/rsync").exists());
 }
+
+#[test]
+fn rsync_server_pins_stages_across_shell_transport_with_spaced_homes() {
+    use std::os::unix::fs::PermissionsExt;
+    let local = tempfile::Builder::new()
+        .prefix("skillator local ")
+        .tempdir()
+        .unwrap();
+    let remote = tempfile::Builder::new()
+        .prefix("skillator remote ")
+        .tempdir()
+        .unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let binary = assert_cmd::cargo::cargo_bin("skillator");
+    let script = bin.path().join("ssh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nwhile [ \"$1\" != remote ]; do shift; done\nshift\nexport HOME='{}'\nexec sh -c \"$*\"\n",
+            remote.path().display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}:{}",
+        bin.path().display(),
+        binary.parent().unwrap().display(),
+        std::env::var("PATH").unwrap()
+    );
+    fs::create_dir_all(local.path().join(".skillator/library/demo")).unwrap();
+    fs::write(
+        local.path().join(".skillator/config.yaml"),
+        "version: 1\nhosts: {a: {destination: remote}}\n",
+    )
+    .unwrap();
+    fs::write(
+        local.path().join(".skillator/library.yaml"),
+        "version: 1\nlocations: [{path: '~/.skillator/library'}]\n",
+    )
+    .unwrap();
+    let local_skill = local.path().join(".skillator/library/demo/SKILL.md");
+    let remote_skill = remote.path().join(".skillator/library/demo/SKILL.md");
+    fs::write(
+        &local_skill,
+        "---\nname: demo\ndescription: Original\n---\n",
+    )
+    .unwrap();
+    let sync = || {
+        Command::cargo_bin("skillator")
+            .unwrap()
+            .env("HOME", local.path())
+            .env("PATH", &path)
+            .args(["library", "rsync", "--hosts", "a", "--format", "json"])
+            .assert()
+            .success();
+    };
+    sync();
+    assert_eq!(
+        fs::read_to_string(&remote_skill).unwrap(),
+        fs::read_to_string(&local_skill).unwrap()
+    );
+    fs::write(
+        &remote_skill,
+        "---\nname: demo\ndescription: Remote edit\n---\n",
+    )
+    .unwrap();
+    sync();
+    assert_eq!(
+        fs::read_to_string(&local_skill).unwrap(),
+        fs::read_to_string(&remote_skill).unwrap()
+    );
+    assert!(
+        fs::read_to_string(&local_skill)
+            .unwrap()
+            .contains("Remote edit")
+    );
+}

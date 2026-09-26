@@ -141,6 +141,7 @@ struct Participant {
     token: String,
     id: Option<String>,
     stage: Option<String>,
+    stage_identity: Option<(u64, u64)>,
 }
 
 impl Participant {
@@ -170,6 +171,7 @@ impl Participant {
             snapshot: *snapshot,
             token,
             stage: None,
+            stage_identity: None,
         })
     }
     fn inspect(&mut self, sources: &[Source]) -> Result<()> {
@@ -424,6 +426,8 @@ fn synchronize_inner(
                 Ok(Response::Begun {
                     id,
                     stage,
+                    device,
+                    inode,
                     recovered,
                 }) => {
                     if !valid_stage(&peer.snapshot.home, &stage) {
@@ -437,6 +441,7 @@ fn synchronize_inner(
                     }
                     peer.id = Some(id);
                     peer.stage = Some(stage);
+                    peer.stage_identity = Some((device, inode));
                     if recovered != 0 {
                         report.changed(&peer.alias, "", "recover_publication", false);
                     }
@@ -1194,7 +1199,12 @@ fn sync_files(
                         failed.extend(roots);
                         continue;
                     }
-                    match peers[*index].endpoint.pull(&export, &local) {
+                    match peers[*index].endpoint.pull(
+                        &export,
+                        &local,
+                        peers[*index].stage_identity.unwrap(),
+                        peers[0].stage_identity.unwrap(),
+                    ) {
                         Ok(()) => {
                             if let Err(error) = peers[0].request_ok(Request::ValidateStage) {
                                 report.problem("local", path, "transfer_failed", error.to_string());
@@ -1283,7 +1293,12 @@ fn sync_files(
                     peers[*index].stage.as_ref().unwrap(),
                     state::new_id()?
                 );
-                if let Err(error) = peers[*index].endpoint.push(payload, &stage) {
+                if let Err(error) = peers[*index].endpoint.push(
+                    payload,
+                    &stage,
+                    peers[0].stage_identity.unwrap(),
+                    peers[*index].stage_identity.unwrap(),
+                ) {
                     report.problem(
                         &peers[*index].alias,
                         path,
