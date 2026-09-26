@@ -94,102 +94,127 @@ impl History {
         expected: &Fingerprint,
         after_exchange: impl FnOnce(),
     ) -> Result<()> {
-        let path = contained(home, ".skillator/rsync/state.json")?;
-        let parent =
-            Directory::open_parent(home, path.parent().unwrap()).map_err(Error::input_display)?;
-        let name = path.file_name().unwrap();
-        let current = read_optional_at(&parent, name)?;
-        if &current
+        let bytes = serde_json::to_vec(self).map_err(Error::input_display)?;
+        save_contained_bytes_with(
+            home,
+            ".skillator/rsync/state.json",
+            &bytes,
+            expected,
+            after_exchange,
+        )
+    }
+}
+
+pub(super) fn save_contained_bytes(
+    home: &Path,
+    value: &str,
+    bytes: &[u8],
+    expected: &Fingerprint,
+) -> Result<()> {
+    save_contained_bytes_with(home, value, bytes, expected, || {})
+}
+
+fn save_contained_bytes_with(
+    home: &Path,
+    value: &str,
+    bytes: &[u8],
+    expected: &Fingerprint,
+    after_exchange: impl FnOnce(),
+) -> Result<()> {
+    let path = contained(home, value)?;
+    let parent =
+        Directory::open_parent(home, path.parent().unwrap()).map_err(Error::input_display)?;
+    let name = path.file_name().unwrap();
+    let current = read_optional_at(&parent, name)?;
+    if &current
+        .as_deref()
+        .map(Fingerprint::for_bytes)
+        .unwrap_or(Fingerprint::Absent)
+        != expected
+    {
+        return Err(Error::input(
+            "synchronization history changed before saving",
+        ));
+    }
+    if current.as_deref() == Some(bytes) {
+        return Ok(());
+    }
+    let stage_name = format!(".skillator-rsync-{}", new_id()?);
+    let stage_name = std::ffi::OsStr::new(&stage_name);
+    let mut stage = parent
+        .create_file(stage_name)
+        .map_err(Error::input_display)?;
+    if let Err(error) = stage.write_all(bytes).and_then(|()| stage.sync_all()) {
+        let _ = parent.remove(stage_name);
+        return Err(Error::input_display(error));
+    }
+    let mut stage_contains_prior = false;
+    let result = (|| -> Result<()> {
+        let latest = read_optional_at(&parent, name)?;
+        if &latest
             .as_deref()
             .map(Fingerprint::for_bytes)
             .unwrap_or(Fingerprint::Absent)
             != expected
         {
             return Err(Error::input(
-                "synchronization history changed before saving",
+                "synchronization history changed during saving",
             ));
         }
-        let bytes = serde_json::to_vec(self).map_err(Error::input_display)?;
-        if current.as_deref() == Some(bytes.as_slice()) {
+        if *expected == Fingerprint::Absent {
+            parent
+                .rename_noreplace(stage_name, name)
+                .map_err(Error::input_display)?;
+            parent.as_file().sync_all().map_err(Error::input_display)?;
+            if read_optional_at(&parent, name)?.as_deref() != Some(bytes) {
+                return Err(Error::input(
+                    "synchronization history changed after publication",
+                ));
+            }
             return Ok(());
         }
-        let stage_name = format!(".skillator-rsync-state-{}", new_id()?);
-        let stage_name = std::ffi::OsStr::new(&stage_name);
-        let mut stage = parent
-            .create_file(stage_name)
+        parent
+            .rename_exchange(stage_name, name)
             .map_err(Error::input_display)?;
-        if let Err(error) = stage.write_all(&bytes).and_then(|()| stage.sync_all()) {
-            let _ = parent.remove(stage_name);
-            return Err(Error::input_display(error));
-        }
-        let mut stage_contains_prior = false;
-        let result = (|| -> Result<()> {
-            let latest = read_optional_at(&parent, name)?;
-            if &latest
-                .as_deref()
-                .map(Fingerprint::for_bytes)
-                .unwrap_or(Fingerprint::Absent)
-                != expected
-            {
+        stage_contains_prior = true;
+        after_exchange();
+        parent.as_file().sync_all().map_err(Error::input_display)?;
+        let moved = read_optional_at(&parent, stage_name)?;
+        if &moved
+            .as_deref()
+            .map(Fingerprint::for_bytes)
+            .unwrap_or(Fingerprint::Absent)
+            != expected
+        {
+            if parent.rename_exchange(stage_name, name).is_ok() {
+                stage_contains_prior = false;
+                let _ = parent.as_file().sync_all();
                 return Err(Error::input(
                     "synchronization history changed during saving",
                 ));
             }
-            if *expected == Fingerprint::Absent {
-                parent
-                    .rename_noreplace(stage_name, name)
-                    .map_err(Error::input_display)?;
-                parent.as_file().sync_all().map_err(Error::input_display)?;
-                if read_optional_at(&parent, name)?.as_deref() != Some(bytes.as_slice()) {
-                    return Err(Error::input(
-                        "synchronization history changed after publication",
-                    ));
-                }
-                return Ok(());
-            }
-            parent
-                .rename_exchange(stage_name, name)
-                .map_err(Error::input_display)?;
-            stage_contains_prior = true;
-            after_exchange();
-            parent.as_file().sync_all().map_err(Error::input_display)?;
-            let moved = read_optional_at(&parent, stage_name)?;
-            if &moved
-                .as_deref()
-                .map(Fingerprint::for_bytes)
-                .unwrap_or(Fingerprint::Absent)
-                != expected
-            {
-                if parent.rename_exchange(stage_name, name).is_ok() {
-                    stage_contains_prior = false;
-                    let _ = parent.as_file().sync_all();
-                    return Err(Error::input(
-                        "synchronization history changed during saving",
-                    ));
-                }
-                return Err(Error::input(format!(
-                    "synchronization history changed and rollback failed; recover it from {}",
-                    path.parent().unwrap().join(stage_name).display()
-                )));
-            }
-            let live = read_optional_at(&parent, name)?;
-            if live.as_deref() != Some(bytes.as_slice()) {
-                return Err(Error::input(format!(
-                    "synchronization history changed after publication; preserve the prior version at {} for recovery",
-                    path.parent().unwrap().join(stage_name).display()
-                )));
-            }
-            parent.remove(stage_name).map_err(Error::input_display)?;
-            stage_contains_prior = false;
-            parent.as_file().sync_all().map_err(Error::input_display)?;
-            Ok(())
-        })();
-        if result.is_err() && !stage_contains_prior {
-            let _ = parent.remove(stage_name);
+            return Err(Error::input(format!(
+                "synchronization history changed and rollback failed; recover it from {}",
+                path.parent().unwrap().join(stage_name).display()
+            )));
         }
-        result?;
+        let live = read_optional_at(&parent, name)?;
+        if live.as_deref() != Some(bytes) {
+            return Err(Error::input(format!(
+                "synchronization history changed after publication; preserve the prior version at {} for recovery",
+                path.parent().unwrap().join(stage_name).display()
+            )));
+        }
+        parent.remove(stage_name).map_err(Error::input_display)?;
+        stage_contains_prior = false;
+        parent.as_file().sync_all().map_err(Error::input_display)?;
         Ok(())
+    })();
+    if result.is_err() && !stage_contains_prior {
+        let _ = parent.remove(stage_name);
     }
+    result?;
+    Ok(())
 }
 
 fn read_optional_at(parent: &Directory, name: &std::ffi::OsStr) -> Result<Option<Vec<u8>>> {
@@ -199,13 +224,21 @@ fn read_optional_at(parent: &Directory, name: &std::ffi::OsStr) -> Result<Option
         Err(error) => return Err(Error::input_display(error)),
     };
     if !file.metadata().map_err(Error::input_display)?.is_file() {
-        return Err(Error::input(
-            "synchronization history must be a regular file",
-        ));
+        return Err(Error::input("configuration must be a regular file"));
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(Error::input_display)?;
     Ok(Some(bytes))
+}
+
+pub(super) fn read_contained(home: &Path, value: &str) -> Result<Option<Vec<u8>>> {
+    let path = contained(home, value)?;
+    let parent = match Directory::open_existing_parent(home, path.parent().unwrap()) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Error::input_display(error)),
+    };
+    read_optional_at(&parent, path.file_name().unwrap())
 }
 
 pub(super) fn valid_id(value: &str) -> bool {
@@ -532,6 +565,32 @@ mod tests {
     }
 
     #[test]
+    fn contained_library_save_rejects_a_final_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".skillator")).unwrap();
+        fs::write(outside.path().join("library.yaml"), "outside").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("library.yaml"),
+            home.path().join(".skillator/library.yaml"),
+        )
+        .unwrap();
+        assert!(
+            save_contained_bytes(
+                home.path(),
+                ".skillator/library.yaml",
+                b"version: 1\nlocations: []\n",
+                &Fingerprint::Absent
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(outside.path().join("library.yaml")).unwrap(),
+            "outside"
+        );
+    }
+
+    #[test]
     fn history_save_preserves_prior_state_when_live_entry_changes_after_exchange() {
         let home = tempfile::tempdir().unwrap();
         let history = History {
@@ -557,7 +616,7 @@ mod tests {
                 path.file_name()
                     .unwrap()
                     .to_string_lossy()
-                    .starts_with(".skillator-rsync-state-")
+                    .starts_with(".skillator-rsync-")
             })
             .collect();
         assert_eq!(stages.len(), 1);

@@ -783,9 +783,10 @@ fn synchronize_inner(
 
 fn file_base(peers: &[Participant], index: usize, path: &str) -> Option<Option<Entry>> {
     if index == 0 {
-        let bases: BTreeSet<_> = (1..peers.len())
-            .filter_map(|i| file_base(peers, i, path))
+        let bases: Option<BTreeSet<_>> = (1..peers.len())
+            .map(|i| file_base(peers, i, path))
             .collect();
+        let bases = bases?;
         (bases.len() == 1).then(|| bases.into_iter().next().unwrap())
     } else {
         let local_id = peers[0].snapshot.history.id.as_ref()?;
@@ -1480,9 +1481,9 @@ fn user_base(peers: &[Participant], index: usize, key: &str) -> Option<Option<St
         return None;
     }
     if index == 0 {
-        let bases: BTreeSet<_> = (1..peers.len())
-            .filter_map(|i| user_base(peers, i, key))
-            .collect();
+        let bases: Option<BTreeSet<_>> =
+            (1..peers.len()).map(|i| user_base(peers, i, key)).collect();
+        let bases = bases?;
         (bases.len() == 1).then(|| bases.into_iter().next().unwrap())
     } else {
         let local_id = peers[0].snapshot.history.id.as_ref()?;
@@ -2283,6 +2284,49 @@ mod tests {
                 .contains("acknowledged selection baselines disagree")
         }));
         assert!(report.changes.is_empty(), "{}", report.text());
+    }
+
+    #[test]
+    fn new_peer_with_different_content_conflicts_with_known_cohort() {
+        let homes: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        for home in &homes {
+            configure(home.path(), ".skillator/library");
+        }
+        skill(homes[0].path(), ".skillator/library/demo", "known content");
+        let established = sync(&homes[..2], options(false));
+        assert_eq!(established.exit_status, 0, "{}", established.text());
+        skill(
+            homes[2].path(),
+            ".skillator/library/demo",
+            "new peer content",
+        );
+        let peers = participants(&homes);
+        let path = ".skillator/library/demo/SKILL.md";
+        assert!(file_base(&peers, 1, path).is_some());
+        assert!(file_base(&peers, 2, path).is_none());
+        assert_eq!(file_base(&peers, 0, path), None);
+        let report = sync(&homes, options(false));
+        assert_eq!(report.exit_status, 1, "{}", report.text());
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "conflict" && d.message.contains(path)),
+            "{}",
+            report.text()
+        );
+        for home in &homes[..2] {
+            assert!(
+                fs::read_to_string(home.path().join(path))
+                    .unwrap()
+                    .contains("known content")
+            );
+        }
+        assert!(
+            fs::read_to_string(homes[2].path().join(path))
+                .unwrap()
+                .contains("new peer content")
+        );
     }
 
     #[test]

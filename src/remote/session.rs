@@ -4,7 +4,9 @@ use super::{
     state::{self, Baseline, Entry, History},
 };
 use crate::app::{AppPaths, CommandReport, UserScopeWorkflow};
-use crate::config::{Fingerprint, LibraryLocationConfig, save_library};
+#[cfg(test)]
+use crate::config::save_library;
+use crate::config::{Fingerprint, LibraryConfigCodec, LibraryLocationConfig};
 #[cfg(test)]
 use crate::fs_safety::rename_exchange;
 use crate::fs_safety::{Directory, bind_directory};
@@ -225,8 +227,7 @@ impl Session {
                 expected,
                 check,
             } => {
-                let path = state::contained(self.paths.home(), ".agents/skillator.yaml")?;
-                let bytes = state::read_optional(&path)?;
+                let bytes = state::read_contained(self.paths.home(), ".agents/skillator.yaml")?;
                 if bytes.as_ref().map(|bytes| state::digest(bytes)) != expected {
                     return Err(Error::input("user configuration changed after observation"));
                 }
@@ -680,8 +681,13 @@ impl Session {
 
     fn register(&self, locations: &[Location], expected: Option<String>) -> Result<()> {
         if let Some((desired, fingerprint)) = self.prepare_registration(locations, expected)? {
-            save_library(&self.paths.library_config(), &desired, &fingerprint)
-                .map_err(Error::input_display)?;
+            let bytes = LibraryConfigCodec::render(&desired).map_err(Error::input_display)?;
+            state::save_contained_bytes(
+                self.paths.home(),
+                ".skillator/library.yaml",
+                bytes.as_bytes(),
+                &fingerprint,
+            )?;
         }
         Ok(())
     }
@@ -691,7 +697,7 @@ impl Session {
         locations: &[Location],
         expected: Option<String>,
     ) -> Result<Option<(crate::config::LibraryConfig, Fingerprint)>> {
-        let bytes = state::read_optional(&self.paths.library_config())?;
+        let bytes = state::read_contained(self.paths.home(), ".skillator/library.yaml")?;
         if bytes.as_ref().map(|bytes| state::digest(bytes)) != expected {
             return Err(Error::input(
                 "library configuration changed after observation",

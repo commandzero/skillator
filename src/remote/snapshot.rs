@@ -3,7 +3,9 @@ use super::{
     state::{self, Entry, History},
 };
 use crate::app::AppPaths;
-use crate::config::{LibraryConfig, LoadResult, RepositoryConfig};
+use crate::config::{
+    LibraryConfig, LibraryConfigCodec, LoadResult, RepositoryConfig, RepositoryConfigCodec,
+};
 use crate::library::{SkillValidity, SourceKind, scan_library};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,8 +79,10 @@ pub(super) fn file_context(snapshot: &Snapshot, path: &str) -> Option<String> {
 
 pub(super) fn library(paths: &AppPaths) -> Result<LibraryConfig> {
     parse_load(
-        crate::config::load_library(&state::contained(paths.home(), ".skillator/library.yaml")?)
-            .map_err(Error::input_display)?,
+        state::read_contained(paths.home(), ".skillator/library.yaml")?
+            .as_deref()
+            .map(LibraryConfigCodec::parse)
+            .unwrap_or(LoadResult::Missing),
         LibraryConfig::empty(),
     )
 }
@@ -98,8 +102,10 @@ fn parse_load<T: Clone>(loaded: LoadResult<T>, empty: T) -> Result<T> {
 
 pub(super) fn user(paths: &AppPaths) -> Result<RepositoryConfig> {
     parse_load(
-        crate::config::load_repository(&state::contained(paths.home(), ".agents/skillator.yaml")?)
-            .map_err(Error::input_display)?,
+        state::read_contained(paths.home(), ".agents/skillator.yaml")?
+            .as_deref()
+            .map(RepositoryConfigCodec::parse)
+            .unwrap_or(LoadResult::Missing),
         RepositoryConfig::empty(),
     )
 }
@@ -499,7 +505,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
         }
     }
     sources.sort_by(|a, b| (&a.root, &a.key).cmp(&(&b.root, &b.key)));
-    let user_bytes = state::read_optional(&paths.user_config())?;
+    let user_bytes = state::read_contained(paths.home(), ".agents/skillator.yaml")?;
     let mut physical_paths = BTreeMap::new();
     for source in &sources {
         for (path, entry) in &source.files {
@@ -568,7 +574,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
         user_directories,
         user: user_entries(&user_config)?,
         user_present: user_bytes.is_some(),
-        library_hash: state::read_optional(&paths.library_config())?
+        library_hash: state::read_contained(paths.home(), ".skillator/library.yaml")?
             .map(|bytes| state::digest(&bytes)),
         user_hash: user_bytes.map(|bytes| state::digest(&bytes)),
         problems,
@@ -765,6 +771,38 @@ pub(super) fn outside_user_directories(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symlinked_library_and_user_configuration_are_rejected_before_snapshot() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        fs::create_dir_all(home.path().join(".skillator")).unwrap();
+        fs::create_dir_all(home.path().join(".agents")).unwrap();
+        fs::write(
+            outside.path().join("library.yaml"),
+            "version: 1\nlocations: []\n",
+        )
+        .unwrap();
+        fs::write(
+            outside.path().join("skillator.yaml"),
+            "version: 1\nskill_directories: []\nenablements: []\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path().join("library.yaml"), paths.library_config())
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path().join("skillator.yaml"), paths.user_config())
+            .unwrap();
+        assert!(library(&paths).is_err());
+        assert!(user(&paths).is_err());
+        assert!(inspect(&paths, &[]).is_err());
+        fs::remove_file(paths.library_config()).unwrap();
+        assert!(inspect(&paths, &[]).is_err());
+        assert_eq!(
+            fs::read_to_string(outside.path().join("library.yaml")).unwrap(),
+            "version: 1\nlocations: []\n"
+        );
+    }
 
     #[test]
     fn interrupted_publication_entries_are_not_discovered_as_skills() {
