@@ -6,7 +6,6 @@ use crate::app::AppPaths;
 use crate::fs_safety::{Directory, bind_directory};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -448,9 +447,12 @@ fn copy_local_entry(
                 .map_err(Error::input_display)?;
             std::io::copy(&mut input, &mut output).map_err(Error::input_display)?;
             output
-                .set_permissions(std::fs::Permissions::from_mode(u32::from(
-                    metadata.st_mode & 0o777,
-                )))
+                .set_permissions(
+                    input
+                        .metadata()
+                        .map_err(Error::input_display)?
+                        .permissions(),
+                )
                 .map_err(Error::input_display)?;
             output.sync_all().map_err(Error::input_display)?;
         }

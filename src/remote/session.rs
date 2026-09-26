@@ -935,6 +935,17 @@ impl Session {
         desired: Option<&Entry>,
         staged: Option<&str>,
     ) -> Result<()> {
+        self.publish_with(path, expected, desired, staged, || {})
+    }
+
+    fn publish_with(
+        &self,
+        path: &str,
+        expected: Option<&Entry>,
+        desired: Option<&Entry>,
+        staged: Option<&str>,
+        before_rename: impl FnOnce(),
+    ) -> Result<()> {
         let destination = state::contained(self.paths.home(), path)?;
         if let Some(Entry::Link { target }) = desired {
             self.validate_link(path, target)?;
@@ -1014,6 +1025,10 @@ impl Session {
             )
             .and_then(|()| journal.sync_all())
             .map_err(Error::input_display)?;
+        before_rename();
+        // Each rename is atomic: creation refuses an occupied destination, while
+        // replacement and removal move the current destination into the sibling.
+        // The verification below checks that preserved entry before cleanup.
         let result = match (expected, desired) {
             (None, Some(_)) => directory.rename_noreplace(sibling_name, destination_name),
             (Some(_), Some(_)) => directory.rename_exchange(sibling_name, destination_name),
@@ -1039,6 +1054,9 @@ impl Session {
         })()
         .unwrap_or(false);
         if !verified {
+            // Rollback moves entries rather than deleting either value. If a
+            // concurrent writer occupied the destination, no-replace leaves
+            // the backup and journal for manual recovery.
             let rollback = match (expected, desired) {
                 (Some(_), Some(_)) => directory.rename_exchange(sibling_name, destination_name),
                 (Some(_), None) => directory.rename_noreplace(sibling_name, destination_name),
@@ -1046,7 +1064,7 @@ impl Session {
                 _ => Ok(()),
             };
             return Err(Error::input(format!(
-                "publication verification failed; rollback {}; inspect recovery journals under ~/.skillator/rsync",
+                "publication verification failed; intervening content preserved; rollback {}; inspect recovery journals under ~/.skillator/rsync",
                 if rollback.is_ok() {
                     "completed"
                 } else {
@@ -1490,6 +1508,50 @@ mod tests {
             assert!(preserved.exists());
             assert!(session.handle(Request::Finish).is_err());
             assert!(preserved.exists());
+        }
+    }
+
+    #[test]
+    fn publication_preserves_an_intervening_destination_at_the_rename_boundary() {
+        for operation in ["create", "replace", "remove"] {
+            let (home, session, stage) = setup();
+            let logical = if operation == "create" {
+                ".skillator/library/demo/new"
+            } else {
+                ".skillator/library/demo/data"
+            };
+            let destination = home.path().join(logical);
+            let expected = state::observe(&destination).unwrap();
+            let staged = stage.join(state::new_id().unwrap());
+            if operation != "remove" {
+                fs::write(&staged, "desired").unwrap();
+            }
+            let desired = if operation == "remove" {
+                None
+            } else {
+                state::observe(&staged).unwrap()
+            };
+            let error = session
+                .publish_with(
+                    logical,
+                    expected.as_ref(),
+                    desired.as_ref(),
+                    (operation != "remove").then_some(staged.to_str().unwrap()),
+                    || fs::write(&destination, "intervening").unwrap(),
+                )
+                .unwrap_err();
+            assert!(
+                error.message.contains("publication"),
+                "{operation}: {error}"
+            );
+            assert_eq!(fs::read_to_string(&destination).unwrap(), "intervening");
+            assert!(stage.read_dir().unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("recovery-")
+            }));
         }
     }
 

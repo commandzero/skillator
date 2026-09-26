@@ -712,6 +712,11 @@ fn load_remote_library_snapshot(
             paths.environment(),
         )
         .map_err(|message| WorkflowError::InvalidInput { message })?;
+        crate::remote::validate_location_path(paths.home(), &expanded).map_err(|error| {
+            WorkflowError::InvalidInput {
+                message: error.to_string(),
+            }
+        })?;
         if let Ok(physical) = expanded.canonicalize()
             && (physical == home || !physical.starts_with(&home))
         {
@@ -3025,6 +3030,23 @@ fn load_target_repository(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_library_scan_rejects_escaped_missing_location() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join("escape")).unwrap();
+        let config = LibraryConfig::new(vec![crate::config::LibraryLocationConfig::new(
+            "~/escape/new".into(),
+            Vec::new(),
+            false,
+        )])
+        .unwrap();
+        let error =
+            load_remote_library_snapshot(&AppPaths::new(home.path().into()), &config).unwrap_err();
+        assert!(error.to_string().contains("escapes"), "{error}");
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
 
     #[test]
     fn library_writers_share_the_rsync_user_home_lock() {
