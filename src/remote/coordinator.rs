@@ -1536,11 +1536,15 @@ fn sync_user(
         if !removed {
             continue;
         }
-        let members: Vec<_> = keys
-            .iter()
-            .filter(|key| user_directory(key).as_deref() == Some(directory))
-            .cloned()
-            .collect();
+        let mut members = vec![directory_key.clone()];
+        members.extend(
+            keys.iter()
+                .filter(|key| {
+                    key.starts_with("enablement/")
+                        && user_directory(key).as_deref() == Some(directory)
+                })
+                .cloned(),
+        );
         coupled.extend(members.iter().cloned());
         if members
             .iter()
@@ -2501,6 +2505,39 @@ mod tests {
         assert_eq!(copied.exit_status, 0, "{}", copied.text());
         let remote = super::super::snapshot::user(&AppPaths::new(homes[1].path().into())).unwrap();
         assert_eq!(remote.enablements().len(), 1);
+    }
+
+    #[test]
+    fn removed_skill_directory_and_enablement_are_recorded_together() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        select_demo_for_user(homes[0].path());
+        assert_eq!(sync(&homes, options(false)).exit_status, 0);
+        fs::write(
+            homes[0].path().join(".agents/skillator.yaml"),
+            "version: 1\nskill_directories: []\nenablements: []\n",
+        )
+        .unwrap();
+        let report = sync(&homes, options(false));
+        assert_eq!(report.exit_status, 0, "{}", report.text());
+        for home in &homes {
+            let paths = AppPaths::new(home.path().into());
+            let entries = super::super::snapshot::user_entries(
+                &super::super::snapshot::user(&paths).unwrap(),
+            )
+            .unwrap();
+            assert!(!entries.contains_key("directory/agents"));
+            assert!(entries.keys().all(|key| !key.starts_with("enablement/")));
+            let history = state::History::load(home.path()).unwrap();
+            assert!(
+                history
+                    .peers
+                    .values()
+                    .all(|peer| { peer.user.get("directory/agents") == Some(&None) })
+            );
+        }
+        assert!(sync(&homes, options(false)).changes.is_empty());
     }
 
     #[test]

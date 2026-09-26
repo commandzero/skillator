@@ -5,13 +5,13 @@ use super::{
 };
 use crate::app::{AppPaths, CommandReport, UserScopeWorkflow};
 use crate::config::{Fingerprint, LibraryLocationConfig, save_library};
-use crate::fs_safety::{rename_exchange, rename_noreplace};
+use crate::fs_safety::{bind_directory, rename_exchange, rename_noreplace};
 use crate::reconcile::TargetLocks;
 use crate::target::Target;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -564,45 +564,54 @@ impl Session {
         let parent = destination.parent().unwrap();
         fs::create_dir_all(parent).map_err(Error::input_display)?;
         let stage = parent.join(format!(".skillator-clone-{}", state::new_id()?));
+        fs::create_dir(&stage).map_err(Error::input_display)?;
+        let stage_dir = File::options()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&stage)
+            .map_err(Error::input_display)?;
         let result = (|| {
-            process::capture(
-                Command::new("git")
-                    .env("GIT_TERMINAL_PROMPT", "0")
-                    .args([
-                        "-c",
-                        "core.hooksPath=/dev/null",
-                        "clone",
-                        "--no-checkout",
-                        "--",
-                        &git.origin,
-                    ])
-                    .arg(&stage),
-            ).map_err(|error| Error::input(format!(
+            validate_clone_stage(self.paths.home(), &stage, &stage_dir)?;
+            git_in_directory(&stage_dir, &["clone", "--no-checkout", "--", &git.origin, "."])
+                .map_err(|error| Error::input(format!(
                 "cannot clone Git source {}; verify the configured origin, repository access, credentials, and network connectivity: {error}", source.root
             )))?;
-            if process::git(
-                &stage,
+            validate_clone_stage(self.paths.home(), &stage, &stage_dir)?;
+            if git_in_directory(
+                &stage_dir,
                 &["cat-file", "-e", &format!("{}^{{commit}}", git.commit)],
             )
             .is_err()
             {
-                process::git(&stage, &["fetch", "--", "origin", &git.commit])
+                git_in_directory(&stage_dir, &["fetch", "--", "origin", &git.commit])
                     .map_err(|error| Error::input(format!(
                         "cannot fetch exact commit {} for Git source {}; ensure the commit is published and accessible from this host: {error}", git.commit, source.root
                     )))?;
             }
-            process::git(&stage, &["checkout", "--detach", &git.commit, "--"])?;
-            if snapshot::git_ref(&stage)? != *git {
+            validate_clone_stage(self.paths.home(), &stage, &stage_dir)?;
+            git_in_directory(&stage_dir, &["checkout", "--detach", &git.commit, "--"])?;
+            let origin = String::from_utf8(git_in_directory(
+                &stage_dir,
+                &["remote", "get-url", "origin"],
+            )?)
+            .map_err(Error::input_display)?;
+            let commit = String::from_utf8(git_in_directory(
+                &stage_dir,
+                &["rev-parse", "--verify", "HEAD^{commit}"],
+            )?)
+            .map_err(Error::input_display)?;
+            if origin.trim() != git.origin || commit.trim() != git.commit {
                 return Err(Error::input(
                     "clone did not produce the exact requested Git reference",
                 ));
             }
+            validate_clone_stage(self.paths.home(), &stage, &stage_dir)?;
             if state::contained(self.paths.home(), &source.root)? != destination {
                 return Err(Error::input("clone parent changed"));
             }
             rename_noreplace(&stage, &destination).map_err(Error::input_display)
         })();
-        if result.is_err() {
+        if result.is_err() && validate_clone_stage(self.paths.home(), &stage, &stage_dir).is_ok() {
             let _ = fs::remove_dir_all(&stage);
         }
         result
@@ -1143,6 +1152,32 @@ fn reserved_temporary(name: &str) -> bool {
         .any(|prefix| name.strip_prefix(prefix).is_some_and(state::valid_id))
 }
 
+fn validate_clone_stage(home: &Path, stage: &Path, directory: &File) -> Result<()> {
+    let current = fs::symlink_metadata(stage)
+        .map_err(|_| Error::input("clone staging directory changed; preserve it for recovery"))?;
+    let opened = directory.metadata().map_err(Error::input_display)?;
+    if !current.file_type().is_dir()
+        || (current.dev(), current.ino()) != (opened.dev(), opened.ino())
+    {
+        return Err(Error::input(
+            "clone staging directory changed; preserve it for recovery",
+        ));
+    }
+    state::home_relative(home, stage)?;
+    Ok(())
+}
+
+fn git_in_directory(directory: &File, args: &[&str]) -> Result<Vec<u8>> {
+    let mut command = Command::new("git");
+    command
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["-c", "core.hooksPath=/dev/null"])
+        .args(args);
+    bind_directory(&mut command, directory);
+    process::capture(&mut command)
+}
+
 pub(super) fn valid_origin(origin: &str) -> bool {
     !origin.is_empty()
         && !origin.starts_with('-')
@@ -1335,6 +1370,34 @@ mod tests {
             assert!(session.handle(Request::Finish).is_err());
             assert!(preserved.exists());
         }
+    }
+
+    #[test]
+    fn clone_process_keeps_its_opened_directory_after_parent_redirect() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let parent = home.path().join("checkout-parent");
+        let stage = parent.join(".skillator-clone-0123456789abcdef0123456789abcdef");
+        fs::create_dir_all(&stage).unwrap();
+        let directory = File::options()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&stage)
+            .unwrap();
+        validate_clone_stage(home.path(), &stage, &directory).unwrap();
+        let preserved = home.path().join("preserved-parent");
+        fs::rename(&parent, &preserved).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf safe > marker"]);
+        bind_directory(&mut command, &directory);
+        assert!(command.status().unwrap().success());
+        assert_eq!(
+            fs::read_to_string(preserved.join(stage.file_name().unwrap()).join("marker")).unwrap(),
+            "safe"
+        );
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+        assert!(validate_clone_stage(home.path(), &stage, &directory).is_err());
     }
 
     #[test]
