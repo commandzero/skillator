@@ -1,0 +1,60 @@
+change: library-rsync
+reviewer: Codex
+reviewed_at: 2026-09-26T04:46:13Z
+notes: |
+  # Semantic review: library-rsync
+  
+  Reviewed the committed archive and main specifications at bd4bf8b. Each of the 22 affected requirement blocks, including all 38 scenarios, appears in the corresponding main specification with its statement and scenario text intact. No previously existing scenario was dropped from a modified requirement, and unrelated requirements and each existing capability Purpose remain unchanged. The new library-rsync main spec retains the delta Purpose. There are no removals or renames.
+  
+  CLI contract: the Git-clone exception is limited to first-time library synchronization at the initiating commit, preserving ordinary Git ownership. Machine reports retain the shared envelope and stable host aliases. The added policy and exit-status rules match the CLI and validation evidence.
+  
+  Library management: ordinary missing inventory remains unresolved rather than authorizing deletion. Acquisition modes still govern explicit local acquisition; remote synchronization preserves registered home-relative locations and existing local configuration.
+  
+  Library rsync: the new capability covers host preflight, path and skill boundaries, exact Git revision, multi-host and conflict planning, missing-file policy, verified history, recovery, and read-only preview. Its scenarios align with the implementation and the acceptance and regression evidence in validation.md and verification.md.
+  
+  User scope: first-run local configuration remains distinct from explicit remote selection reconciliation. Independent selections merge semantically; receiving links are rebuilt locally and unmanaged entries remain protected.
+  
+  Reviewed scenarios by requirement:
+  
+  ## cli-contract
+  
+  - Skillator composes with Git repository operations: Acquire a remote Skill source; Create a linked worktree.
+  - Machine output is deterministic and ANSI-free: YAML string-like scalar.
+  - JSON and YAML encode one compact report: Equivalent machine formats; Advisory discovery.
+  - Library rsync exposes explicit policies: Default command.
+  - Remote synchronization reports partial and blocked work: Source mismatch after host preflight.
+  
+  ## library-management
+  
+  - Missing inventory leaves declarations unresolved: Source missing on another machine; Skill moved.
+  - The local Library accepts explicit acquisition modes: External Skill moved into the local Library; External Skill copied or linked.
+  - Remote library registration preserves local configuration: Register external incoming location.
+  
+  ## library-rsync
+  
+  - Hosts are configured explicitly: Explicit host subset.
+  - Every selected host passes preflight before writes: Skillator is missing remotely; Incompatible remote version; Receiving host has no library configuration.
+  - Library paths preserve their home-relative location: Different user homes; Destination parent escapes home.
+  - All skill content participates: Hidden skill with supporting files.
+  - New Git sources use the initiating host's exact commit: Upstream has advanced; Existing remote checkout differs; Private or unpublished commit cannot be cloned.
+  - Git content and local edits remain separate: Local tracked skill edit on initial sync; Different edits to the same tracked file.
+  - Multi-host planning does not depend on host order: Remote edit reaches another host.
+  - Conflicts require an explicit policy: Multiple remote candidates; Noninteractive ask.
+  - Missing skill content follows an explicit policy: Default restores an unchanged deleted file; Explicit deletion propagation; Delete versus edit.
+  - Synchronization history records only verified results: Interrupted transfer.
+  - Preview and application preserve recoverable state: Preview needs a clone; Destination changes after planning.
+  
+  ## user-scope-onboarding
+  
+  - User Scope Configuration is strict and machine-local: First User Scope configuration.
+  - Remote synchronization reconciles user selections semantically: Remote deselection; First-contact independent selections.
+  - Received selections use local reconciliation: Rebuild a user link; Unmanaged user entry.
+  
+  Finding: the synchronized main specs faithfully express the completed change; no semantic discrepancy found.
+no_spec_deltas: false
+archive_tree: 4d78739807804c19dd8c2a076c587bdbb445f8a1
+specs:
+  openspec/specs/cli-contract/spec.md: 47d6ffcc80e3f8672703d2084c2024708749af81
+  openspec/specs/library-management/spec.md: 800f82a1e329a0a4899d9cd6c4dea9f9b76f14a9
+  openspec/specs/library-rsync/spec.md: 19748d371694920eca9354310ff14ed3227d5680
+  openspec/specs/user-scope-onboarding/spec.md: 4b97a343312690a7533cf4b625d1daeb421f2dee
