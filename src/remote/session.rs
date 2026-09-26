@@ -5,7 +5,7 @@ use super::{
 };
 use crate::app::{AppPaths, CommandReport, UserScopeWorkflow};
 use crate::config::{Fingerprint, LibraryLocationConfig, save_library};
-use crate::fs_safety::{bind_directory, rename_exchange, rename_noreplace};
+use crate::fs_safety::{Directory, bind_directory, rename_exchange, rename_noreplace};
 use crate::reconcile::TargetLocks;
 use crate::target::Target;
 use serde::{Deserialize, Serialize};
@@ -852,7 +852,6 @@ impl Session {
         desired: Option<&Entry>,
         staged: Option<&str>,
     ) -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
         let destination = state::contained(self.paths.home(), path)?;
         if let Some(Entry::Link { target }) = desired {
             self.validate_link(path, target)?;
@@ -879,11 +878,20 @@ impl Session {
             ));
         }
         let parent = destination.parent().unwrap();
-        fs::create_dir_all(parent).map_err(Error::input_display)?;
-        let sibling = parent.join(format!(".skillator-rsync-{}", state::new_id()?));
+        let directory =
+            Directory::open_parent(self.paths.home(), parent).map_err(Error::input_display)?;
+        let destination_name = destination.file_name().unwrap();
+        if state::observe_at(&directory, destination_name)?.as_ref() != expected {
+            return Err(Error::input("destination changed after observation"));
+        }
+        let sibling_name = format!(".skillator-rsync-{}", state::new_id()?);
+        let sibling_name = std::ffi::OsStr::new(&sibling_name);
+        let sibling = parent.join(sibling_name);
         if let Some(desired) = desired {
             if matches!(desired, Entry::Directory) {
-                fs::create_dir(&sibling).map_err(Error::input_display)?;
+                directory
+                    .create_dir(sibling_name)
+                    .map_err(Error::input_display)?;
             } else {
                 let stage = staged.ok_or_else(|| Error::input("missing staged content"))?;
                 let stage_path = Path::new(stage);
@@ -893,23 +901,15 @@ impl Session {
                 if state::observe(stage_path)?.as_ref() != Some(desired) {
                     return Err(Error::input("staged content does not match planned value"));
                 }
-                copy_entry(stage_path, &sibling, desired)?;
-            }
-            if let Entry::File { executable, .. } = desired {
-                fs::set_permissions(
-                    &sibling,
-                    fs::Permissions::from_mode(if *executable { 0o755 } else { 0o644 }),
-                )
-                .map_err(Error::input_display)?;
+                copy_entry_at(stage_path, &directory, sibling_name, desired)?;
             }
         }
-        if state::contained(self.paths.home(), path)? != destination
-            || self
-                .observed_content(path, &destination, expected)?
-                .as_ref()
-                != expected
+        if !matches!(state::contained(self.paths.home(), path), Ok(current) if current == destination)
+            || state::observe_at(&directory, destination_name)?.as_ref() != expected
         {
-            let _ = remove_entry(&sibling);
+            if desired.is_some() {
+                let _ = directory.remove(sibling_name);
+            }
             return Err(Error::input("destination changed during staging"));
         }
         let journal = self
@@ -926,9 +926,9 @@ impl Session {
             .map_err(Error::input_display)?,
         )?;
         let result = match (expected, desired) {
-            (None, Some(_)) => rename_noreplace(&sibling, &destination),
-            (Some(_), Some(_)) => rename_exchange(&sibling, &destination),
-            (Some(_), None) => rename_noreplace(&destination, &sibling),
+            (None, Some(_)) => directory.rename_noreplace(sibling_name, destination_name),
+            (Some(_), Some(_)) => directory.rename_exchange(sibling_name, destination_name),
+            (Some(_), None) => directory.rename_noreplace(destination_name, sibling_name),
             (None, None) => Ok(()),
         };
         if let Err(error) = result {
@@ -936,23 +936,24 @@ impl Session {
                 "publication failed; inspect recovery journals under ~/.skillator/rsync: {error}"
             )));
         }
-        let preserved = if expected.is_some() {
-            state::observe(&sibling)?
-        } else {
-            None
-        };
-        if preserved.as_ref() != expected
-            || (matches!(expected, Some(Entry::Directory))
-                && fs::read_dir(&sibling)
-                    .map_err(Error::input_display)?
-                    .next()
-                    .is_some())
-            || self.observed_content(path, &destination, desired)?.as_ref() != desired
-        {
+        let verified = (|| -> Result<bool> {
+            let preserved = if expected.is_some() {
+                state::observe_at(&directory, sibling_name)?
+            } else {
+                None
+            };
+            Ok(preserved.as_ref() == expected
+                && (!matches!(expected, Some(Entry::Directory))
+                    || directory.is_empty_dir(sibling_name).map_err(Error::input_display)?)
+                && state::observe_at(&directory, destination_name)?.as_ref() == desired
+                && matches!(state::contained(self.paths.home(), path), Ok(current) if current == destination))
+        })()
+        .unwrap_or(false);
+        if !verified {
             let rollback = match (expected, desired) {
-                (Some(_), Some(_)) => rename_exchange(&sibling, &destination),
-                (Some(_), None) => rename_noreplace(&sibling, &destination),
-                (None, Some(_)) => rename_noreplace(&destination, &sibling),
+                (Some(_), Some(_)) => directory.rename_exchange(sibling_name, destination_name),
+                (Some(_), None) => directory.rename_noreplace(sibling_name, destination_name),
+                (None, Some(_)) => directory.rename_noreplace(destination_name, sibling_name),
                 _ => Ok(()),
             };
             return Err(Error::input(format!(
@@ -964,8 +965,10 @@ impl Session {
                 }
             )));
         }
-        if sibling.exists() || fs::symlink_metadata(&sibling).is_ok() {
-            remove_entry(&sibling)?;
+        if state::observe_at(&directory, sibling_name)?.is_some() {
+            directory
+                .remove(sibling_name)
+                .map_err(Error::input_display)?;
         }
         fs::remove_file(journal).map_err(Error::input_display)?;
         Ok(())
@@ -1250,6 +1253,33 @@ fn copy_entry(source: &Path, destination: &Path, entry: &Entry) -> Result<()> {
         Entry::Directory => {
             fs::create_dir(destination).map_err(Error::input_display)?;
         }
+    }
+    Ok(())
+}
+
+fn copy_entry_at(
+    source: &Path,
+    parent: &Directory,
+    name: &std::ffi::OsStr,
+    entry: &Entry,
+) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match entry {
+        Entry::File { executable, .. } => {
+            let mut input = File::open(source).map_err(Error::input_display)?;
+            let mut output = parent.create_file(name).map_err(Error::input_display)?;
+            std::io::copy(&mut input, &mut output).map_err(Error::input_display)?;
+            output
+                .set_permissions(fs::Permissions::from_mode(if *executable {
+                    0o755
+                } else {
+                    0o644
+                }))
+                .map_err(Error::input_display)?;
+            output.sync_all().map_err(Error::input_display)?;
+        }
+        Entry::Link { target } => parent.symlink(name, target).map_err(Error::input_display)?,
+        Entry::Directory => parent.create_dir(name).map_err(Error::input_display)?,
     }
     Ok(())
 }

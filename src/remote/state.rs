@@ -1,5 +1,6 @@
 use super::{Error, Result};
 use crate::config::{Fingerprint, save_bytes};
+use crate::fs_safety::Directory;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -319,6 +320,48 @@ pub(super) fn observe(path: &Path) -> Result<Option<Entry>> {
             "unsupported file type: {}",
             path.display()
         )));
+    };
+    Ok(Some(entry))
+}
+
+/// Observe an entry through a held parent inode, independent of pathname swaps.
+pub(super) fn observe_at(parent: &Directory, name: &std::ffi::OsStr) -> Result<Option<Entry>> {
+    let stat = match parent.metadata(name) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Error::input_display(error)),
+    };
+    let entry = match stat.st_mode & libc::S_IFMT {
+        libc::S_IFREG => {
+            let mut file = parent.open_file(name).map_err(Error::input_display)?;
+            let mut hasher = Sha256::new();
+            let mut buffer = [0; 65536];
+            loop {
+                let count = file.read(&mut buffer).map_err(Error::input_display)?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+            }
+            Entry::File {
+                hash: hasher
+                    .finalize()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                executable: stat.st_mode & 0o111 != 0,
+            }
+        }
+        libc::S_IFDIR => Entry::Directory,
+        libc::S_IFLNK => Entry::Link {
+            target: parent
+                .read_link(name)
+                .map_err(Error::input_display)?
+                .to_str()
+                .ok_or_else(|| Error::input("non-UTF-8 link"))?
+                .to_owned(),
+        },
+        _ => return Err(Error::input("unsupported file type during publication")),
     };
     Ok(Some(entry))
 }
