@@ -487,6 +487,19 @@ fn discover_source(
     sources.push(source);
 }
 
+pub(crate) fn reserved_temporary(name: &str) -> bool {
+    [
+        ".skillator-rsync-",
+        ".skillator-clone-",
+        ".skillator-alias-",
+    ]
+    .iter()
+    .any(|prefix| {
+        name.strip_prefix(prefix)
+            .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    })
+}
+
 fn discover_tree(
     directory: &Path,
     location_root: &Path,
@@ -522,12 +535,7 @@ fn discover_tree(
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let name = entry.file_name();
-        if name == OsStr::new(".git")
-            || name
-                .to_string_lossy()
-                .strip_prefix(".skillator-alias-")
-                .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        {
+        if name == OsStr::new(".git") || reserved_temporary(&name.to_string_lossy()) {
             continue;
         }
         let path = entry.path();

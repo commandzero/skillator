@@ -65,10 +65,7 @@ impl Endpoint {
         let mut stderr = child.stderr.take().unwrap();
         // Drain diagnostics without echoing network destinations or credential-bearing messages.
         std::thread::spawn(move || {
-            let _ = std::io::copy(
-                &mut stderr.by_ref().take(process::LIMIT as u64),
-                &mut std::io::sink(),
-            );
+            let _ = drain_diagnostics(&mut stderr);
         });
         let (input, requests) = mpsc::channel::<Vec<u8>>();
         let (written_tx, written) = mpsc::channel();
@@ -209,6 +206,10 @@ impl Endpoint {
     pub fn push(&self, local: &std::path::Path, staged: &str) -> Result<()> {
         transfer(self, staged, local, true)
     }
+}
+
+fn drain_diagnostics(input: &mut impl Read) -> std::io::Result<u64> {
+    std::io::copy(input, &mut std::io::sink())
 }
 
 fn receive_response(
@@ -355,6 +356,13 @@ pub(crate) fn serve(paths: AppPaths) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stderr_drain_consumes_beyond_the_protocol_output_limit() {
+        let bytes = (process::LIMIT + 8192) as u64;
+        let mut diagnostics = std::io::repeat(b'x').take(bytes);
+        assert_eq!(drain_diagnostics(&mut diagnostics).unwrap(), bytes);
+    }
 
     #[test]
     fn failed_write_does_not_wait_for_the_full_response_timeout() {

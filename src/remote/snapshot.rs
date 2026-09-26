@@ -219,7 +219,7 @@ pub(super) fn inspect(paths: &AppPaths, extra: &[Source]) -> Result<Snapshot> {
         if root
             .file_name()
             .and_then(|s| s.to_str())
-            .is_some_and(super::session::reserved_temporary)
+            .is_some_and(crate::library::reserved_temporary)
         {
             continue;
         }
@@ -600,7 +600,7 @@ fn collect(
         name == ".git"
             || name
                 .to_str()
-                .is_some_and(super::session::reserved_temporary)
+                .is_some_and(crate::library::reserved_temporary)
     }) {
         return Ok(());
     }
@@ -718,6 +718,39 @@ pub(super) fn outside_user_directories(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_publication_entries_are_not_discovered_as_skills() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().into());
+        let library_path = home.path().join(".skillator/library");
+        fs::create_dir_all(&library_path).unwrap();
+        fs::write(
+            paths.library_config(),
+            "version: 1\nlocations: [{path: '~/.skillator/library'}]\n",
+        )
+        .unwrap();
+        for prefix in [
+            ".skillator-alias-",
+            ".skillator-rsync-",
+            ".skillator-clone-",
+        ] {
+            let staged = library_path.join(format!("{prefix}0123456789abcdef0123456789abcdef"));
+            fs::create_dir(&staged).unwrap();
+            fs::write(staged.join("SKILL.md"), "---\nname: staged\n---\n").unwrap();
+        }
+        let observed = scan_library(
+            &library(&paths).unwrap(),
+            &paths.library_config(),
+            home.path(),
+            paths.environment(),
+        );
+        assert!(
+            observed
+                .sources()
+                .all(|source| source.skills().next().is_none())
+        );
+    }
 
     #[test]
     fn directory_collection_stays_inside_the_physical_skill_boundary() {

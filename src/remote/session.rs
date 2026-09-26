@@ -1064,7 +1064,7 @@ fn recover_pending(home: &Path) -> Result<usize> {
     Ok(records.len())
 }
 
-pub(super) fn reserved_temporary(name: &str) -> bool {
+fn reserved_temporary(name: &str) -> bool {
     [".skillator-rsync-", ".skillator-clone-"]
         .iter()
         .any(|prefix| name.strip_prefix(prefix).is_some_and(state::valid_id))
