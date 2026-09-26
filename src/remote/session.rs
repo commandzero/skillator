@@ -165,10 +165,29 @@ impl Session {
                 {
                     return Err(Error::input("source changed after observation"));
                 }
+                let source_parent =
+                    Directory::open_existing_parent(self.paths.home(), source.parent().unwrap())
+                        .map_err(Error::input_display)?;
+                let source_name = source.file_name().unwrap();
+                let anchored = state::observe_at(&source_parent, source_name)?;
+                if anchored != Some(expected.clone())
+                    && !(matches!(expected, Entry::Directory)
+                        && matches!(anchored, Some(Entry::Link { .. }))
+                        && self.observed_content(&path, &source, Some(&expected))?
+                            == Some(expected.clone()))
+                {
+                    return Err(Error::input("source changed after observation"));
+                }
                 let stage_dir = self.open_stage()?;
                 let name = state::new_id()?;
                 let stage = self.stage.as_ref().unwrap().join(&name);
-                copy_entry_at(&source, &stage_dir, std::ffi::OsStr::new(&name), &expected)?;
+                copy_entry_at(
+                    &source_parent,
+                    source_name,
+                    &stage_dir,
+                    std::ffi::OsStr::new(&name),
+                    &expected,
+                )?;
                 if state::observe_at(&stage_dir, std::ffi::OsStr::new(&name))? != Some(expected) {
                     return Err(Error::input("source changed during export"));
                 }
@@ -931,10 +950,12 @@ impl Session {
                 if stage_path.parent() != Some(self.validate_stage_root()?) {
                     return Err(Error::input("invalid staged path"));
                 }
-                if state::observe(stage_path)?.as_ref() != Some(desired) {
+                let stage_dir = self.open_stage()?;
+                let stage_name = stage_path.file_name().unwrap();
+                if state::observe_at(&stage_dir, stage_name)?.as_ref() != Some(desired) {
                     return Err(Error::input("staged content does not match planned value"));
                 }
-                copy_entry_at(stage_path, &directory, sibling_name, desired)?;
+                copy_entry_at(&stage_dir, stage_name, &directory, sibling_name, desired)?;
             }
         }
         if !matches!(state::contained(self.paths.home(), path), Ok(current) if current == destination)
@@ -1292,7 +1313,8 @@ fn hash_optional(path: &Path) -> Result<Option<String>> {
 }
 
 fn copy_entry_at(
-    source: &Path,
+    source_parent: &Directory,
+    source_name: &std::ffi::OsStr,
     parent: &Directory,
     name: &std::ffi::OsStr,
     entry: &Entry,
@@ -1300,7 +1322,9 @@ fn copy_entry_at(
     use std::os::unix::fs::PermissionsExt;
     match entry {
         Entry::File { executable, .. } => {
-            let mut input = File::open(source).map_err(Error::input_display)?;
+            let mut input = source_parent
+                .open_file(source_name)
+                .map_err(Error::input_display)?;
             let mut output = parent.create_file(name).map_err(Error::input_display)?;
             std::io::copy(&mut input, &mut output).map_err(Error::input_display)?;
             output
@@ -1902,6 +1926,36 @@ mod tests {
             session
                 .validate_link(".skillator/library/demo/new", "../../../../outside")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn copied_file_rejects_a_replaced_source_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let source = home.path().join("source");
+        fs::write(&source, "original").unwrap();
+        let expected = state::observe(&source).unwrap().unwrap();
+        fs::write(outside.path().join("secret"), "outside").unwrap();
+        fs::remove_file(&source).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), &source).unwrap();
+        let directory =
+            Directory::open_existing_parent(home.path(), &home.path().canonicalize().unwrap())
+                .unwrap();
+        assert!(
+            copy_entry_at(
+                &directory,
+                std::ffi::OsStr::new("source"),
+                &directory,
+                std::ffi::OsStr::new("copy"),
+                &expected
+            )
+            .is_err()
+        );
+        assert!(!home.path().join("copy").exists());
+        assert_eq!(
+            fs::read_to_string(outside.path().join("secret")).unwrap(),
+            "outside"
         );
     }
 

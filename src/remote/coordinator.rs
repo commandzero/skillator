@@ -783,20 +783,10 @@ fn synchronize_inner(
 
 fn file_base(peers: &[Participant], index: usize, path: &str) -> Option<Option<Entry>> {
     if index == 0 {
-        let current = peers[0]
-            .snapshot
-            .sources
-            .iter()
-            .find_map(|s| s.files.get(path))
-            .cloned();
-        let bases: Vec<_> = (1..peers.len())
+        let bases: BTreeSet<_> = (1..peers.len())
             .filter_map(|i| file_base(peers, i, path))
             .collect();
-        bases
-            .iter()
-            .find(|base| **base != current)
-            .cloned()
-            .or_else(|| bases.first().cloned())
+        (bases.len() == 1).then(|| bases.into_iter().next().unwrap())
     } else {
         let local_id = peers[0].snapshot.history.id.as_ref()?;
         let remote_id = peers[index].snapshot.history.id.as_ref()?;
@@ -813,6 +803,14 @@ fn file_base(peers: &[Participant], index: usize, path: &str) -> Option<Option<E
         let local = local_base.files.get(path)?;
         (remote == local).then(|| remote.clone())
     }
+}
+
+fn file_bases_disagree(peers: &[Participant], path: &str) -> bool {
+    (1..peers.len())
+        .filter_map(|index| file_base(peers, index, path))
+        .collect::<BTreeSet<_>>()
+        .len()
+        > 1
 }
 
 fn sync_files(
@@ -1008,6 +1006,11 @@ fn sync_files(
         if roots.iter().any(|root| blocked.contains(root))
             || group.iter().any(|path| type_conflicts.contains(path))
         {
+            failed.extend(roots);
+            continue;
+        }
+        if let Some(path) = group.iter().find(|path| file_bases_disagree(peers, path)) {
+            report.problem("local", path, "conflict", "acknowledged file baselines disagree across hosts; resolve the history before synchronizing this entry");
             failed.extend(roots);
             continue;
         }
@@ -1477,15 +1480,10 @@ fn user_base(peers: &[Participant], index: usize, key: &str) -> Option<Option<St
         return None;
     }
     if index == 0 {
-        let current = peers[0].snapshot.user.get(key).cloned();
-        let bases: Vec<_> = (1..peers.len())
+        let bases: BTreeSet<_> = (1..peers.len())
             .filter_map(|i| user_base(peers, i, key))
             .collect();
-        bases
-            .iter()
-            .find(|base| **base != current)
-            .cloned()
-            .or_else(|| bases.first().cloned())
+        (bases.len() == 1).then(|| bases.into_iter().next().unwrap())
     } else {
         let local_id = peers[0].snapshot.history.id.as_ref()?;
         let remote_id = peers[index].snapshot.history.id.as_ref()?;
@@ -1507,6 +1505,14 @@ fn user_base(peers: &[Participant], index: usize, key: &str) -> Option<Option<St
     }
 }
 
+fn user_bases_disagree(peers: &[Participant], key: &str) -> bool {
+    (1..peers.len())
+        .filter_map(|index| user_base(peers, index, key))
+        .collect::<BTreeSet<_>>()
+        .len()
+        > 1
+}
+
 fn sync_user(
     peers: &mut [Participant],
     sources: &[Source],
@@ -1526,6 +1532,8 @@ fn sync_user(
     let mut accepted = BTreeMap::new();
     let mut coupled = BTreeSet::new();
     let labels: Vec<_> = peers.iter().map(|p| p.alias.clone()).collect();
+    // Whole-directory decisions are limited to a historical directory removal.
+    // First-contact enablements stay in the per-key loop below and form a union.
     for directory in keys.iter().filter_map(|key| key.strip_prefix("directory/")) {
         let directory_key = format!("directory/{directory}");
         let removed = (0..peers.len()).any(|index| {
@@ -1546,6 +1554,10 @@ fn sync_user(
                 .cloned(),
         );
         coupled.extend(members.iter().cloned());
+        if let Some(key) = members.iter().find(|key| user_bases_disagree(peers, key)) {
+            report.problem("local", ".agents/skillator.yaml", "conflict", format!("acknowledged selection baselines disagree for {key}; resolve the history before synchronizing this directory"));
+            continue;
+        }
         if members
             .iter()
             .any(|key| blocked_enablement(key, sources, blocked))
@@ -1644,6 +1656,10 @@ fn sync_user(
     }
     for key in keys {
         if coupled.contains(&key) {
+            continue;
+        }
+        if user_bases_disagree(peers, &key) {
+            report.problem("local", ".agents/skillator.yaml", "conflict", format!("acknowledged selection baselines disagree for {key}; resolve the history before synchronizing it"));
             continue;
         }
         let observations: Vec<_> = (0..peers.len())
@@ -2207,6 +2223,66 @@ mod tests {
         for home in &homes {
             assert!(!home.path().join(file).exists());
         }
+    }
+
+    #[test]
+    fn divergent_acknowledged_bases_block_file_and_selection_planning() {
+        let homes: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        configure(homes[0].path(), ".skillator/library");
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        select_demo_for_user(homes[0].path());
+        let first = sync(&homes, options(false));
+        assert_eq!(first.exit_status, 0, "{}", first.text());
+        let mut peers = participants(&homes);
+        let local_id = peers[0].snapshot.history.id.clone().unwrap();
+        let remote_id = peers[1].snapshot.history.id.clone().unwrap();
+        let path = ".skillator/library/demo/SKILL.md";
+        let key = peers[0]
+            .snapshot
+            .user
+            .keys()
+            .find(|key| key.starts_with("enablement/"))
+            .unwrap()
+            .clone();
+        for (index, peer_id) in [(0, remote_id.as_str()), (1, local_id.as_str())] {
+            let baseline = peers[index]
+                .snapshot
+                .history
+                .peers
+                .get_mut(peer_id)
+                .unwrap();
+            baseline.files.insert(
+                path.into(),
+                Some(Entry::File {
+                    hash: "0".repeat(64),
+                    executable: false,
+                }),
+            );
+            baseline.user.insert(key.clone(), Some("divergent".into()));
+            fs::write(
+                homes[index].path().join(".skillator/rsync/state.json"),
+                serde_json::to_vec(&peers[index].snapshot.history).unwrap(),
+            )
+            .unwrap();
+        }
+        let observed = participants(&homes);
+        assert!(file_bases_disagree(&observed, path));
+        assert!(user_bases_disagree(&observed, &key));
+        assert_eq!(file_base(&observed, 0, path), None);
+        assert_eq!(user_base(&observed, 0, &key), None);
+        let report = sync(&homes, options(false));
+        assert_eq!(report.exit_status, 1, "{}", report.text());
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("acknowledged file baselines disagree"))
+        );
+        assert!(report.diagnostics.iter().any(|d| {
+            d.message
+                .contains("acknowledged selection baselines disagree")
+        }));
+        assert!(report.changes.is_empty(), "{}", report.text());
     }
 
     #[test]

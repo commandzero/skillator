@@ -1,13 +1,11 @@
 use super::{Error, Result};
-use crate::config::{Fingerprint, save_bytes};
+use crate::config::Fingerprint;
 use crate::fs_safety::Directory;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::Read;
-#[cfg(test)]
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -88,15 +86,104 @@ impl History {
 
     pub fn save(&self, home: &Path, expected: &Fingerprint) -> Result<()> {
         let path = contained(home, ".skillator/rsync/state.json")?;
-        fs::create_dir_all(path.parent().unwrap()).map_err(Error::input_display)?;
-        save_bytes(
-            &path,
-            &serde_json::to_vec(self).map_err(Error::input_display)?,
-            expected,
-        )
-        .map_err(Error::input_display)?;
+        let parent =
+            Directory::open_parent(home, path.parent().unwrap()).map_err(Error::input_display)?;
+        let name = path.file_name().unwrap();
+        let current = read_optional_at(&parent, name)?;
+        if &current
+            .as_deref()
+            .map(Fingerprint::for_bytes)
+            .unwrap_or(Fingerprint::Absent)
+            != expected
+        {
+            return Err(Error::input(
+                "synchronization history changed before saving",
+            ));
+        }
+        let bytes = serde_json::to_vec(self).map_err(Error::input_display)?;
+        if current.as_deref() == Some(bytes.as_slice()) {
+            return Ok(());
+        }
+        let stage_name = format!(".skillator-rsync-state-{}", new_id()?);
+        let stage_name = std::ffi::OsStr::new(&stage_name);
+        let mut stage = parent
+            .create_file(stage_name)
+            .map_err(Error::input_display)?;
+        if let Err(error) = stage.write_all(&bytes).and_then(|()| stage.sync_all()) {
+            let _ = parent.remove(stage_name);
+            return Err(Error::input_display(error));
+        }
+        let mut stage_contains_prior = false;
+        let result = (|| -> Result<()> {
+            let latest = read_optional_at(&parent, name)?;
+            if &latest
+                .as_deref()
+                .map(Fingerprint::for_bytes)
+                .unwrap_or(Fingerprint::Absent)
+                != expected
+            {
+                return Err(Error::input(
+                    "synchronization history changed during saving",
+                ));
+            }
+            if *expected == Fingerprint::Absent {
+                parent
+                    .rename_noreplace(stage_name, name)
+                    .map_err(Error::input_display)?;
+                parent.as_file().sync_all().map_err(Error::input_display)?;
+                return Ok(());
+            }
+            parent
+                .rename_exchange(stage_name, name)
+                .map_err(Error::input_display)?;
+            stage_contains_prior = true;
+            parent.as_file().sync_all().map_err(Error::input_display)?;
+            let moved = read_optional_at(&parent, stage_name)?;
+            if &moved
+                .as_deref()
+                .map(Fingerprint::for_bytes)
+                .unwrap_or(Fingerprint::Absent)
+                != expected
+            {
+                if parent.rename_exchange(stage_name, name).is_ok() {
+                    stage_contains_prior = false;
+                    let _ = parent.as_file().sync_all();
+                    return Err(Error::input(
+                        "synchronization history changed during saving",
+                    ));
+                }
+                return Err(Error::input(format!(
+                    "synchronization history changed and rollback failed; recover it from {}",
+                    path.parent().unwrap().join(stage_name).display()
+                )));
+            }
+            parent.remove(stage_name).map_err(Error::input_display)?;
+            stage_contains_prior = false;
+            parent.as_file().sync_all().map_err(Error::input_display)?;
+            Ok(())
+        })();
+        if result.is_err() && !stage_contains_prior {
+            let _ = parent.remove(stage_name);
+        }
+        result?;
         Ok(())
     }
+}
+
+fn read_optional_at(parent: &Directory, name: &std::ffi::OsStr) -> Result<Option<Vec<u8>>> {
+    let mut file = match parent.open_file(name) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Error::input_display(error)),
+    };
+    if !file.metadata().map_err(Error::input_display)?.is_file() {
+        return Err(Error::input(
+            "synchronization history must be a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(Error::input_display)?;
+    Ok(Some(bytes))
 }
 
 pub(super) fn valid_id(value: &str) -> bool {
@@ -398,6 +485,28 @@ mod tests {
         fs::write(&path, b"{\"version\":99,\"id\":null,\"peers\":{}}").unwrap();
         assert!(History::load(home.path()).is_err());
         assert!(fs::read_to_string(&path).unwrap().contains("99"));
+    }
+
+    #[test]
+    fn history_save_rejects_a_state_link_outside_home() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".skillator/rsync")).unwrap();
+        fs::write(outside.path().join("state.json"), "outside").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("state.json"),
+            home.path().join(".skillator/rsync/state.json"),
+        )
+        .unwrap();
+        let history = History {
+            id: Some(new_id().unwrap()),
+            ..History::default()
+        };
+        assert!(history.save(home.path(), &Fingerprint::Absent).is_err());
+        assert_eq!(
+            fs::read_to_string(outside.path().join("state.json")).unwrap(),
+            "outside"
+        );
     }
 
     #[test]
