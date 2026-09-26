@@ -32,7 +32,7 @@ Use a private, versioned Skillator protocol over SSH stdin/stdout, with diagnost
 
 Pass arguments structurally wherever possible. Validate SSH destinations and use a fixed, safely quoted remote entry point; transport paths and protocol payloads must not become shell code. Bound message size and subprocess timeouts. Accept only the defined remote error statuses; malformed peer statuses become a local protocol error. Use the same SSH identity for protocol and rsync operations.
 
-Create each session stage through an opened, non-following parent directory beneath home and record the new directory's device and inode from its open handle. Open an existing session lock through that parent without following the final component before retaining it. Validate that the stage remains the same physical directory within the participant's home before every rsync transfer, export, publication, and cleanup. Clean stage contents through the held parent handle. The private stage-validation request requires protocol 4; an older peer is rejected before writes.
+Create each session stage through an opened, non-following parent directory beneath home and record the new directory's device and inode from its open handle. Open an existing session lock through that parent without following the final component before retaining it. Validate that the stage remains the same physical directory within the participant's home before every rsync transfer, export, publication, and cleanup, including the initiating stage immediately before and after each remote push. Clean stage contents through the held parent handle. The private stage-validation request requires protocol 4; an older peer is rejected before writes.
 
 ### Participant identity and history
 
@@ -48,7 +48,7 @@ Reserve the same user-home write lock used by Library Configuration saves and `l
 
 ### Paths, inventory, and transfer units
 
-Resolve existing expressions on the originating machine, prove home containment, then transfer the home-relative suffix. Read Library and User Scope configuration through non-following directory handles and reject a linked or non-regular final file before it can enter a participant snapshot. Publish incoming Library registration conditionally through the same kind of held parent handle. Preserve matching receiving registrations and append missing registrations after successful preparation. Existing exclusion or overlap disagreements block the affected Location. Registration removal is deferred; it must not imply deleting a source tree.
+Resolve existing expressions on the originating machine, prove home containment, then transfer the home-relative suffix. Read host, Library, User Scope, and synchronization history configuration through non-following directory handles and reject a linked or non-regular final file before it can enter a participant snapshot. Publish incoming Library registration conditionally through the same kind of held parent handle. Preserve matching receiving registrations and append missing registrations after successful preparation. Existing exclusion or overlap disagreements block the affected Location. Registration removal is deferred; it must not imply deleting a source tree.
 
 Scope file comparison by source and skill-relative path. Include complete discovered skill trees plus historical synchronized paths so removing a manifest does not hide deletion. Keep executable bits; do not synchronize ownership, timestamps as identity, or arbitrary repository metadata. Never recurse into `.git` through rsync.
 

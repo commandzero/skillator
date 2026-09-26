@@ -60,8 +60,7 @@ impl Default for History {
 
 impl History {
     pub fn load(home: &Path) -> Result<Self> {
-        let path = contained(home, ".skillator/rsync/state.json")?;
-        match read_optional(&path)? {
+        match read_contained(home, ".skillator/rsync/state.json")? {
             None => Ok(Self::default()),
             Some(bytes) => {
                 let state: Self = serde_json::from_slice(&bytes).map_err(Error::input_display)?;
@@ -260,6 +259,7 @@ pub(super) fn digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -272,8 +272,16 @@ pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn fingerprint(path: &Path) -> Result<Fingerprint> {
     Ok(read_optional(path)?
+        .as_deref()
+        .map(Fingerprint::for_bytes)
+        .unwrap_or(Fingerprint::Absent))
+}
+
+pub(super) fn fingerprint_contained(home: &Path, value: &str) -> Result<Fingerprint> {
+    Ok(read_contained(home, value)?
         .as_deref()
         .map(Fingerprint::for_bytes)
         .unwrap_or(Fingerprint::Absent))
@@ -557,6 +565,8 @@ mod tests {
             id: Some(new_id().unwrap()),
             ..History::default()
         };
+        assert!(History::load(home.path()).is_err());
+        assert!(fingerprint_contained(home.path(), ".skillator/rsync/state.json").is_err());
         assert!(history.save(home.path(), &Fingerprint::Absent).is_err());
         assert_eq!(
             fs::read_to_string(outside.path().join("state.json")).unwrap(),

@@ -1,7 +1,6 @@
-use super::{Error, Result};
+use super::{Error, Result, state};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -20,12 +19,13 @@ pub(super) struct Host {
 impl Config {
     pub fn load(home: &Path) -> Result<Self> {
         let path = home.join(".skillator/config.yaml");
-        let text = fs::read_to_string(&path).map_err(|error| {
+        let bytes = state::read_contained(home, ".skillator/config.yaml")?.ok_or_else(|| {
             Error::input(format!(
-                "cannot read {}: {error}; configure SSH hosts before running library rsync",
+                "cannot read {}: file is missing; configure SSH hosts before running library rsync",
                 path.display()
             ))
         })?;
+        let text = String::from_utf8(bytes).map_err(Error::input_display)?;
         Self::parse(&text)
     }
 
@@ -108,6 +108,24 @@ fn identifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_configuration_link_outside_home_is_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".skillator")).unwrap();
+        std::fs::write(
+            outside.path().join("config.yaml"),
+            "version: 1\nhosts: {remote: {destination: remote}}\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("config.yaml"),
+            home.path().join(".skillator/config.yaml"),
+        )
+        .unwrap();
+        assert!(Config::load(home.path()).is_err());
+    }
 
     #[test]
     fn selection_is_strict_and_deterministic() {

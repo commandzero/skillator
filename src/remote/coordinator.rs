@@ -1273,6 +1273,11 @@ fn sync_files(
             }
             published.insert((*index, physical.clone()), false);
             let stage = if let Some(payload) = &payload {
+                if let Err(error) = peers[0].request_ok(Request::ValidateStage) {
+                    report.problem("local", path, "transfer_failed", error.to_string());
+                    failed.extend(roots.iter().cloned());
+                    continue;
+                }
                 let stage = format!(
                     "{}/{}",
                     peers[*index].stage.as_ref().unwrap(),
@@ -1285,6 +1290,11 @@ fn sync_files(
                         "transfer_failed",
                         error.to_string(),
                     );
+                    failed.extend(roots.iter().cloned());
+                    continue;
+                }
+                if let Err(error) = peers[0].request_ok(Request::ValidateStage) {
+                    report.problem("local", path, "transfer_failed", error.to_string());
                     failed.extend(roots.iter().cloned());
                     continue;
                 }

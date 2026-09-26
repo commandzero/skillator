@@ -319,10 +319,8 @@ impl Session {
                 self.history.provenance.extend(provenance);
                 self.history
                     .save(self.paths.home(), &self.history_expected)?;
-                self.history_expected = state::fingerprint(&state::contained(
-                    self.paths.home(),
-                    ".skillator/rsync/state.json",
-                )?)?;
+                self.history_expected =
+                    state::fingerprint_contained(self.paths.home(), ".skillator/rsync/state.json")?;
                 Ok(Response::Ok)
             }
             Request::Finish => {
@@ -395,20 +393,16 @@ impl Session {
         }
         let recovered = recover_pending(self.paths.home())?;
         self.history = observed.history;
-        self.history_expected = state::fingerprint(&state::contained(
-            self.paths.home(),
-            ".skillator/rsync/state.json",
-        )?)?;
+        self.history_expected =
+            state::fingerprint_contained(self.paths.home(), ".skillator/rsync/state.json")?;
         let new_identity = self.history.id.is_none();
         let id = self.history.id.clone().unwrap_or(state::new_id()?);
         self.history.id = Some(id.clone());
         if new_identity {
             self.history
                 .save(self.paths.home(), &self.history_expected)?;
-            self.history_expected = state::fingerprint(&state::contained(
-                self.paths.home(),
-                ".skillator/rsync/state.json",
-            )?)?;
+            self.history_expected =
+                state::fingerprint_contained(self.paths.home(), ".skillator/rsync/state.json")?;
         }
         let stage_name = format!("stage-{}", state::new_id()?);
         let stage = root.parent().unwrap().join(&stage_name);
