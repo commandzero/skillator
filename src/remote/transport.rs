@@ -474,6 +474,7 @@ pub(crate) fn serve_transfer(
                 || arg.contains("recursive")
                 || arg.contains("copy-links")
                 || arg.contains("copy-dirlinks")
+                || arg.contains("copy-unsafe-links")
                 || (arg.starts_with('-') && !arg.starts_with("--") && options.contains('L'))
         })
     {
@@ -723,6 +724,7 @@ mod tests {
             "-ltpcLe.LsfxCIvu",
             "--copy-links",
             "--copy-dirlinks",
+            "--copy-unsafe-links",
             "--files-from=/etc/passwd",
         ] {
             let arguments = [

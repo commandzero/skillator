@@ -55,6 +55,8 @@ Rsync transfers skill content only. It does not copy Git administrative files, p
 
 Payloads are batched per peer in groups of at most 64 entries. Remote-to-remote content passes through the initiating machine. Each batch uses an isolated staging view, and every entry retains its own content verification, race checks, publication, recovery, and acknowledgement. A failed batch does not publish its destination files or prevent independent peers from completing.
 
+The rsync server rejects link-dereferencing modes, including `--copy-unsafe-links`, so staged relative links cannot expose exports outside their batch view.
+
 ## Git revisions stay fixed
 
 For a missing Git source, Skillator clones its recorded origin and checks out the initiating machine's exact commit. The new checkout uses detached HEAD. Skillator retains the initiating branch name, when present, with the source origin and commit in synchronization history. This provenance does not require branch-name alignment or move either checkout. An upstream branch advancing does not change that commit.
