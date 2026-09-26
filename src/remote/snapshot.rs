@@ -543,6 +543,11 @@ pub(super) fn git_ref(root: &Path) -> Result<GitRef> {
     .map_err(Error::input_display)?
     .trim()
     .to_owned();
+    if !super::session::valid_origin(&origin) {
+        return Err(Error::input(
+            "Git origin contains credentials or an unsupported URL; configure a credential-free origin and use host authentication",
+        ));
+    }
     let commit = String::from_utf8(process::git(
         root,
         &["rev-parse", "--verify", "HEAD^{commit}"],
@@ -686,6 +691,37 @@ pub(super) fn outside_user_directories(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_bearing_origin_never_enters_a_git_reference() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("repo");
+        repository(&root);
+        process::git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://user:secret@example.invalid/repo.git",
+            ],
+        )
+        .unwrap();
+        let error = git_ref(&root).unwrap_err();
+        assert!(error.message.contains("credential-free origin"));
+        assert!(!error.message.contains("secret"));
+        process::git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "ssh://git@example.invalid/repo.git",
+            ],
+        )
+        .unwrap();
+        assert!(git_ref(&root).is_ok());
+    }
 
     #[test]
     fn inaccessible_location_parent_is_not_treated_as_absent() {

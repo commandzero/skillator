@@ -398,12 +398,8 @@ impl Session {
             .iter()
             .filter(|source| {
                 source.skills.iter().any(|skill| {
-                    let root = if skill.is_empty() {
-                        source.root.clone()
-                    } else {
-                        format!("{}/{skill}", source.root)
-                    };
-                    path == root || path.starts_with(&format!("{root}/"))
+                    let root = Path::new(&source.root).join(skill);
+                    Path::new(path).starts_with(&root)
                 }) || source.files.contains_key(path)
                     || source.committed.contains_key(path)
                     || (path.starts_with(&format!("{}/", source.root))
@@ -419,10 +415,20 @@ impl Session {
                 self.paths.home(),
                 &state::contained(self.paths.home(), &source.root)?,
             )?;
-            for skill in &source.skills {
-                let boundary = Path::new(&source.root).join(skill);
-                if Path::new(path).starts_with(&boundary) {
-                    state::home_relative(self.paths.home(), &self.paths.home().join(boundary))?;
+            let boundary = self.skill_boundary(snapshot, source, path)?;
+            if let Some(actual) = state::observation_path(self.paths.home(), path)? {
+                let actual = if actual.is_symlink()
+                    && source
+                        .skills
+                        .iter()
+                        .any(|skill| Path::new(&source.root).join(skill) == Path::new(path))
+                {
+                    actual.canonicalize().map_err(Error::input_display)?
+                } else {
+                    actual
+                };
+                if !actual.starts_with(&boundary) {
+                    return Err(Error::input("path escapes its physical skill directory"));
                 }
             }
             if let Some(reference) = &source.git {
@@ -436,6 +442,51 @@ impl Session {
             Ok(())
         } else {
             Err(Error::input("path is outside observed skill boundaries"))
+        }
+    }
+
+    fn skill_boundary(&self, snapshot: &Snapshot, source: &Source, path: &str) -> Result<PathBuf> {
+        let mut roots: Vec<String> = source
+            .skills
+            .iter()
+            .map(|skill| {
+                Path::new(&source.root)
+                    .join(skill)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        for candidate in source.files.keys().chain(source.committed.keys()).chain(
+            self.history
+                .peers
+                .values()
+                .flat_map(|peer| peer.files.keys()),
+        ) {
+            if candidate.ends_with("/SKILL.md")
+                && let Some(root) = candidate.strip_suffix("/SKILL.md")
+                && Path::new(root).starts_with(&source.root)
+            {
+                roots.push(root.to_owned());
+            }
+        }
+        let root = roots
+            .into_iter()
+            .filter(|root| Path::new(path).starts_with(root))
+            .max_by_key(|root| root.len())
+            .ok_or_else(|| Error::input("path has no observed skill boundary"))?;
+        let logical = state::contained(self.paths.home(), &root)?;
+        if logical.is_symlink() {
+            let expected = snapshot
+                .physical_paths
+                .get(&root)
+                .ok_or_else(|| Error::input("skill root changed after observation"))?;
+            let actual = logical.canonicalize().map_err(Error::input_display)?;
+            if actual != Path::new(expected) {
+                return Err(Error::input("skill root changed after observation"));
+            }
+            Ok(actual)
+        } else {
+            Ok(logical)
         }
     }
 
@@ -804,26 +855,30 @@ impl Session {
             }
         }
         let snapshot = &self.last.as_ref().unwrap().0;
-        let boundary = snapshot
+        let source = snapshot
             .sources
             .iter()
-            .flat_map(|s| {
-                s.skills
-                    .iter()
-                    .map(move |skill| Path::new(&s.root).join(skill))
-            })
-            .filter(|root| logical.starts_with(root))
-            .max_by_key(|root| root.components().count())
+            .filter(|source| Path::new(path).starts_with(&source.root))
+            .max_by_key(|source| source.root.len())
             .ok_or_else(|| Error::input("link has no skill boundary"))?;
-        if !resolved.starts_with(boundary) {
-            return Err(Error::input("skill link escapes its skill directory"));
-        }
-        state::contained(
+        let boundary = self.skill_boundary(snapshot, source, path)?;
+        let target_path = state::contained(
             self.paths.home(),
             resolved
                 .to_str()
                 .ok_or_else(|| Error::input("invalid link path"))?,
         )?;
+        if !target_path.starts_with(&boundary)
+            || (fs::symlink_metadata(&target_path).is_ok()
+                && !target_path
+                    .canonicalize()
+                    .map_err(Error::input_display)?
+                    .starts_with(&boundary))
+        {
+            return Err(Error::input(
+                "skill link escapes its physical skill directory",
+            ));
+        }
         Ok(())
     }
 }
@@ -936,10 +991,21 @@ pub(super) fn reserved_temporary(name: &str) -> bool {
         .any(|prefix| name.strip_prefix(prefix).is_some_and(state::valid_id))
 }
 
-fn valid_origin(origin: &str) -> bool {
+pub(super) fn valid_origin(origin: &str) -> bool {
     !origin.is_empty()
         && !origin.starts_with('-')
         && !origin.contains('\0')
+        && !origin.contains(['?', '#'])
+        && !origin
+            .split_once('@')
+            .is_some_and(|(prefix, _)| !origin.contains("://") && prefix.contains(':'))
+        && !origin.split_once("://").is_some_and(|(_, rest)| {
+            rest.split('/').next().is_some_and(|authority| {
+                authority.split_once('@').is_some_and(|(userinfo, _)| {
+                    !origin.starts_with("ssh://") || userinfo.contains(':')
+                })
+            })
+        })
         && !origin.split_once("::").is_some_and(|(transport, _)| {
             !transport.is_empty()
                 && transport
@@ -1032,6 +1098,43 @@ mod tests {
             panic!()
         };
         (home, session, PathBuf::from(stage))
+    }
+
+    #[test]
+    fn symlinked_parents_cannot_cross_a_skill_boundary() {
+        let (home, mut session, _) = setup();
+        let root = home.path().join(".skillator/library/demo");
+        let unrelated = home.path().join("unrelated");
+        fs::create_dir(&unrelated).unwrap();
+        fs::write(unrelated.join("private"), "keep").unwrap();
+        std::os::unix::fs::symlink(&unrelated, root.join("sub")).unwrap();
+        let path = ".skillator/library/demo/sub/private";
+        assert!(
+            session
+                .validate_link(".skillator/library/demo/new", "sub/private")
+                .is_err()
+        );
+        session.last.as_mut().unwrap().0.sources[0].skills.clear();
+        let mut baseline = state::Baseline::default();
+        baseline
+            .files
+            .insert(".skillator/library/demo/SKILL.md".into(), None);
+        baseline.files.insert(path.into(), None);
+        session
+            .history
+            .peers
+            .insert(state::new_id().unwrap(), baseline);
+        assert!(
+            session
+                .authorize_path(path)
+                .unwrap_err()
+                .message
+                .contains("physical skill")
+        );
+        assert_eq!(
+            fs::read_to_string(unrelated.join("private")).unwrap(),
+            "keep"
+        );
     }
 
     #[test]
@@ -1296,6 +1399,10 @@ mod tests {
             "ext::sh -c evil",
             "helper::address",
             "bad\0origin",
+            "https://user:token@example.test/repo",
+            "ssh://user:token@example.test/repo",
+            "https://example.test/repo?access_token=secret",
+            "user:token@example.test:repo",
         ] {
             assert!(!valid_origin(origin), "{origin}");
         }
