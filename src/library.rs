@@ -245,17 +245,34 @@ pub fn scan_library(
                 continue;
             }
         };
-        let canonical = match expanded.canonicalize() {
-            Ok(path) if path.is_dir() => path,
-            _ => {
+        let canonical_result = expanded.canonicalize().and_then(|path| {
+            if fs::metadata(&path)?.is_dir() {
+                Ok(path)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "location is not a directory",
+                ))
+            }
+        });
+        let canonical = match canonical_result {
+            Ok(path) => path,
+            Err(error) => {
                 snapshot.locations.push(LibraryLocation {
                     expression: location_config.path().to_owned(),
                     resolved: Some(expanded.clone()),
                     available: false,
                 });
                 snapshot.diagnostics.push(LibraryDiagnostic {
-                    code: "location_unavailable",
-                    message: format!("library folder is unavailable: {}", expanded.display()),
+                    code: if error.kind() == std::io::ErrorKind::NotFound {
+                        "location_unavailable"
+                    } else {
+                        "discovery_failed"
+                    },
+                    message: format!(
+                        "library folder is unavailable: {}: {error}",
+                        expanded.display()
+                    ),
                     path: Some(expanded),
                 });
                 continue;
@@ -473,6 +490,19 @@ fn discover_source(
     sources.push(source);
 }
 
+pub(crate) fn reserved_temporary(name: &str) -> bool {
+    [
+        ".skillator-rsync-",
+        ".skillator-clone-",
+        ".skillator-alias-",
+    ]
+    .iter()
+    .any(|prefix| {
+        name.strip_prefix(prefix)
+            .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    })
+}
+
 fn discover_tree(
     directory: &Path,
     location_root: &Path,
@@ -492,7 +522,7 @@ fn discover_tree(
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) => {
-            current.diagnostics.push(discovery_error(directory, error));
+            discovery_error(current, directory, error);
             return;
         }
     };
@@ -500,21 +530,22 @@ fn discover_tree(
         .filter_map(|entry| match entry {
             Ok(entry) => Some(entry),
             Err(error) => {
-                current.diagnostics.push(discovery_error(directory, error));
+                discovery_error(current, directory, error);
                 None
             }
         })
         .collect();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        if entry.file_name() == OsStr::new(".git") {
+        let name = entry.file_name();
+        if name == OsStr::new(".git") || reserved_temporary(&name.to_string_lossy()) {
             continue;
         }
         let path = entry.path();
         let file_type = match entry.file_type() {
-            Ok(kind) => kind,
+            Ok(file_type) => file_type,
             Err(error) => {
-                current.diagnostics.push(discovery_error(&path, error));
+                discovery_error(current, &path, error);
                 continue;
             }
         };
@@ -555,6 +586,14 @@ fn discover_tree(
             );
         }
     }
+}
+
+fn discovery_error(source: &mut DiscoveredSource, path: &Path, error: std::io::Error) {
+    source.diagnostics.push(LibraryDiagnostic {
+        code: "discovery_failed",
+        message: format!("cannot discover skills at {}: {error}", path.display()),
+        path: Some(path.to_owned()),
+    });
 }
 
 fn is_git_root(path: &Path) -> bool {
@@ -689,6 +728,7 @@ fn insert_discovered_source(
     source: DiscoveredSource,
 ) {
     let suggested = suggest_source_key(&source);
+    snapshot.diagnostics.extend(source.diagnostics);
     let key_text = suggested.as_str().to_owned();
     let relative_path = path_text(&source.relative);
     if snapshot.sources.contains_key(&key_text) {
@@ -764,12 +804,4 @@ fn key_from_remote(remote: &str) -> Option<String> {
             segments[segments.len() - 1].to_ascii_lowercase()
         )
     })
-}
-
-fn discovery_error(path: &Path, error: std::io::Error) -> LibraryDiagnostic {
-    LibraryDiagnostic {
-        code: "discovery_incomplete",
-        message: format!("cannot inspect {}: {error}", path.display()),
-        path: Some(path.to_owned()),
-    }
 }

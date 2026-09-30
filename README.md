@@ -77,11 +77,17 @@ skillator targets prune --check
 skillator sync --check
 skillator sync
 
+# Synchronize library content with configured SSH hosts; user selections stay local.
+skillator library rsync --check
+skillator library rsync --hosts build,development
+
 # Optional: sync newly created linked worktrees automatically.
 skillator hook install
 skillator hook status
 git worktree add -b feature ../feature
 ```
+
+See [library synchronization](docs/library-rsync.md) to configure SSH hosts and copy exact Git revisions without updating them.
 
 Clone remote skill repositories with Git, then add their local folders to the Library. Use `skillator user` to manage skills for your account.
 

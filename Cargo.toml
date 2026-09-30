@@ -2,8 +2,9 @@
 name = "skillator"
 version = "0.1.0"
 edition = "2024"
+authors = ["Ryan Eno <cargo@commandzero.com>"]
 rust-version = "1.97"
-description = "A terminal UI and CLI for managing agent skills across Git repositories"
+description = "A terminal TUI and CLI utility for managing agent skills across Git repositories and worktrees"
 repository = "https://github.com/commandzero/skillator"
 license = "MIT"
 readme = "README.md"
