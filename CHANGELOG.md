@@ -22,11 +22,13 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 ### Fixed
 
 - Reject concurrent file or ancestor replacements before reading synchronization content, and reject special files without blocking (#32).
-- Preserve concurrent executable-mode changes during file observation (#32).
+- Preserve concurrent executable-mode changes during file observation and export (#32).
 - Require conflict resolution when different present values have mixed known and unknown synchronization history (#32).
 - Report historical-path containment errors instead of silently dropping entries from library synchronization (#32).
 - Preserve concurrent edits and recovery journals when interrupted-publication rollback no longer matches its expected values (#32).
 - Reject unsafe-link dereferencing in rsync server requests, preventing unlisted staged content from being transferred (#32).
+- Report acquisition aliases whose targets change during publication without removing intervening entries (#32).
+- Preserve historical baselines when a source location becomes unavailable instead of acknowledging unverified deletions (#32).
 - Removing a user skill before user configuration exists returns an unchanged result.
 - Reject target-registry paths containing redundant separators, `.` or `..` components.
 

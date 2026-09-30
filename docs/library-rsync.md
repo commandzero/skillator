@@ -112,6 +112,8 @@ Protocol 5 uses history format 2. Earlier unreleased protocol and history versio
 
 Each publication verifies staged content and rechecks the observed source and destination. A stale entry is preserved and reported for retry. Concurrent initiators, Library configuration saves, and `library update` share the user-home write lock.
 
+Exports recheck the live source, including executable mode, after copying. Acquisition aliases recheck their target identity after publication; a changed target is reported for manual resolution without deleting the published or intervening entry.
+
 File reads reject a final symlink and validate the opened descriptor as a regular file before consuming content. Its device and inode must match the initial metadata inspection, preventing a replacement between that inspection and opening from redirecting the read. Nonblocking opens prevent a concurrently substituted FIFO from hanging synchronization.
 
 Snapshot collection opens physical parents without following symlinks and reads through held directory descriptors. Entries must remain within the physical skill boundary, including when an ancestor redirects elsewhere inside the home.
@@ -121,6 +123,8 @@ Symlink targets are read without following them, and link identity is checked ag
 After interruption, rerun the command. It inspects retained publication journals, restores recoverable originals where safe, and refuses to overwrite later edits. Recovery rechecks both sides after a rollback exchange; a mismatch retains the backup and journal rather than deleting a concurrent writer's value. Preserve any reported journal and backup when manual recovery is required. Once the old and current values are reconciled, retry. Successful entries retain their own acknowledgements; a failed host does not cause all other hosts to roll back.
 
 Partial multi-host completion can leave different acknowledged baselines. An all-host retry then reports a history conflict rather than guessing. Retry the failed peer with `--hosts <alias>` against its unchanged baseline, then retry the complete cohort. If history remains inconsistent, preserve the state and reconcile it before proceeding.
+
+Historical paths with no available owning source remain unresolved and retain their previous baselines. Restore the source location before retrying; missing inventory is not evidence of a deletion.
 
 The names `.skillator-rsync-<32 hex digits>`, `.skillator-clone-<32 hex digits>`, and `.skillator-alias-<32 hex digits>` are reserved temporary entries and excluded from discovery during synchronization. Do not use them for skill content.
 

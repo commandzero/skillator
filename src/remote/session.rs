@@ -155,40 +155,7 @@ impl Session {
                 self.require_active()?;
                 self.validate_stage_root()?;
                 self.authorize_path(&path)?;
-                let source = state::contained(self.paths.home(), &path)?;
-                if self.observed_content(&path, &source, Some(&expected))? != Some(expected.clone())
-                {
-                    return Err(Error::input("source changed after observation"));
-                }
-                let source_parent =
-                    Directory::open_existing_parent(self.paths.home(), source.parent().unwrap())
-                        .map_err(Error::input_display)?;
-                let source_name = source.file_name().unwrap();
-                let anchored = state::observe_at(&source_parent, source_name)?;
-                if anchored != Some(expected.clone())
-                    && !(matches!(expected, Entry::Directory)
-                        && matches!(anchored, Some(Entry::Link { .. }))
-                        && self.observed_content(&path, &source, Some(&expected))?
-                            == Some(expected.clone()))
-                {
-                    return Err(Error::input("source changed after observation"));
-                }
-                let stage_dir = self.open_stage()?;
-                let name = state::new_id()?;
-                let stage = self.stage.as_ref().unwrap().path().join(&name);
-                state::copy_entry_at(
-                    &source_parent,
-                    source_name,
-                    &stage_dir,
-                    std::ffi::OsStr::new(&name),
-                    &expected,
-                )?;
-                if state::observe_at(&stage_dir, std::ffi::OsStr::new(&name))? != Some(expected) {
-                    return Err(Error::input("source changed during export"));
-                }
-                Ok(Response::Exported {
-                    path: stage.to_string_lossy().into_owned(),
-                })
+                self.export(&path, &expected)
             }
             Request::Publish {
                 path,
@@ -718,6 +685,76 @@ impl Session {
         Ok(Some((desired, fingerprint)))
     }
 
+    fn export(&self, path: &str, expected: &Entry) -> Result<Response> {
+        self.export_with(path, expected, || {})
+    }
+
+    fn export_with(
+        &self,
+        path: &str,
+        expected: &Entry,
+        after_copy: impl FnOnce(),
+    ) -> Result<Response> {
+        let source = state::contained(self.paths.home(), path)?;
+        let source_parent =
+            Directory::open_existing_parent(self.paths.home(), source.parent().unwrap())
+                .map_err(Error::input_display)?;
+        let source_name = source.file_name().unwrap();
+        if !self.export_source_unchanged(path, &source, &source_parent, source_name, expected)? {
+            return Err(Error::input("source changed after observation"));
+        }
+        let stage_dir = self.open_stage()?;
+        let name = state::new_id()?;
+        let stage = self.stage.as_ref().unwrap().path().join(&name);
+        state::copy_entry_at(
+            &source_parent,
+            source_name,
+            &stage_dir,
+            std::ffi::OsStr::new(&name),
+            expected,
+        )?;
+        after_copy();
+        if state::observe_at(&stage_dir, std::ffi::OsStr::new(&name))? != Some(expected.clone())
+            || !self.export_source_unchanged(
+                path,
+                &source,
+                &source_parent,
+                source_name,
+                expected,
+            )?
+        {
+            return Err(Error::input("source changed during export"));
+        }
+        Ok(Response::Exported {
+            path: stage.to_string_lossy().into_owned(),
+        })
+    }
+
+    fn export_source_unchanged(
+        &self,
+        path: &str,
+        source: &Path,
+        parent: &Directory,
+        name: &std::ffi::OsStr,
+        expected: &Entry,
+    ) -> Result<bool> {
+        if self
+            .observed_content(path, source, Some(expected))?
+            .as_ref()
+            != Some(expected)
+        {
+            return Ok(false);
+        }
+        let anchored = state::observe_at(parent, name)?;
+        Ok(anchored.as_ref() == Some(expected)
+            || (matches!(expected, Entry::Directory)
+                && matches!(anchored, Some(Entry::Link { .. }))
+                && self
+                    .observed_content(path, source, Some(expected))?
+                    .as_ref()
+                    == Some(expected)))
+    }
+
     fn observed_content(
         &self,
         logical: &str,
@@ -749,6 +786,15 @@ impl Session {
     }
 
     fn publish_alias(&self, path: &str, target: &str) -> Result<()> {
+        self.publish_alias_with(path, target, || {})
+    }
+
+    fn publish_alias_with(
+        &self,
+        path: &str,
+        target: &str,
+        before_rename: impl FnOnce(),
+    ) -> Result<()> {
         if !state::transferable(self.paths.home(), path)?
             || Path::new(path)
                 .file_name()
@@ -799,6 +845,7 @@ impl Session {
         if !real_target.join("SKILL.md").is_file() {
             return Err(Error::input("alias target skill is not available"));
         }
+        let target_metadata = fs::metadata(&real_target).map_err(Error::input_display)?;
         match fs::symlink_metadata(&destination) {
             Ok(meta) => {
                 if meta.file_type().is_symlink()
@@ -819,6 +866,8 @@ impl Session {
         let unchanged = || {
             matches!(state::contained(self.paths.home(), path), Ok(current) if current == destination)
                 && matches!(state::contained(self.paths.home(), target).and_then(|path| path.canonicalize().map_err(Error::input_display)), Ok(current) if current == real_target)
+                && matches!(fs::metadata(&real_target), Ok(current) if (current.dev(), current.ino()) == (target_metadata.dev(), target_metadata.ino()))
+                && real_target.join("SKILL.md").is_file()
         };
         if !unchanged() || state::observe_at(&directory, destination_name)?.is_some() {
             return Err(Error::input(
@@ -836,13 +885,23 @@ impl Session {
                 "alias destination or target changed during staging",
             ));
         }
+        before_rename();
         let result = directory
             .rename_noreplace(sibling_name, destination_name)
             .map_err(Error::input_display);
         if result.is_err() {
             let _ = directory.remove(sibling_name);
         }
-        result
+        result?;
+        if !unchanged()
+            || !matches!(directory.metadata(destination_name), Ok(meta) if meta.st_mode & libc::S_IFMT == libc::S_IFLNK)
+            || !matches!(directory.read_link(destination_name), Ok(link) if link.as_os_str() == physical_target.as_os_str())
+        {
+            return Err(Error::input(
+                "alias destination or target changed during publication; preserve it for manual resolution",
+            ));
+        }
+        Ok(())
     }
 
     fn publish(
@@ -1351,6 +1410,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn alias_publication_reports_a_target_replaced_at_the_rename_boundary() {
+        let home = tempfile::tempdir().unwrap();
+        let local = home.path().join(".skillator/library");
+        fs::create_dir_all(&local).unwrap();
+        let target = home.path().join("Development/skills/demo");
+        super::super::test_support::write_skill(home.path(), "Development/skills/demo", "original");
+        fs::write(
+            home.path().join(".skillator/library.yaml"),
+            "version: 1\nlocations:\n - path: '~/.skillator/library'\n - path: '~/Development/skills'\n",
+        )
+        .unwrap();
+        let mut session = Session::new(AppPaths::new(home.path().into()));
+        session
+            .handle(Request::Inspect {
+                sources: Vec::new(),
+            })
+            .unwrap();
+        let preserved = home.path().join("preserved-demo");
+        let error = session
+            .publish_alias_with(".skillator/library/demo", "Development/skills/demo", || {
+                fs::rename(&target, &preserved).unwrap();
+                fs::create_dir(&target).unwrap();
+                fs::write(target.join("SKILL.md"), "replacement").unwrap();
+            })
+            .unwrap_err();
+        assert!(error.message.contains("during publication"), "{error}");
+        let alias = local.join("demo");
+        assert_eq!(
+            fs::read_link(&alias).unwrap(),
+            target.canonicalize().unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(alias.join("SKILL.md")).unwrap(),
+            "replacement"
+        );
+        assert!(
+            fs::read_to_string(preserved.join("SKILL.md"))
+                .unwrap()
+                .contains("original")
+        );
+    }
+
     fn setup() -> (tempfile::TempDir, Session, PathBuf) {
         let home = tempfile::tempdir().unwrap();
         let skill = home.path().join(".skillator/library/demo");
@@ -1371,6 +1473,33 @@ mod tests {
             panic!()
         };
         (home, session, PathBuf::from(stage))
+    }
+
+    #[test]
+    fn export_rejects_a_chmod_during_copy_without_changing_the_source() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (home, session, _) = setup();
+        let logical = ".skillator/library/demo/data";
+        let source = home.path().join(logical);
+        let expected = state::observe(&source).unwrap().unwrap();
+        let error = session
+            .export_with(logical, &expected, || {
+                fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+            })
+            .unwrap_err();
+        assert!(
+            error.message.contains("source changed during export"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), "original");
+        assert!(matches!(
+            state::observe(&source).unwrap(),
+            Some(Entry::File {
+                executable: true,
+                ..
+            })
+        ));
     }
 
     #[test]

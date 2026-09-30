@@ -801,15 +801,17 @@ fn sync_files(
     acknowledgements: &mut [Baseline],
 ) -> Result<BTreeSet<String>> {
     let mut paths = BTreeSet::new();
+    let mut historical = BTreeSet::new();
     for peer in peers.iter() {
         for source in &peer.snapshot.sources {
             paths.extend(source.files.keys().cloned());
             paths.extend(source.committed.keys().cloned());
         }
         for base in peer.snapshot.history.peers.values() {
-            paths.extend(base.files.keys().cloned());
+            historical.extend(base.files.keys().cloned());
         }
     }
+    paths.extend(historical.iter().cloned());
     paths.retain(|path| {
         !acquisition_aliases
             .keys()
@@ -821,6 +823,24 @@ fn sync_files(
             .filter(|s| path == s.root || path.starts_with(&format!("{}/", s.root)))
             .max_by_key(|s| s.root.len())
     };
+    // History alone cannot establish that an absent entry was deleted: its
+    // source may have disappeared along with the location being inventoried.
+    // Leave those entries out of acknowledgements so their old bases survive.
+    for path in &historical {
+        let available = owner(path).is_some_and(|source| {
+            peers
+                .iter()
+                .any(|peer| peer.snapshot.available_locations.contains(&source.location))
+        });
+        if !available && paths.remove(path) {
+            report.problem(
+                "local",
+                path,
+                "source_unavailable",
+                "historical entry has no available source; restore its location before synchronizing",
+            );
+        }
+    }
     let mut exclusions = BTreeMap::new();
     for source in sources {
         let mut builder =
@@ -2716,6 +2736,129 @@ mod tests {
             assert!(!homes[1].path().join(".skillator/library").exists());
             assert!(!homes[1].path().join(".skillator/library.yaml").exists());
         }
+    }
+
+    #[test]
+    fn unavailable_historical_source_preserves_bases_while_other_sources_sync() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        let missing = ".skillator/library";
+        let historical_file = ".skillator/library/demo/SKILL.md";
+        let independent_file = "other/extra/healthy/SKILL.md";
+        fs::create_dir_all(homes[0].path().join(".skillator")).unwrap();
+        fs::write(
+            homes[0].path().join(".skillator/library.yaml"),
+            "version: 1\nlocations:\n  - path: '~/.skillator/library'\n  - path: '~/other/extra'\n",
+        )
+        .unwrap();
+        for location in [missing, "other/extra"] {
+            fs::create_dir_all(homes[1].path().join(location)).unwrap();
+        }
+        skill(homes[0].path(), ".skillator/library/demo", "original");
+        skill(homes[0].path(), "other/extra/healthy", "original");
+        let first = sync(&homes, options(false));
+        assert_eq!(first.exit_status, 0, "{}", first.text());
+        let bases: Vec<_> = homes
+            .iter()
+            .map(|home| {
+                state::History::load(home.path())
+                    .unwrap()
+                    .peers
+                    .into_values()
+                    .next()
+                    .unwrap()
+            })
+            .collect();
+        for base in &bases {
+            assert!(matches!(
+                base.files.get(historical_file),
+                Some(Some(Entry::File { .. }))
+            ));
+        }
+
+        // The coordinator may already have observed a source before it vanishes;
+        // refreshing its inventory must not turn the old base into a deletion.
+        let mut observed_before_loss = Some(participants(&homes));
+        let saved = tempfile::tempdir().unwrap();
+        for (index, home) in homes.iter().enumerate() {
+            fs::rename(
+                home.path().join(missing),
+                saved.path().join(index.to_string()),
+            )
+            .unwrap();
+        }
+        skill(homes[0].path(), "other/extra/healthy", "updated");
+        for check in [true, false] {
+            let report = if check {
+                sync(&homes, options(true))
+            } else {
+                synchronize(
+                    &AppPaths::new(homes[0].path().into()),
+                    observed_before_loss.take().unwrap(),
+                    options(false),
+                )
+                .unwrap()
+            };
+            assert_eq!(report.exit_status, 1, "{}", report.text());
+            assert!(
+                report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "source_unavailable"
+                        && diagnostic.data.as_ref().unwrap().get("path")
+                            == Some(&historical_file.to_owned())
+                }),
+                "{}",
+                report.text()
+            );
+            assert!(
+                !report
+                    .changes
+                    .iter()
+                    .any(|change| change.path.starts_with(missing)),
+                "{}",
+                report.text()
+            );
+            for (home, base) in homes.iter().zip(&bases) {
+                let current = state::History::load(home.path()).unwrap();
+                let current = current.peers.into_values().next().unwrap();
+                for (path, entry) in base
+                    .files
+                    .iter()
+                    .filter(|(path, _)| path.starts_with(missing))
+                {
+                    assert_eq!(current.files.get(path), Some(entry), "{path}");
+                    assert_eq!(
+                        current.contexts.get(path),
+                        base.contexts.get(path),
+                        "{path}"
+                    );
+                }
+            }
+            if check {
+                assert!(
+                    report
+                        .changes
+                        .iter()
+                        .any(|change| change.path == independent_file),
+                    "{}",
+                    report.text()
+                );
+            }
+        }
+        assert!(
+            fs::read_to_string(homes[1].path().join(independent_file))
+                .unwrap()
+                .contains("updated")
+        );
+        fs::rename(saved.path().join("0"), homes[0].path().join(missing)).unwrap();
+        fs::create_dir_all(homes[1].path().join(missing)).unwrap();
+        let restored = sync(&homes, options(false));
+        assert_eq!(restored.exit_status, 0, "{}", restored.text());
+        assert_eq!(
+            fs::read(homes[0].path().join(historical_file)).unwrap(),
+            fs::read(homes[1].path().join(historical_file)).unwrap()
+        );
+        let retry = sync(&homes, options(false));
+        assert_eq!(retry.exit_status, 0, "{}", retry.text());
+        assert!(retry.changes.is_empty(), "{}", retry.text());
     }
 
     #[test]
