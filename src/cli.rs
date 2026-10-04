@@ -409,17 +409,9 @@ fn run_library_command(paths: &AppPaths, command: LibraryCommand) -> ExitCode {
     match command {
         LibraryCommand::Rsync(arguments) => {
             if arguments.prepare_export {
-                return match crate::remote::prepare_export(paths) {
-                    Ok(path) => {
-                        let mut stdout = std::io::stdout().lock();
-                        match writeln!(stdout, "{}", path.display()) {
-                            Ok(()) => ExitCode::SUCCESS,
-                            Err(error) => {
-                                let _ = std::fs::remove_dir_all(&path);
-                                diagnostic(5, &error.to_string())
-                            }
-                        }
-                    }
+                let mut stdout = std::io::stdout().lock();
+                return match crate::remote::prepare_export(paths, &mut stdout) {
+                    Ok(()) => ExitCode::SUCCESS,
                     Err(error) => diagnostic(error.code, &error.to_string()),
                 };
             }

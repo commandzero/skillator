@@ -1148,3 +1148,77 @@ fn missing_leader_cleanup_utilities_block_export_and_preserve_existing_replica()
         }
     }
 }
+
+#[test]
+fn failed_helper_stdout_removes_readonly_export_without_changing_source() {
+    let fixture = Fixture::new();
+    let skill = fixture.source().parent().unwrap().to_path_buf();
+    let nested = skill.join("nested");
+    fs::create_dir(&nested).unwrap();
+    fs::write(nested.join("notes.txt"), "source content").unwrap();
+    for path in [&skill, &nested] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    let before = fs::metadata(fixture.source()).unwrap();
+    let original = fs::read(fixture.source()).unwrap();
+    let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+    drop(reader);
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("skillator"))
+        .env("HOME", &fixture.leader)
+        .env("PATH", &fixture.path)
+        .env("TMPDIR", &fixture.temporary)
+        .args(["library", "rsync", "--prepare-export"])
+        .stdout(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+            writer,
+        )))
+        .output()
+        .unwrap();
+    for path in [&skill, &nested] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert_eq!(output.status.code(), Some(5));
+    fixture.assert_exports_cleaned();
+    let after = fs::metadata(fixture.source()).unwrap();
+    assert_eq!(after.permissions().mode(), before.permissions().mode());
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    assert_eq!(fs::read(fixture.source()).unwrap(), original);
+    assert_eq!(
+        fs::read_to_string(nested.join("notes.txt")).unwrap(),
+        "source content"
+    );
+}
+
+#[test]
+fn missing_receiver_utilities_block_writes_to_fresh_and_existing_replicas() {
+    for utility in ["cmp", "mkdir"] {
+        let fixture = Fixture::new();
+        let remote_utility = fixture.root.path().join("receiver-bin").join(utility);
+        fs::remove_file(&remote_utility).unwrap();
+        for args in [&["--hosts", "dev", "--check"][..], &["--hosts", "dev"][..]] {
+            fixture.report(&fixture.leader, args, 1);
+            assert!(!fixture.follower.join(".skillator").exists(), "{utility}");
+            fixture.assert_exports_cleaned();
+        }
+        symlink(executable(utility), &remote_utility).unwrap();
+        fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
+        fs::write(
+            fixture.received(&fixture.follower),
+            "preserved follower edit",
+        )
+        .unwrap();
+        fs::remove_file(remote_utility).unwrap();
+        for args in [&["--hosts", "dev", "--check"][..], &["--hosts", "dev"][..]] {
+            fixture.report(&fixture.leader, args, 1);
+            assert_eq!(
+                fs::read_to_string(fixture.received(&fixture.follower)).unwrap(),
+                "preserved follower edit",
+                "{utility}"
+            );
+            fixture.assert_exports_cleaned();
+        }
+    }
+}

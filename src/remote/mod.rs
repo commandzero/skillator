@@ -9,7 +9,7 @@ use crate::app::{AppPaths, ReportDiagnostic, ReportOutcome};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::io::Write;
 use transport::Direction;
 
 pub(super) const MARKER_NAME: &str = ".skillator-rsync-owned";
@@ -185,18 +185,39 @@ impl Report {
 }
 
 /// Prepare current leader skills for one follower-initiated pull.
-/// The invoking follower owns cleanup of the returned private temporary directory.
-pub(crate) fn prepare_export(paths: &AppPaths) -> Result<PathBuf> {
+/// The invoking follower owns cleanup after successful path publication.
+pub(crate) fn prepare_export(paths: &AppPaths, output: &mut impl Write) -> Result<()> {
     let config = config::Config::load(paths.home())?;
     if config.leader().is_some() {
         return Err(Error::input(
             "only a configured leader can prepare a skill export",
         ));
     }
-    let export = export::prepare(paths)?;
-    let path = export.path().canonicalize().map_err(Error::input_display)?;
-    let _ = export.keep();
-    Ok(path)
+    let export = export::prepare(paths)?.keep();
+    let result = (|| {
+        let path = export.canonicalize().map_err(Error::input_display)?;
+        writeln!(output, "{}", path.display())
+            .and_then(|()| output.flush())
+            .map_err(|error| Error {
+                code: 5,
+                message: error.to_string(),
+            })
+    })();
+    match result {
+        Ok(()) => Ok(()),
+        Err(mut error) => {
+            if let Err(cleanup_error) = export::cleanup(&export) {
+                use std::fmt::Write as _;
+                write!(
+                    error.message,
+                    "; could not remove temporary export {}: {cleanup_error}",
+                    export.display()
+                )
+                .expect("formatting into a String cannot fail");
+            }
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn run(paths: &AppPaths, options: Options) -> Result<Report> {

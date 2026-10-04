@@ -36,7 +36,7 @@ skillator library rsync
 skillator library rsync --hosts build,development
 ```
 
-A pushed-to follower needs SSH, a POSIX shell, rsync, and POSIX `find` on its noninteractive PATH. It does not need Skillator or Git and does not need a Library configuration.
+A pushed-to follower needs SSH, a POSIX shell, rsync, and POSIX `find`, `cmp`, and `mkdir` on its noninteractive PATH. These dependencies are checked before any replica writes. It does not need Skillator or Git and does not need a Library configuration.
 
 Before replica creation, both local and remote rsync executables must pass a write-free probe of the required transfer options, including `--delete-delay`. An executable that only answers `--version` is insufficient; update older rsync installations before retrying.
 
@@ -101,7 +101,7 @@ Other library locations, checkouts, home siblings, configurations, and user mate
 
 `--check` prepares a temporary leader export but performs no persistent library, replica, marker, or configuration writes. Missing replicas are reported as pending without creating them. Fresh export directory timestamps and marker timestamps do not produce false pending changes; internal link timestamps are preserved from the source. The export is removed after previews and pulls, including transfer failure.
 
-Read-only skill directories retain their source modes during transfer. Before deleting a temporary export, cleanup grants owner access only to its physical directories; it does not follow links or chmod files that may share leader inodes. Ordinary preparation errors use the same cleanup, so a partially built read-only export is removed rather than silently retained.
+Read-only skill directories retain their source modes during transfer. Before deleting a temporary export, cleanup grants owner access only to its physical directories; it does not follow links or chmod files that may share leader inodes. Ordinary preparation errors use the same cleanup, so a partially built read-only export is removed rather than silently retained. The leader helper also cleans its export if publishing the path fails, including a broken stdout or SSH connection. If cleanup fails, stderr reports both the original failure and the retained export path.
 
 Text reports distinguish push and pull. JSON and YAML retain the normal report envelope with `mode: library_rsync`; changes use follower aliases or `leader`, `push`/`pull` actions, and the home-relative replica path. Network addresses and temporary export paths are not inserted into machine reports. Child diagnostics go to stderr.
 

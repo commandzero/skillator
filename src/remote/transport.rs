@@ -84,7 +84,9 @@ pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica>
     let script = format!(
         "set -eu\n\
          command -v rsync >/dev/null 2>&1 || {{ echo 'rsync is not installed on receiver; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
-         command -v find >/dev/null 2>&1 || {{ echo 'find is not installed on receiver; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         for utility in find cmp mkdir; do\n\
+           command -v \"$utility\" >/dev/null 2>&1 || {{ echo \"$utility is not installed on receiver; install it and add it to the SSH shell PATH\" >&2; exit 1; }}\n\
+         done\n\
          rsync {RSYNC_OPTIONS} {RSYNC_PROBE_OPTIONS} >/dev/null || {{ echo 'receiver rsync lacks required transfer options; update rsync' >&2; exit 1; }}\n\
          case ${{HOME:-}} in /*) ;; *) echo 'receiver HOME is not absolute' >&2; exit 1;; esac\n\
          case $HOME in *[[:cntrl:]]*) echo 'receiver HOME contains control characters' >&2; exit 1;; esac\n\
