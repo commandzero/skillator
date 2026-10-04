@@ -3,7 +3,7 @@ pub mod app;
 pub mod cli;
 pub mod config;
 pub mod domain;
-// Atomic no-replace/exchange renames need platform APIs absent from std.
+// Atomic renames and no-follow symlink timestamps need platform APIs absent from std.
 // Keep the unsafe exception private and confined to this module.
 #[allow(unsafe_code)]
 mod fs_safety;

@@ -49,7 +49,7 @@ impl Fixture {
         ] {
             fs::create_dir_all(directory).unwrap();
         }
-        for name in ["rsync", "mkdir", "cmp", "rm"] {
+        for name in ["rsync", "mkdir", "cmp", "rm", "find"] {
             let program = executable(name);
             symlink(&program, receiver_bin.join(name)).unwrap();
             symlink(&program, leader_bin.join(name)).unwrap();
@@ -422,6 +422,119 @@ fn unowned_or_redirected_remote_and_local_replicas_are_not_adopted() {
 }
 
 #[test]
+fn multiply_linked_replica_files_are_rejected_before_push_or_pull_even_in_check_mode() {
+    for pull in [false, true] {
+        let fixture = Fixture::new();
+        fs::set_permissions(fixture.source(), fs::Permissions::from_mode(0o755)).unwrap();
+        fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
+        if pull {
+            fixture.configure_follower();
+        }
+        let outside = fixture.root.path().join("unrelated hard link");
+        let original = fs::read(fixture.source()).unwrap();
+        fs::write(&outside, &original).unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+        let old_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        fs::File::open(&outside)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+        let received = fixture.received(&fixture.follower);
+        fs::remove_file(&received).unwrap();
+        fs::hard_link(&outside, &received).unwrap();
+        let original_metadata = fs::metadata(&outside).unwrap();
+        for check in [true, false] {
+            let args: &[&str] = match (pull, check) {
+                (false, true) => &["--hosts", "dev", "--check"],
+                (false, false) => &["--hosts", "dev"],
+                (true, true) => &["--check"],
+                (true, false) => &[],
+            };
+            let home = if pull {
+                &fixture.follower
+            } else {
+                &fixture.leader
+            };
+            let report = fixture.report(home, args, 1);
+            assert_eq!(report["changes"][0]["outcome"], "failed");
+            let metadata = fs::metadata(&outside).unwrap();
+            assert_eq!(fs::read(&outside).unwrap(), original);
+            assert_eq!(fs::read(&received).unwrap(), original);
+            assert_eq!(
+                metadata.permissions().mode(),
+                original_metadata.permissions().mode()
+            );
+            assert_eq!(
+                metadata.modified().unwrap(),
+                original_metadata.modified().unwrap()
+            );
+        }
+        fixture.assert_exports_cleaned();
+    }
+}
+
+#[test]
+fn multiply_linked_replica_markers_are_rejected_before_push_or_pull() {
+    for pull in [false, true] {
+        let fixture = Fixture::new();
+        fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
+        if pull {
+            fixture.configure_follower();
+        }
+        let marker = fixture.follower.join(REPLICA).join(MARKER);
+        let outside = fixture.root.path().join("linked marker outside replica");
+        fs::hard_link(&marker, &outside).unwrap();
+        let original = fs::read(&outside).unwrap();
+        let original_metadata = fs::metadata(&outside).unwrap();
+        for check in [true, false] {
+            let args: &[&str] = match (pull, check) {
+                (false, true) => &["--hosts", "dev", "--check"],
+                (false, false) => &["--hosts", "dev"],
+                (true, true) => &["--check"],
+                (true, false) => &[],
+            };
+            let home = if pull {
+                &fixture.follower
+            } else {
+                &fixture.leader
+            };
+            let report = fixture.report(home, args, 1);
+            assert_eq!(report["changes"][0]["outcome"], "failed");
+            let metadata = fs::metadata(&outside).unwrap();
+            assert_eq!(fs::read(&outside).unwrap(), original);
+            assert_eq!(
+                metadata.permissions().mode(),
+                original_metadata.permissions().mode()
+            );
+            assert_eq!(
+                metadata.modified().unwrap(),
+                original_metadata.modified().unwrap()
+            );
+        }
+        fixture.assert_exports_cleaned();
+    }
+}
+
+#[test]
+fn receiver_traversal_errors_refuse_transfer() {
+    let fixture = Fixture::new();
+    fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
+    let received = fixture.received(&fixture.follower);
+    let original = fs::read(&received).unwrap();
+    let remote_find = fixture.root.path().join("receiver-bin/find");
+    fs::remove_file(&remote_find).unwrap();
+    fs::write(&remote_find, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&remote_find, fs::Permissions::from_mode(0o755)).unwrap();
+    for args in [&["--hosts", "dev", "--check"][..], &["--hosts", "dev"][..]] {
+        let report = fixture.report(&fixture.leader, args, 1);
+        assert_eq!(report["changes"][0]["outcome"], "failed");
+        assert_eq!(fs::read(&received).unwrap(), original);
+    }
+    fixture.assert_exports_cleaned();
+}
+
+#[test]
 fn independent_host_failure_and_machine_previews_are_reported_consistently() {
     let fixture = Fixture::new();
     fs::write(fixture.leader.join(".skillator/config.yaml"), "version: 1\nhosts:\n  dev: {destination: receiver-a.internal}\n  unreachable: {destination: unavailable.internal}\n").unwrap();
@@ -462,9 +575,14 @@ fn missing_leader_skillator_and_invalid_export_paths_preserve_existing_replica()
         fs::read(fixture.received(&fixture.follower)).unwrap(),
         preserved
     );
-    let outside = fixture.root.path().join("unrelated export");
+    let outside = fixture.root.path().join("skillator-library-export-outside");
     fs::create_dir(&outside).unwrap();
     fs::write(outside.join("keep"), "unrelated").unwrap();
+    fs::copy(
+        fixture.follower.join(REPLICA).join(MARKER),
+        outside.join(MARKER),
+    )
+    .unwrap();
     fs::write(
         &helper,
         format!("#!/bin/sh\nprintf '%s\\n' {}\n", quote(&outside)),
@@ -480,6 +598,7 @@ fn missing_leader_skillator_and_invalid_export_paths_preserve_existing_replica()
         fs::read_to_string(outside.join("keep")).unwrap(),
         "unrelated"
     );
+    assert!(outside.join(MARKER).is_file());
     fixture.assert_exports_cleaned();
 }
 

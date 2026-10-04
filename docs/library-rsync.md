@@ -3,7 +3,7 @@ type: Playbook
 title: Deliver leader skills to follower libraries
 description: Configure leader pushes and fresh follower pulls with SSH and ordinary rsync.
 status: draft
-generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T19:20:58Z }
+generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T19:46:52Z }
 ---
 
 # Deliver leader skills to follower libraries
@@ -36,7 +36,7 @@ skillator library rsync
 skillator library rsync --hosts build,development
 ```
 
-A pushed-to follower needs SSH, a POSIX shell, and rsync on its noninteractive PATH. It does not need Skillator or Git and does not need a Library configuration.
+A pushed-to follower needs SSH, a POSIX shell, rsync, and POSIX `find` on its noninteractive PATH. It does not need Skillator or Git and does not need a Library configuration.
 
 Before replica creation, both local and remote rsync executables must pass a write-free probe of the required transfer options, including `--delete-delay`. An executable that only answers `--version` is insufficient; update older rsync installations before retrying.
 
@@ -63,7 +63,7 @@ skillator library rsync
 skillator library rsync --format json
 ```
 
-The initiating follower needs Skillator, SSH, and rsync. The leader's noninteractive PATH must contain Skillator and rsync, plus its library-discovery dependencies. The pull asks the leader to prepare a fresh private temporary export using its installed Skillator; a previous leader push is not required. It then uses ordinary rsync to pull that export and SSH to remove it. The hidden export-only helper is not a general remote command protocol or cached publication.
+The initiating follower needs Skillator, SSH, and rsync. The leader's noninteractive PATH must contain Skillator and rsync, plus its library-discovery dependencies. The pull asks the leader to prepare a fresh private temporary export using its installed Skillator; a previous leader push is not required. Before transfer, Skillator verifies the export's physical temporary-directory parent, physical root, and ownership marker; cleanup repeats those checks before removing it. The hidden export-only helper is not a general remote command protocol or cached publication.
 
 All roles need a rsync that supports `--delete-delay`. Upgrade an older system copy when that option is unavailable; Skillator does not install or replace it.
 
@@ -81,7 +81,7 @@ Every follower receives the same layout beneath `~/.skillator/library/replica`:
 
 For example, `local/library` plus `demo` becomes `local/library/_skills/demo/SKILL.md`. A skill at a Source root uses `_skills/SKILL.md`. Equal skill names from different Sources remain separate. Overlapping root/nested skills are rejected rather than merged ambiguously.
 
-Acquisition-link roots are materialized as ordinary usable directories. Self-contained relative internal links remain links; escaping or dangling links block delivery. Regular files preserve their executable modes. Export preparation uses read-only hard links where possible and copies across filesystem boundaries; it does not chmod or rewrite the leader's files or acquisition links.
+Acquisition-link roots are materialized as ordinary usable directories. Self-contained relative internal links remain links and retain their source timestamps, so repeated fresh exports converge with rsync implementations that preserve link times; escaping or dangling links block delivery. Regular files preserve their executable modes. Export preparation uses read-only hard links where possible and copies across filesystem boundaries; it does not chmod or rewrite the leader's files or acquisition links.
 
 Only skill content moves. Git administrative files, unrelated repository files outside skill directories, Library and User Scope configuration, credentials, registries, and materializations are not exported. No Git checkout, revision alignment, origin fetch, or remote registration occurs. Follower Library and User Scope configuration are neither read nor changed by a pull, even when malformed.
 
@@ -91,7 +91,7 @@ The directory containing `SKILL.md` defines the skill-content boundary; all its 
 
 ## Ownership and deletion boundary
 
-Rsync overwrites follower content and removes stale files **only inside `~/.skillator/library/replica`**. Skillator creates that root with a regular `.skillator-rsync-owned` marker containing its fixed ownership signature. Existing unmarked roots, invalid markers, and symlinked root/ancestors are refused; they are not adopted. Do not place unrelated content in an owned replica.
+Rsync overwrites follower content and removes stale files **only inside `~/.skillator/library/replica`**. Skillator creates that root with a regular `.skillator-rsync-owned` marker containing its fixed ownership signature. Existing unmarked roots, invalid markers, and symlinked root/ancestors are refused; they are not adopted. Both previews and delivery reject multiply linked regular files, including the marker, because rsync metadata updates could otherwise affect an inode outside the replica. Do not place unrelated content in an owned replica.
 
 The remote receiver's home must resolve to an existing absolute directory without control characters. Its physical home path is normalized before checking or creating replica entries, so trailing slashes and redundant path components do not cause writes followed by a rejected path. Symlinks below that home remain forbidden.
 
@@ -99,7 +99,7 @@ Other library locations, checkouts, home siblings, configurations, and user mate
 
 ## Preview, reports, and retry
 
-`--check` prepares a temporary leader export but performs no persistent library, replica, marker, or configuration writes. Missing replicas are reported as pending without creating them. Fresh export directory timestamps and marker timestamps do not produce false pending changes. The export is removed after previews and pulls, including transfer failure.
+`--check` prepares a temporary leader export but performs no persistent library, replica, marker, or configuration writes. Missing replicas are reported as pending without creating them. Fresh export directory timestamps and marker timestamps do not produce false pending changes; internal link timestamps are preserved from the source. The export is removed after previews and pulls, including transfer failure.
 
 Text reports distinguish push and pull. JSON and YAML retain the normal report envelope with `mode: library_rsync`; changes use follower aliases or `leader`, `push`/`pull` actions, and the home-relative replica path. Network addresses and temporary export paths are not inserted into machine reports. Child diagnostics go to stderr.
 

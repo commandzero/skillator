@@ -255,6 +255,8 @@ fn copy_children(
             #[cfg(unix)]
             std::os::unix::fs::symlink(link_target, &target)
                 .map_err(|error| io_error(&target, error))?;
+            crate::fs_safety::preserve_symlink_times(&target, &metadata)
+                .map_err(|error| io_error(&target, error))?;
             #[cfg(not(unix))]
             return Err(Error::input(format!(
                 "cannot export `{}`: symbolic links are unsupported on this platform",
@@ -510,6 +512,15 @@ mod tests {
         fs::write(&script, b"#!/bin/sh\necho unchanged\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o751)).unwrap();
         symlink("run.sh", origin.join("alias.sh")).unwrap();
+        assert!(
+            std::process::Command::new("touch")
+                .args(["-h", "-t", "200001010000.00"])
+                .arg(origin.join("alias.sh"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let original_link = fs::symlink_metadata(origin.join("alias.sh")).unwrap();
         let library = home.path().join("library");
         fs::create_dir_all(&library).unwrap();
         symlink(&origin, library.join("demo")).unwrap();
@@ -535,6 +546,13 @@ mod tests {
             original.permissions().mode()
         );
         assert_eq!(projected.modified().unwrap(), original.modified().unwrap());
+        assert_eq!(
+            fs::symlink_metadata(copied.join("alias.sh"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            original_link.modified().unwrap()
+        );
         assert!(
             fs::symlink_metadata(library.join("demo"))
                 .unwrap()
