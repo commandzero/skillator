@@ -8,6 +8,7 @@ use crate::library::{SkillValidity, scan_library};
 use crate::materialization::validate_internal_symlink;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::fs::{self, File, FileTimes};
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use tempfile::{Builder, TempDir};
@@ -155,22 +156,65 @@ pub(super) fn prepare(paths: &AppPaths) -> Result<TempDir> {
         .prefix(EXPORT_PREFIX)
         .tempdir()
         .map_err(|error| Error::input(format!("cannot create temporary leader export: {error}")))?;
-    fs::set_permissions(export.path(), fs::Permissions::from_mode(0o700))
-        .map_err(|error| io_error(export.path(), error))?;
-    for skill in skills {
-        let destination = export.path().join(skill.destination);
-        fs::create_dir_all(destination.parent().expect("skill export has a parent"))
-            .map_err(|error| io_error(&destination, error))?;
-        copy_skill(
-            skill.source,
-            &destination,
-            &skill.location_relative,
-            &exclusions[skill.location_index],
-        )?;
+    let result = (|| {
+        fs::set_permissions(export.path(), fs::Permissions::from_mode(0o700))
+            .map_err(|error| io_error(export.path(), error))?;
+        for skill in skills {
+            let destination = export.path().join(skill.destination);
+            fs::create_dir_all(destination.parent().expect("skill export has a parent"))
+                .map_err(|error| io_error(&destination, error))?;
+            copy_skill(
+                skill.source,
+                &destination,
+                &skill.location_relative,
+                &exclusions[skill.location_index],
+            )?;
+        }
+        fs::write(export.path().join(MARKER_NAME), MARKER_CONTENT)
+            .map_err(|error| io_error(&export.path().join(MARKER_NAME), error))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let path = export.keep();
+        return match cleanup(&path) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(Error::input(format!(
+                "{error}; could not remove temporary export `{}`: {cleanup_error}",
+                path.display()
+            ))),
+        };
     }
-    fs::write(export.path().join(MARKER_NAME), MARKER_CONTENT)
-        .map_err(|error| io_error(&export.path().join(MARKER_NAME), error))?;
     Ok(export)
+}
+
+/// Remove a private export without modifying the permissions of hard-linked source files.
+pub(super) fn cleanup(path: &Path) -> io::Result<()> {
+    fn grant_directory_access(path: &Path) -> io::Result<()> {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "export directory is not a physical directory: {}",
+                    path.display()
+                ),
+            ));
+        }
+        let mode = metadata.permissions().mode();
+        if mode & 0o700 != 0o700 {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700))?;
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                grant_directory_access(&entry.path())?;
+            }
+        }
+        Ok(())
+    }
+
+    grant_directory_access(path)?;
+    fs::remove_dir_all(path)
 }
 
 fn io_error(path: &Path, error: std::io::Error) -> Error {
@@ -436,6 +480,124 @@ mod tests {
             fs::metadata(&data).unwrap().permissions().mode(),
             original_data
         );
+    }
+
+    #[test]
+    fn cleanup_removes_readonly_export_directories_without_changing_source_files() {
+        use std::os::unix::fs::symlink;
+
+        let (home, paths) = fixture(&["~/library"]);
+        let source = home.path().join("library/demo");
+        skill(&source, "demo");
+        let nested = source.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let data = nested.join("data.txt");
+        fs::write(&data, b"source content").unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o444)).unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let export = prepare(&paths).unwrap();
+        let projected = export.path().join("local/library/_skills/demo");
+        assert_eq!(
+            fs::metadata(&projected).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert_eq!(
+            fs::metadata(projected.join("nested"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o555
+        );
+        // Cleanup must not follow links out of the export or chmod hard-linked files.
+        symlink(&source, export.path().join("source-link")).unwrap();
+        let original_file = fs::metadata(&data).unwrap();
+        let path = export.keep();
+        cleanup(&path).unwrap();
+        assert!(!path.exists());
+        let remaining_file = fs::metadata(&data).unwrap();
+        assert_eq!(
+            remaining_file.permissions().mode(),
+            original_file.permissions().mode()
+        );
+        assert_eq!(
+            remaining_file.modified().unwrap(),
+            original_file.modified().unwrap()
+        );
+        assert_eq!(
+            remaining_file.accessed().unwrap(),
+            original_file.accessed().unwrap()
+        );
+        assert_eq!(fs::read(&data).unwrap(), b"source content");
+        assert_eq!(
+            fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert_eq!(
+            fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn partial_export_with_readonly_child_is_removed_on_validation_failure() {
+        use std::os::unix::fs::symlink;
+
+        let (home, paths) = fixture(&["~/library"]);
+        let source = home.path().join("library/demo");
+        skill(&source, "demo");
+        let nested = source.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("data.txt"), b"source content").unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::write(source.join("omitted.txt"), b"excluded").unwrap();
+        symlink("omitted.txt", source.join("link")).unwrap();
+        let config = LibraryConfig::new(vec![LibraryLocationConfig::new(
+            "~/library".into(),
+            vec!["demo/omitted.txt".into()],
+            false,
+        )])
+        .unwrap();
+        fs::write(
+            paths.library_config(),
+            LibraryConfigCodec::render(&config).unwrap(),
+        )
+        .unwrap();
+
+        let error = prepare(&paths).unwrap_err();
+        assert_eq!(error.code, 3);
+        let message = error.to_string();
+        let projected_link = message
+            .strip_prefix("cannot copy link `")
+            .and_then(|text| text.split_once('`'))
+            .map(|(path, _)| Path::new(path))
+            .expect("final link validation must reject the excluded target");
+        let export = projected_link
+            .ancestors()
+            .find(|ancestor| {
+                ancestor
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(EXPORT_PREFIX))
+            })
+            .unwrap();
+        assert!(
+            !export.exists(),
+            "partial export was retained: {}",
+            export.display()
+        );
+        assert_eq!(
+            fs::read(nested.join("data.txt")).unwrap(),
+            b"source content"
+        );
+        assert_eq!(
+            fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[cfg(target_os = "macos")]

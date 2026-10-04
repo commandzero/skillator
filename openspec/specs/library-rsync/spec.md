@@ -97,10 +97,10 @@ Before changing any follower replica, Skillator SHALL obtain a complete usable e
 
 ### Requirement: Delivery uses existing SSH and rsync
 
-The command SHALL use ordinary rsync over existing SSH authentication. A pushed-to follower SHALL need only SSH access, a usable shell, and rsync. A follower initiating a pull SHALL run Skillator locally and require SSH, rsync, and Skillator on its leader to prepare the current skill export. Required dependencies and destination suitability SHALL be checked before replica writes. Failures SHALL identify the follower alias or leader. Skillator SHALL NOT install dependencies or establish host trust automatically.
+The command SHALL use ordinary rsync over existing SSH authentication. A pushed-to follower SHALL need SSH access, a usable POSIX shell, rsync, and ordinary POSIX filesystem utilities including `find`, but SHALL NOT require Skillator or Git. A follower initiating a pull SHALL run Skillator locally and require SSH, rsync, Skillator, and `cmp`, `rm`, `find`, and `chmod` on its leader for export preparation, validation, and cleanup. Required dependencies and destination suitability SHALL be checked before replica writes; leader export validation and cleanup utilities SHALL be checked before creating a temporary export. Failures SHALL identify the follower alias or leader. Skillator SHALL NOT install dependencies or establish host trust automatically.
 
 #### Scenario: No remote Skillator or Git
-- **WHEN** the selected receiver has SSH and rsync but neither Skillator nor Git
+- **WHEN** the selected receiver has SSH, a usable POSIX shell, rsync, and required POSIX filesystem utilities but neither Skillator nor Git
 - **THEN** skill delivery succeeds without installing either application
 
 #### Scenario: Missing rsync
@@ -111,9 +111,17 @@ The command SHALL use ordinary rsync over existing SSH authentication. A pushed-
 - **WHEN** a follower's leader cannot run Skillator or complete discovery
 - **THEN** the pull fails with an actionable leader diagnostic and leaves the follower replica unchanged
 
+#### Scenario: Missing leader export utility
+- **WHEN** the leader's SSH PATH lacks `cmp`, `rm`, `find`, or `chmod`
+- **THEN** the pull fails before creating a temporary export or changing the follower replica
+
 ### Requirement: Preview is write-free
 
 `--check` SHALL preview a leader push or follower pull without persistent changes or prompts. It SHALL use ordinary rsync dry-run for an existing managed replica and report creation/delivery for an absent replica without creating it. Temporary exports SHALL be cleaned after inspection; failed cleanup SHALL be reported. It SHALL return `1` for required, failed, or unverified work and `0` only when every affected replica matches the current leader export.
+
+#### Scenario: Read-only skill directory cleanup
+- **WHEN** valid leader skills contain read-only skill-root or supporting directories
+- **THEN** push, pull, and preview preserve delivered directory modes and remove their temporary exports without changing source file modes or modification times
 
 #### Scenario: Preview first delivery
 - **WHEN** the replica is absent and the user runs `--check`

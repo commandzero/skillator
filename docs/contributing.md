@@ -3,7 +3,7 @@ type: Playbook
 title: Contributing
 description: Local validation, pull-request checks, and contribution rules.
 status: draft
-generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T05:27:41Z }
+generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T20:54:56Z }
 ---
 
 # Contributing
@@ -42,7 +42,7 @@ Changes to broader draft standards do not silently change this contract.
 Keep the product as one crate until a real consumer or dependency boundary justifies a split.
 The repository checker is a Cargo example using existing development dependencies; it adds no installed command.
 
-Unsafe code is denied by default. The private filesystem module uses atomic rename APIs absent from the standard library. Library delivery uses ordinary SSH and rsync without descriptor-binding or a custom remote server.
+Unsafe code is denied by default. The private filesystem module uses atomic rename APIs and `utimensat(..., AT_SYMLINK_NOFOLLOW)` absent from the standard library's safe filesystem interfaces. The no-follow operation preserves exported link timestamps without changing their targets. Library delivery uses ordinary SSH and rsync without descriptor-binding or a custom remote server.
 The private update-process module uses POSIX signal handlers, process-group signals, and nonblocking pipe flags to bound Git pull subprocesses.
 Keep CString lifetime, signal ownership, descriptor lifetime, and platform-flag safety explanations next to each unsafe block. Expand this exception only with a documented need and focused behavior tests.
 

@@ -232,7 +232,7 @@ pub(crate) fn run(paths: &AppPaths, options: Options) -> Result<Report> {
             report.transfer(alias, "push", options.check, result);
         }
         let export = export.keep();
-        if let Err(error) = std::fs::remove_dir_all(&export) {
+        if let Err(error) = export::cleanup(&export) {
             eprintln!(
                 "leader: could not remove temporary export {}: {error}",
                 export.display()

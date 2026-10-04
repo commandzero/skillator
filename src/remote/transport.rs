@@ -287,6 +287,10 @@ pub(super) fn remote_export(destination: &str) -> Result<PathBuf> {
          command -v rsync >/dev/null 2>&1 || {{ echo 'rsync is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
          rsync {RSYNC_OPTIONS} {RSYNC_PROBE_OPTIONS} >/dev/null || {{ echo 'leader rsync lacks required transfer options; update rsync' >&2; exit 1; }}\n\
          command -v skillator >/dev/null 2>&1 || {{ echo 'Skillator is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         command -v cmp >/dev/null 2>&1 || {{ echo 'cmp is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         command -v rm >/dev/null 2>&1 || {{ echo 'rm is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         command -v find >/dev/null 2>&1 || {{ echo 'find is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         command -v chmod >/dev/null 2>&1 || {{ echo 'chmod is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
          skillator library rsync --prepare-export\n",
     );
     let output = ssh(destination, &script)?;
@@ -313,7 +317,9 @@ pub(super) fn cleanup_export(destination: &str, path: &Path) -> Result<()> {
         return Err(Error::input("invalid leader export path; refusing cleanup"));
     }
     let mut script = validated_export_script(path)?;
-    script.push_str("rm -r -- \"$dir\"\n");
+    script.push_str(
+        "find \"$dir\" -type d ! -perm -0700 -exec chmod u+rwx {} \\;\nrm -r -- \"$dir\"\n",
+    );
     ssh(destination, &script).map(|_| ())
 }
 

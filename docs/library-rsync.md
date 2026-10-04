@@ -3,7 +3,7 @@ type: Playbook
 title: Deliver leader skills to follower libraries
 description: Configure leader pushes and fresh follower pulls with SSH and ordinary rsync.
 status: draft
-generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T20:13:56Z }
+generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T20:54:56Z }
 ---
 
 # Deliver leader skills to follower libraries
@@ -63,7 +63,7 @@ skillator library rsync
 skillator library rsync --format json
 ```
 
-The initiating follower needs Skillator, SSH, and rsync. The leader's noninteractive PATH must contain Skillator and rsync, plus its library-discovery dependencies. The pull asks the leader to prepare a fresh private temporary export using its installed Skillator; a previous leader push is not required. Before transfer, Skillator verifies the export's physical temporary-directory parent, physical root, and ownership marker; cleanup repeats those checks before removing it. The hidden export-only helper is not a general remote command protocol or cached publication.
+The initiating follower needs Skillator, SSH, and rsync. The leader's noninteractive PATH must contain Skillator, rsync, `cmp`, `rm`, `find`, and `chmod`, plus its library-discovery dependencies. These export validation and cleanup utilities are checked before preparing a temporary export. The pull asks the leader to prepare a fresh private temporary export using its installed Skillator; a previous leader push is not required. Before transfer, Skillator verifies the export's physical temporary-directory parent, physical root, and ownership marker; cleanup repeats those checks before removing it. The hidden export-only helper is not a general remote command protocol or cached publication.
 
 All roles need a rsync that supports `--delete-delay`. Upgrade an older system copy when that option is unavailable; Skillator does not install or replace it.
 
@@ -100,6 +100,8 @@ Other library locations, checkouts, home siblings, configurations, and user mate
 ## Preview, reports, and retry
 
 `--check` prepares a temporary leader export but performs no persistent library, replica, marker, or configuration writes. Missing replicas are reported as pending without creating them. Fresh export directory timestamps and marker timestamps do not produce false pending changes; internal link timestamps are preserved from the source. The export is removed after previews and pulls, including transfer failure.
+
+Read-only skill directories retain their source modes during transfer. Before deleting a temporary export, cleanup grants owner access only to its physical directories; it does not follow links or chmod files that may share leader inodes. Ordinary preparation errors use the same cleanup, so a partially built read-only export is removed rather than silently retained.
 
 Text reports distinguish push and pull. JSON and YAML retain the normal report envelope with `mode: library_rsync`; changes use follower aliases or `leader`, `push`/`pull` actions, and the home-relative replica path. Network addresses and temporary export paths are not inserted into machine reports. Child diagnostics go to stderr.
 

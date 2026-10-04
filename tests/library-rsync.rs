@@ -54,6 +54,7 @@ impl Fixture {
             symlink(&program, receiver_bin.join(name)).unwrap();
             symlink(&program, leader_bin.join(name)).unwrap();
         }
+        symlink(executable("chmod"), leader_bin.join("chmod")).unwrap();
         symlink(executable("git"), leader_bin.join("git")).unwrap();
         symlink(
             assert_cmd::cargo::cargo_bin("skillator"),
@@ -1044,4 +1045,106 @@ fn local_home_resolving_to_control_character_path_cannot_create_replica() {
     fixture.report(&alias, &[], 1);
     assert!(!physical.join(REPLICA).exists());
     fixture.assert_exports_cleaned();
+}
+
+#[test]
+fn fresh_pull_and_check_clean_readonly_source_directories_without_changing_source_files() {
+    let fixture = Fixture::new();
+    fixture.configure_follower();
+    let skill = fixture.source().parent().unwrap().to_path_buf();
+    let nested = skill.join("nested");
+    fs::create_dir(&nested).unwrap();
+    let nested_file = nested.join("notes.txt");
+    fs::write(&nested_file, "read-only nested content").unwrap();
+    symlink("nested", skill.join("nested-alias")).unwrap();
+    fs::set_permissions(fixture.source(), fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(&nested_file, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o555)).unwrap();
+    fs::set_permissions(&skill, fs::Permissions::from_mode(0o555)).unwrap();
+    let source_file = fs::metadata(fixture.source()).unwrap();
+    let source_nested_file = fs::metadata(&nested_file).unwrap();
+    let source_directory = fs::metadata(&skill).unwrap();
+    let source_nested_directory = fs::metadata(&nested).unwrap();
+    let original_skill = fs::read(fixture.source()).unwrap();
+    let original_nested = fs::read(&nested_file).unwrap();
+
+    let preview = fixture.report(&fixture.follower, &["--check"], 1);
+    assert_eq!(preview["changes"][0]["action"], "pull");
+    assert!(!fixture.follower.join(REPLICA).exists());
+    fixture.assert_exports_cleaned();
+
+    let applied = fixture.report(&fixture.follower, &[], 0);
+    assert_eq!(applied["changes"][0]["action"], "pull");
+    fixture.assert_exports_cleaned();
+    let received_skill = fixture.received(&fixture.follower);
+    let received_directory = received_skill.parent().unwrap();
+    assert_eq!(
+        fs::read(&received_skill).unwrap(),
+        fs::read(fixture.source()).unwrap()
+    );
+    assert_eq!(
+        fs::read(received_directory.join("nested/notes.txt")).unwrap(),
+        fs::read(&nested_file).unwrap()
+    );
+    assert_eq!(
+        fs::read_link(received_directory.join("nested-alias")).unwrap(),
+        Path::new("nested")
+    );
+    let received_nested = received_directory.join("nested");
+    for path in [received_directory, received_nested.as_path()] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+    }
+    assert_eq!(
+        fs::metadata(&received_skill).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+    fixture.report(&fixture.follower, &["--check"], 0);
+    fixture.assert_exports_cleaned();
+    for (path, before) in [
+        (fixture.source(), source_file),
+        (nested_file.clone(), source_nested_file),
+        (skill.clone(), source_directory),
+        (nested.clone(), source_nested_directory),
+    ] {
+        let after = fs::metadata(path).unwrap();
+        assert_eq!(after.permissions().mode(), before.permissions().mode());
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    }
+    assert_eq!(fs::read(fixture.source()).unwrap(), original_skill);
+    assert_eq!(fs::read(&nested_file).unwrap(), original_nested);
+    assert_eq!(
+        fs::metadata(&skill).unwrap().permissions().mode() & 0o777,
+        0o555
+    );
+    assert_eq!(
+        fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+        0o555
+    );
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&skill, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn missing_leader_cleanup_utilities_block_export_and_preserve_existing_replica() {
+    for utility in ["cmp", "rm", "find", "chmod"] {
+        let fixture = Fixture::new();
+        fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
+        fixture.configure_follower();
+        let preserved = format!("follower edit retained when {utility} is missing");
+        fs::write(fixture.received(&fixture.follower), &preserved).unwrap();
+        fs::remove_file(fixture.root.path().join("leader-bin").join(utility)).unwrap();
+        for args in [&["--check"][..], &[][..]] {
+            let report = fixture.report(&fixture.follower, args, 1);
+            assert_eq!(report["changes"][0]["outcome"], "failed", "{utility}");
+            assert_eq!(
+                fs::read_to_string(fixture.received(&fixture.follower)).unwrap(),
+                preserved,
+                "{utility}"
+            );
+            fixture.assert_exports_cleaned();
+        }
+    }
 }
