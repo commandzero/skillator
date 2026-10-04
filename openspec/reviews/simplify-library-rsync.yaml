@@ -1,6 +1,6 @@
 change: simplify-library-rsync
 reviewer: openai-codex/gpt-6.1-sol
-reviewed_at: 2026-10-04T18:53:38Z
+reviewed_at: 2026-10-04T21:02:31Z
 notes: |
   # Clean-main semantic synchronization review
   
@@ -54,9 +54,21 @@ notes: |
   Fresh actual debug CLI over two isolated native TCP OpenSSH services on macOS proved write-free initial preview, skill-only registered-Git-repository push, executable mode 0751, fresh follower pull without a preceding push, follower edit replacement without source upload, ignored malformed follower Library/User Scope config, final no-op, bounded deletion preserving an unrelated sibling, and export cleanup. The receiver's remote PATH contained rsync and shell utilities but no Skillator/Git. Unreadable local discovery separately returned 3 with no export. Both services were stopped and all keys/trust/configuration/homes/exports/wrappers removed.
   
   Standards review's pending archive/receipt finding is addressed by archiving these already synchronized deltas and committing the generated receipt. Optional report/direction vocabulary, predicate, and cleanup refactoring suggestions do not establish behavioral defects and are intentionally not added to this publication-only cutover. No snapshot-isolation or adversarial receiver-race protection is claimed. CI cross-platform results are not claimed here.
+  
+  ## Current PR review refinements
+  
+  Reviewer: openai-codex/gpt-6.1-sol (parent assistant, inline). Reviewed committed implementation, current archive, and main specs at 2f12255c3d2c8bedda622922091d930d4b8a5666. This extends the historical clean-main review above; it is not an independent-provider approval.
+  
+  The archive is newly introduced by this PR, not an existing main-branch historical archive. Its design/proposal now match the actual fallback on every hard-link refusal, data-only copying, source directory/link metadata preservation, pre-transfer export validation, and directory-only cleanup. Main-branch historical archives remain unchanged. fs_safety now also contains the private no-follow utimensat seam; its documented unsafe scope and lifetime explanation match the focused link timestamp regression.
+  
+  All three archived deltas were compared with main: all 8 library-rsync, 6 cli-contract, and 2 library-management requirement bodies and scenarios are present, ignoring blank-line formatting. The library-rsync delivery prerequisite requirement now explicitly includes receiver POSIX filesystem utilities including find and leader cmp/rm/find/chmod. Its existing no-Skillator/Git scenario retains the intended lightweight receiver; new missing-housekeeping-utility and read-only-directory-cleanup scenarios reflect exercised user-visible behavior. Other requirements/scenarios and the two other capability deltas remain unchanged. No new capability, removal, rename, or absent specification is introduced.
+  
+  OpenSpec’s active-change rule interface was loaded through a temporary copy of this current archive. It resolved this repository as planningHome, returned all three existing delta paths, and supplied no additional specs rules. The copy was removed before commit. Paired main/archive edits were verified for every delta requirement.
+  
+  Verification: full bash scripts/preflight.sh passed with GNU rsync (87 unit tests, 25 delivery integration tests, remaining suites, strict Clippy, formatting, docs OKF, all 11 main specs, release safeguards). Actual CLI/rsync smoke reproduced read-only cleanup leakage and missing-cmp leakage before fixes, then proved push/pull/preview cleanup with exact 0555 receiver modes, unchanged source bytes/modes/modification times, partial-error export removal, and rejection of each missing cmp/rm/find/chmod before temporary export creation. Earlier current-PR native TCP SSH proof covers GNU/openrsync convergence, private 0700 modes, same-filesystem EPERM copy fallback, normalized HOME, and inode/export boundaries. All throwaway fixtures/services were removed. Current-head remote CI after this commit is not claimed in this receipt.
 no_spec_deltas: false
-archive_tree: ba125c982db58654326f75f434172ec455af145a
+archive_tree: 177505de527977214dadb7924d28245181007f7c
 specs:
   openspec/specs/cli-contract/spec.md: cdc68081269d318ff7605002d13d310f15af3227
   openspec/specs/library-management/spec.md: f3ccb13c46963f2dda668a2f3af9da640dfe5027
-  openspec/specs/library-rsync/spec.md: 71b10fe10246dbfc3e92a3a1d0367485fa700307
+  openspec/specs/library-rsync/spec.md: e850a6595c139d1f450df47abc454a2115320d73
