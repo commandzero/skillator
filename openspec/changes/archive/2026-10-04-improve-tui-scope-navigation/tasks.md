@@ -41,7 +41,7 @@
 
 - [x] 6.1 Run the repository preflight after the complete implementation and record only observed checks; all changed behavior scenarios and existing reconciliation/inheritance contracts must pass without wording-only or implementation-detail assertions.
 - [x] 6.2 Exercise the actual TUI using an isolated HOME, temporary Git repository, and disposable SSH follower: navigate every scope, add both directory presets and a custom path, register a differing alias/hostname, browse follower inventory, resize, discard staged edits, save/restart, and quit; verify file-state isolation and terminal restoration and record host/terminal evidence.
-- [ ] 6.3 Review every delta requirement against the implementation, synchronize main specs, archive this change with completed task evidence, and record the repository-required semantic review receipt; verify strict OpenSpec validation and the scoped PR contract before merge.
+- [x] 6.3 Review every delta requirement against the implementation, synchronize main specs, archive this change with completed task evidence, and record the repository-required semantic review receipt; verify strict OpenSpec validation and the scoped PR contract before merge.
 
 ## Verification evidence
 
