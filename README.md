@@ -77,11 +77,20 @@ skillator targets prune --check
 skillator sync --check
 skillator sync
 
+# Push current leader skills to followers; on a follower, pull from its leader.
+skillator library rsync --check
+skillator library rsync --hosts build,development
+
+# On a follower instead, pull from its configured leader.
+skillator library rsync
+
 # Optional: sync newly created linked worktrees automatically.
 skillator hook install
 skillator hook status
 git worktree add -b feature ../feature
 ```
+
+See [library delivery](docs/library-rsync.md) for leader/follower configuration, fresh pulls, and the owned replica deletion boundary.
 
 Clone remote skill repositories with Git, then add their local folders to the Library. Use `skillator user` to manage skills for your account.
 

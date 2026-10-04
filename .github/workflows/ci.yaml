@@ -34,10 +34,10 @@ jobs:
         with:
           node-version: '22'
       - run: bash scripts/tools-setup.sh
-      - name: Install policy check dependencies
+      - name: Install check dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ripgrep shellcheck
+          sudo apt-get install --yes ripgrep shellcheck rsync
       - run: bash scripts/preflight.sh
 
   platform-tests:
@@ -65,6 +65,14 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.rust }}-${{ hashFiles('Cargo.lock') }}
+      - name: Install rsync
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            brew install rsync
+          else
+            sudo apt-get update
+            sudo apt-get install --yes rsync
+          fi
       - run: bash scripts/preflight.sh test
         env:
           RUST_TOOLCHAIN: ${{ matrix.rust }}

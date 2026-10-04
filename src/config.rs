@@ -718,7 +718,7 @@ fn top_level_version(text: &str) -> Option<u64> {
     })
 }
 
-fn parse_yaml<T: for<'de> Deserialize<'de>>(text: &str) -> Result<T, Vec<ConfigIssue>> {
+pub(crate) fn parse_yaml<T: for<'de> Deserialize<'de>>(text: &str) -> Result<T, Vec<ConfigIssue>> {
     if let Some(message) = forbidden_yaml_feature(text) {
         return Err(vec![ConfigIssue {
             path: "$".to_owned(),

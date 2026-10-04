@@ -1,0 +1,62 @@
+change: simplify-library-rsync
+reviewer: openai-codex/gpt-6.1-sol
+reviewed_at: 2026-10-04T18:53:38Z
+notes: |
+  # Clean-main semantic synchronization review
+  
+  Reviewer: openai-codex/gpt-6.1-sol (parent assistant, inline review).
+  Repository: commandzero/skillator.
+  Base: 233e0dbb1795da9f7c0471994b1d10babd36eaee.
+  Reviewed implementation/spec commit: 66f48a5f4261d465c315b3ca46e5dd73d41cd954.
+  Change: simplify-library-rsync.
+  
+  The parallel spec reviewer failed before substantive review because its provider could not connect. These findings are the parent assistant's explicit review, not independent reviewer approval or automated equivalence proof.
+  
+  ## Baseline and scope
+  
+  Main has no library-rsync capability. The complete remote capability is ADDED, not MODIFIED. No REMOVED requirements from unpublished PR #32 are applied to main. The replacement proposal records this baseline and supersedes CLOSED PR #32. Old reconciliation commits, two old archives, and old review receipts are deliberately excluded. Main's user-scope-onboarding spec, app, library, library-update, reconcile, and fs-safety implementations remain unchanged. No unpublished Rust API removal or library-writer lock changes ship. Existing local acquisition and update semantics are preserved. The only shared source adjustments are crate-private access to existing strict YAML parsing and existing internal-symlink validation, plus CLI integration and the remote module declaration. Tempfile changes from an existing development dependency to a runtime dependency.
+  
+  ## library-rsync: all eight added requirements and their scenarios match main
+  
+  - Hosts are configured explicitly: mutually exclusive leader hosts and follower leader.destination, strict version/fields/destinations, alias subset/deduplication, follower selector rejection, existing SSH authentication, labels rather than identities. Explicit subset, follower invocation, and ambiguous-role scenarios are present.
+  - All skill content participates: hidden/unselected skills, location exclusions, complete supporting files/modes, materialized acquisition-link roots, self-contained internal links, and exclusion of Git/outside-skill/configuration/selection/materialization state. Hidden supporting-content, linked acquisition, and equal-name source-grouping scenarios are present. The skill-directory boundary includes valid root skills; no arbitrary extension allowlist is inferred.
+  - Leader authority regardless of initiator: current leader export is the source for push and fresh follower pull; no uploads, editing histories, conflicts, or Git checkout management. Main-host update, fresh pull without push, follower edit replacement, receiver edit replacement on push, and bounded deletion scenarios are present.
+  - Receiver replicas are isolated: fixed home-relative replica, creation and managed marker, refusal of unmarked or redirected roots, deletion only in that replica. Initial delivery, unmanaged destination, unrelated sibling preservation, and redirected-root scenarios are present.
+  - Incomplete leader input does not authorize mirroring: usable complete discovery before mutation, unavailable/unreadable/invalid/unsupported/colliding/overlapping input rejected, inspected empty input distinguished from unavailable input. Unavailable source and intentionally empty library scenarios are present.
+  - Delivery uses existing SSH and rsync: pushed-to receivers require no Git/Skillator; pulls require Skillator on invoking follower and leader, existing trust/authentication, prerequisite failures before replica writes. No receiver Skillator/Git, missing rsync, and failed leader export scenarios are present.
+  - Preview is write-free: existing-replica dry-run, absent-replica reporting without creation, cleanup and cleanup-failure reporting, meaningful 0/1 outcomes. Initial delivery, stale remote content, and follower preview scenarios are present.
+  - Ordinary retryable failures: independent leader push outcomes, one follower affected by pull, no rollback/atomicity claim, no source mutation, no history/enrollment dependency. Unreachable receiver and retry after partial transfer scenarios are present.
+  
+  ## cli-contract: four modified and two added requirements match main
+  
+  - Interactive defaults/explicit groups include non-interactive library rsync and retain all eight existing root/library/sync/hook scenarios. The already implemented library update command remains in the explicit command list.
+  - Compact JSON/YAML envelope retains existing fields, format version, equivalence and advisory discovery scenarios; rsync adds mode library_rsync, initiating home target, and host labels only to relevant entries/data.
+  - Deterministic ANSI-free machine output retains YAML scalar behavior and existing constraints while distinguishing configured aliases/leader labels from network destinations.
+  - Git composition retains ordinary clone and worktree examples, forbids rsync Git manipulation/bootstrap, and preserves the separately specified bounded library update contract.
+  - Added follower-replica outcomes specify labels, path, direction, action/failure, statuses, and stdout completed reports; independent failure and no-op scenarios are present.
+  - Added non-interactive leader-authoritative command specifies supported selector/check/format/color options and invalid policy/force options; default direction, follower selector rejection, and unsupported old policy scenarios are present. These negative migration constraints intentionally prevent legacy compatibility paths; they do not preserve reconciliation policy behavior.
+  
+  No CLI requirement was removed, and unrelated hook, Target/worktree, read-only, mutation, update, status, and platform requirements remain.
+  
+  ## library-management: both modified requirements match main
+  
+  - Missing inventory retains unresolved declarations and both source-missing/skill-moved scenarios, limits ordinary synchronization to no inventory creation, and specifies dedicated-replica delivery without registration and complete input before deletion.
+  - Explicit local acquisition retains first-location-only move/copy/link behavior and both existing acquisition scenarios; the new paragraph keeps rsync independent and configuration-preserving.
+  
+  No Library requirement was removed. Existing strict configuration, path expansion, discovery, exclusions, source identity, overlaps, live inventory, acquisition failure, add/remove/prune/filter, and update contracts remain.
+  
+  No user-scope delta is needed: main's existing host-local behavior is unchanged, and the new remote requirements explicitly forbid transferring selections or changing materialization entries.
+  
+  ## Verification evidence and limits
+  
+  On the clean-main replacement, full bash scripts/preflight.sh passed: formatting, strict Clippy, locked all-target tests (including all 15 delivery integration tests), doctests, shell/workflow checks, repository-tool tests, documentation OKF validation, all 11 main specs, and release safeguards. Strict active change validation passed.
+  
+  Fresh actual debug CLI over two isolated native TCP OpenSSH services on macOS proved write-free initial preview, skill-only registered-Git-repository push, executable mode 0751, fresh follower pull without a preceding push, follower edit replacement without source upload, ignored malformed follower Library/User Scope config, final no-op, bounded deletion preserving an unrelated sibling, and export cleanup. The receiver's remote PATH contained rsync and shell utilities but no Skillator/Git. Unreadable local discovery separately returned 3 with no export. Both services were stopped and all keys/trust/configuration/homes/exports/wrappers removed.
+  
+  Standards review's pending archive/receipt finding is addressed by archiving these already synchronized deltas and committing the generated receipt. Optional report/direction vocabulary, predicate, and cleanup refactoring suggestions do not establish behavioral defects and are intentionally not added to this publication-only cutover. No snapshot-isolation or adversarial receiver-race protection is claimed. CI cross-platform results are not claimed here.
+no_spec_deltas: false
+archive_tree: ba125c982db58654326f75f434172ec455af145a
+specs:
+  openspec/specs/cli-contract/spec.md: cdc68081269d318ff7605002d13d310f15af3227
+  openspec/specs/library-management/spec.md: f3ccb13c46963f2dda668a2f3af9da640dfe5027
+  openspec/specs/library-rsync/spec.md: 71b10fe10246dbfc3e92a3a1d0367485fa700307
