@@ -44,6 +44,7 @@ The repository checker is a Cargo example using existing development dependencie
 
 Unsafe code is denied by default. The private filesystem module uses atomic rename APIs absent from the standard library. Library delivery uses ordinary SSH and rsync without descriptor-binding or a custom remote server.
 The private update-process module uses POSIX signal handlers, process-group signals, and nonblocking pipe flags to bound Git pull subprocesses.
+The private remote-process module uses process-group signals to cancel and bound TUI SSH probes and replica inspection, including their descendants.
 Keep CString lifetime, signal ownership, descriptor lifetime, and platform-flag safety explanations next to each unsafe block. Expand this exception only with a documented need and focused behavior tests.
 
 ## Commits and history
@@ -116,8 +117,8 @@ Repository administrators must enforce these rules in GitHub; workflow files alo
 Automated TUI tests run in preflight. For changes to terminal interaction, also use an isolated HOME and a temporary Git repository.
 
 1. Start the TUI in an interactive terminal and open help.
-2. Resize the terminal, move between Library and Skills, and filter the list.
-3. Preview a change, cancel it, and confirm that no skill files changed.
+2. Resize the terminal, cycle Library/User/Repo with Ctrl+Left/Right, cycle sub-tabs with Tab, and filter the list.
+3. Use Ctrl+T to stage a preset and custom directory; cancel/discard and confirm no skill files or configuration changed. Save and restart to check scope isolation. With a disposable trusted-key SSH follower, verify its differing alias/hostname and read-only replica tab without changing SSH trust or replica contents.
 4. Quit and check that normal input, echo, cursor visibility, and the alternate screen recover.
 
 Record the host and terminal used. Linux, WSL, and release-target checks require those actual environments.

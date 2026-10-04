@@ -381,8 +381,14 @@ fn wayfinder_20_prompts_before_discarding_staged_tui_edits() {
         )],
     );
     reduce(&mut model, TuiAction::Toggle);
-    reduce(&mut model, TuiAction::ToggleWorkspace);
-    assert_eq!(model.overlay(), &Overlay::DiscardWorkspace);
+    reduce(&mut model, TuiAction::ToggleLibrary);
+    assert_eq!(
+        model.overlay(),
+        &Overlay::ScopeSwitch {
+            destination: skillator::tui::Scope::Library,
+            host_to: None,
+        }
+    );
     assert_eq!(model.rows()[0].check(), Some(CheckState::Checked));
 }
 

@@ -146,7 +146,7 @@ The first TUI line SHALL show `Library`, `User`, and `Repo` in that order, with 
 - **THEN** spacing contracts before labels, scope labels take priority over the title, and the header does not overlap or wrap
 
 ### Requirement: The bottom status line identifies the active scope and path
-The bottom status line SHALL identify the active scope and resolved path. Library SHALL show its host and Library configuration path; User its selected Skill Directory; Repo its repository root and selected Skill Directory. Paths beneath home SHALL use `~`; remote paths SHALL be host-qualified. Long paths SHALL truncate without hiding the scope label, with full paths available in the inspector. Repository paths SHALL not appear in the first-line header.
+The bottom status line SHALL identify the active scope and resolved path. Library SHALL show its host and local Library configuration or remote replica path; User its selected Skill Directory; Repo its repository root and selected Skill Directory. Paths beneath home SHALL use `~`; remote paths SHALL be host-qualified. Long paths SHALL truncate without hiding the scope label, with full paths available in the inspector. Repository paths SHALL not appear in the first-line header.
 
 #### Scenario: Local Library status
 - **WHEN** Local is selected under Library
@@ -154,7 +154,7 @@ The bottom status line SHALL identify the active scope and resolved path. Librar
 
 #### Scenario: Follower Library status
 - **WHEN** follower `build` is selected under Library
-- **THEN** status identifies `Library: build` and `build:~/.skillator/library.yaml`, with reported hostname separately when known
+- **THEN** status identifies `Library: build` and `build:~/.skillator/library/replica`, with reported hostname separately when known
 
 #### Scenario: User status
 - **WHEN** `.claude` is selected under User

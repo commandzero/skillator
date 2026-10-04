@@ -2,6 +2,10 @@
 
 mod config;
 mod export;
+pub(crate) mod hosts;
+// Bound TUI SSH work and stop inherited pipe writers through private process
+// groups; unsafe code is confined to the POSIX signal used for cleanup.
+#[allow(unsafe_code)]
 mod process;
 mod transport;
 

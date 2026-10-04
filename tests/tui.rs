@@ -68,7 +68,7 @@ fn vim_keys_and_save_keys_map_to_the_approved_actions() {
     );
     assert_eq!(
         action_for_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
-        Some(Action::ToggleWorkspace)
+        Some(Action::ToggleLibrary)
     );
     assert_eq!(
         action_for_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
@@ -105,7 +105,15 @@ fn vim_keys_and_save_keys_map_to_the_approved_actions() {
             Some(action)
         );
     }
-    for key in [KeyCode::Left, KeyCode::Down, KeyCode::Up, KeyCode::Right] {
+    assert_eq!(
+        action_for_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL)),
+        Some(Action::PreviousScope)
+    );
+    assert_eq!(
+        action_for_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)),
+        Some(Action::NextScope)
+    );
+    for key in [KeyCode::Down, KeyCode::Up] {
         assert_eq!(
             action_for_key(KeyEvent::new(key, KeyModifiers::CONTROL)),
             None
@@ -128,9 +136,9 @@ fn staged_workspace_switch_requires_discard_or_return() {
         )],
     );
     reduce(&mut model, Action::Toggle);
-    let effects = reduce(&mut model, Action::ToggleWorkspace);
+    let effects = reduce(&mut model, Action::ToggleLibrary);
     assert!(effects.is_empty());
-    assert_eq!(model.overlay(), &Overlay::DiscardWorkspace);
+    assert!(matches!(model.overlay(), Overlay::ScopeSwitch { .. }));
 
     reduce(&mut model, Action::Escape);
     let effects = reduce(&mut model, Action::Save { fast: false });
@@ -315,7 +323,11 @@ fn rendered_palette_preserves_semantics_and_structure() {
             .iter()
             .any(|cell| cell.symbol() == "▛" && cell.fg == Color::Indexed(99))
     );
-    assert_eq!(cells[0].fg, Color::Indexed(230));
+    assert!(
+        cells
+            .iter()
+            .any(|cell| cell.symbol() == "S" && cell.fg == Color::Indexed(230))
+    );
     assert!(cells.iter().any(|cell| {
         matches!(cell.symbol(), "[" | "└")
             && cell.fg == Color::Indexed(240)
@@ -393,7 +405,7 @@ fn inherited_user_skill_renders_as_read_only_user_enablement() {
 }
 
 #[test]
-fn target_and_directory_editors_collect_input_before_emitting_effects() {
+fn target_and_directory_chooser_collect_input_before_emitting_effects() {
     let mut model = Model::new(Workspace::Target, Vec::new());
     assert!(reduce(&mut model, Action::ChangeTarget).is_empty());
     for character in "../other".chars() {
@@ -405,30 +417,29 @@ fn target_and_directory_editors_collect_input_before_emitting_effects() {
     );
 
     reduce(&mut model, Action::AddDirectory);
-    for character in "docs,.docs/skills,Docs".chars() {
+    for character in "cla".chars() {
         reduce(&mut model, Action::Input(character));
     }
     assert_eq!(
         reduce(&mut model, Action::Confirm),
         [Effect::ApplyDirectoryEdit {
             edit: false,
-            value: "docs,.docs/skills,Docs".to_owned(),
+            value: ".claude/skills".to_owned(),
         }]
     );
 
     reduce(&mut model, Action::NewTargetTab);
-    assert_eq!(
-        model.overlay(),
-        &Overlay::DirectoryEditor {
-            edit: false,
-            input: ".claude".to_owned(),
-        }
+    assert!(
+        matches!(model.overlay(), Overlay::DirectoryChooser { input, selected: 0 } if input.is_empty())
     );
+    for character in "custom-agent/skills".chars() {
+        reduce(&mut model, Action::Input(character));
+    }
     assert_eq!(
         reduce(&mut model, Action::Confirm),
         [Effect::ApplyDirectoryEdit {
             edit: false,
-            value: ".claude".to_owned(),
+            value: "custom-agent/skills".to_owned(),
         }]
     );
 }
@@ -514,7 +525,7 @@ fn library_footer_explains_how_to_apply_pending_changes() {
             .buffer()
             .content()
             .iter()
-            .any(|cell| { cell.symbol() == "▄" && cell.fg == Color::Indexed(33) })
+            .any(|cell| { cell.symbol() == "▄" && cell.fg == Color::Indexed(230) })
     );
 }
 
@@ -570,7 +581,7 @@ fn help_scrolls_to_the_full_mode_reference_and_q_closes_it() {
 }
 
 #[test]
-fn library_table_uses_a_blue_frame() {
+fn library_table_uses_a_bone_frame() {
     let model = Model::new(Workspace::Library, vec![Row::location("./library")]);
     let backend = TestBackend::new(80, 12);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -583,7 +594,7 @@ fn library_table_uses_a_blue_frame() {
             .buffer()
             .content()
             .iter()
-            .any(|cell| cell.symbol() == "▛" && cell.fg == Color::Indexed(33))
+            .any(|cell| cell.symbol() == "▛" && cell.fg == Color::Indexed(230))
     );
 }
 
@@ -633,7 +644,7 @@ fn confirmation_uses_a_descriptive_title_and_bottom_border_controls() {
         )],
     );
     reduce(&mut model, Action::Toggle);
-    reduce(&mut model, Action::ToggleWorkspace);
+    reduce(&mut model, Action::ToggleLibrary);
 
     let backend = TestBackend::new(100, 14);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -648,19 +659,19 @@ fn confirmation_uses_a_descriptive_title_and_bottom_border_controls() {
 
     let title_line = lines
         .iter()
-        .position(|line| line.contains("Discard changes"))
+        .position(|line| line.contains("Switch scope"))
         .unwrap();
     let footer_line = lines
         .iter()
-        .position(|line| line.contains("y/Enter discard"))
+        .position(|line| line.contains("Enter save and switch"))
         .unwrap();
-    assert!(lines[title_line].contains("┌ Discard changes "));
+    assert!(lines[title_line].contains("┌ Switch scope "));
     assert!(lines[footer_line].contains("└"));
-    assert!(lines[footer_line].contains("n/Esc return"));
+    assert!(lines[footer_line].contains("Esc return"));
     assert!(
         lines[title_line + 1..footer_line]
             .iter()
-            .all(|line| !line.contains("y/Enter") && !line.contains("n/Esc"))
+            .all(|line| !line.contains("save and switch") && !line.contains("Esc return"))
     );
 }
 

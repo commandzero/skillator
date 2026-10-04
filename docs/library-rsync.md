@@ -25,6 +25,18 @@ hosts:
 
 The existing `hosts` form means leader. Aliases label reports and select followers; `local` remains reserved. The leader must have Skillator, rsync, and its usual library-discovery dependencies, including Git for Git Sources. Configure its Library through the normal workspace before syncing.
 
+Host entries also accept optional `hostname` metadata, for example:
+
+```yaml
+version: 1
+hosts:
+  build:
+    destination: build
+    hostname: worker-07.example.net
+```
+
+`destination` is the SSH connection target; `hostname` is the separately validated name reported by that machine and is only display metadata. Existing destination-only entries remain valid. Older builds reject this new field: remove `hostname` before downgrading, without changing destinations.
+
 ```sh
 # Preview all followers without creating their replicas.
 skillator library rsync --check
@@ -68,6 +80,17 @@ The initiating follower needs Skillator, SSH, and rsync. The leader's noninterac
 All roles need a rsync that supports `--delete-delay`. Upgrade an older system copy when that option is unavailable; Skillator does not install or replace it.
 
 Use SSH configuration for ports, jump hosts, keys, and authentication. Establish host trust separately. Connections use batch authentication, require trusted host keys, and suppress trust-file and persistent connection updates.
+
+## Register and browse followers in the TUI
+
+Select Library and press `Ctrl+T`. Enter a unique follower name matching an SSH alias in `~/.ssh/config`; `local` is reserved. Skillator runs an argument-separated `ssh -T destination hostname` with batch authentication and existing trusted keys. It never edits SSH configuration or establishes trust. A valid single hostname is required on stdout; stderr warnings are displayed separately. Authentication, trust, connection, timeout, or malformed-output failures leave the registry unchanged. Fix the SSH setup externally and retry.
+
+A successful probe stages a host tab and preserves the input alias as its destination even if the reported hostname differs. Press `s` and confirm to publish `~/.skillator/config.yaml`; quit or discard without saving to leave it unchanged. Invalid registries and externally changed files are not overwritten. A pull-initiating follower's `leader` role is preserved and cannot register downstream followers. Library inventory and host-registry saves report their separate outcomes.
+
+Use `Tab` / `Shift+Tab` to browse Local and follower Library tabs. Follower tabs inspect only the owned `~/.skillator/library/replica` through ordinary SSH/POSIX tools, without remote Skillator or Git. They display delivered Source/Skill metadata and document diagnostics, not a copy of local inventory. Mutation actions are disabled. Registration does not deliver a replica: run leader-authoritative `skillator library rsync` separately. Missing, offline, unmarked, multiply linked, or symlinked replicas remain unavailable with diagnostics; other scopes stay usable.
+
+TUI hostname probes have a 15-second overall deadline and 4 KiB stdout/stderr limits. Replica inspection has a 30-second deadline, a 4 MiB inventory-output limit, a 4 KiB stderr limit, and a 256 KiB limit per skill document. Escape cancels a pending probe; switching away cancels inspection and ignores stale replies. These bounds apply to TUI SSH operations, not rsync delivery.
+
 
 ## Inventory and replica layout
 

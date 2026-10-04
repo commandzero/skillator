@@ -1,15 +1,14 @@
-# Spec Delta
+# library-hosts Specification
 
 ## Purpose
-
 Defines host-local follower registration, reliable SSH hostname discovery, and remote Library inspection without conflating connection aliases with remote machine identities.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Followers share the synchronization host registry
-Follower configurations SHALL use the PR32 host registry at `~/.skillator/config.yaml`. Each entry SHALL retain its unique alias and SSH `destination`, with optional `hostname` metadata containing the verified remote hostname. Existing destination-only entries SHALL load unchanged. Unknown fields and malformed values SHALL remain errors; `local` SHALL remain reserved.
+Follower configurations SHALL use the PR38 host registry at `~/.skillator/config.yaml`. Each entry SHALL retain its unique alias and SSH `destination`, with optional `hostname` metadata containing the verified remote hostname. Existing destination-only entries SHALL load unchanged. Unknown fields and malformed values SHALL remain errors; `local` SHALL remain reserved. A configured `leader` role SHALL remain distinct from downstream `hosts`.
 
-#### Scenario: Existing PR32 configuration
+#### Scenario: Existing PR38 configuration
 - **WHEN** the registry contains destination-only host entries
 - **THEN** Library shows those follower aliases as sub-tabs without requiring a migration or automatically probing them
 
@@ -20,6 +19,10 @@ Follower configurations SHALL use the PR32 host registry at `~/.skillator/config
 #### Scenario: Duplicate or reserved follower name
 - **WHEN** a new follower name duplicates a configured alias or is `local`
 - **THEN** setup explains the collision without overwriting an entry or starting SSH
+
+#### Scenario: Pull-initiating follower cannot change roles implicitly
+- **WHEN** host configuration declares a `leader` and the user tries adding a downstream follower
+- **THEN** setup explains the role conflict without probing or replacing the configured leader
 
 ### Requirement: Library tab creation verifies follower access
 `Ctrl+T` in Library SHALL ask for `Follower name` with a hint that credentials and connection settings must exist in the user's SSH config. The entered name SHALL identify an SSH alias and registry alias. Setup SHALL validate it before a bounded, cancellable noninteractive `ssh -T {destination} hostname` probe, using existing SSH trust and credentials without modifying them. Successful verification SHALL stage the follower for explicit save.
@@ -83,19 +86,23 @@ Saving a staged follower SHALL atomically update only the initiating user's host
 - **THEN** the pending tab disappears and configuration and skill files remain unchanged
 
 ### Requirement: Follower tabs show host-specific Library state
-Library SHALL show the initiating host as `Local` first and configured followers by alias. Selecting a follower SHALL inspect that host's Library inventory read-only and identify its alias, known hostname, and host-qualified Library configuration path. It SHALL NOT substitute local inventory, edit remote enablements, or initiate rsync. Unavailable or incompatible followers SHALL retain their tabs with actionable diagnostics.
+Library SHALL show the initiating host as `Local` first and configured followers by alias. Selecting a follower SHALL inspect its owned `~/.skillator/library/replica` read-only over ordinary SSH, without requiring remote Skillator or Git. It SHALL identify the alias, known hostname, and host-qualified replica path. It SHALL NOT substitute local inventory, edit remote enablements, or initiate rsync. Unavailable or unsafe replicas SHALL retain their tabs with actionable diagnostics.
 
 #### Scenario: Inspect follower inventory
 - **WHEN** a follower is selected and remote inspection succeeds
-- **THEN** its Locations, Sources, Skills, and diagnostics appear with a read-only indicator and its host-qualified path
+- **THEN** its replica Location, Source groups, Skills, and diagnostics appear with a read-only indicator and its host-qualified replica path
 
 #### Scenario: Offline follower
 - **WHEN** remote inspection fails
 - **THEN** its selected tab identifies the failed host and reason without displaying local inventory as remote content
 
-#### Scenario: Follower lacks compatible Skillator
-- **WHEN** SSH hostname verification succeeds but Library inspection finds missing or incompatible remote dependencies
-- **THEN** registration remains valid and the follower tab explains the inspection failure without installing software
+#### Scenario: Follower without Skillator or Git
+- **WHEN** SSH access succeeds and the follower has a valid owned replica but no Skillator or Git
+- **THEN** the follower tab displays the replica inventory without installing software
+
+#### Scenario: Missing or unsafe replica
+- **WHEN** the follower replica is absent, unmarked, unreadable, or violates the owned-path boundary
+- **THEN** registration remains valid and the follower tab identifies the inspection failure without creating or adopting a replica
 
 #### Scenario: Attempt remote mutation
 - **WHEN** the user invokes a Library inventory mutation or save of inventory changes on a follower tab

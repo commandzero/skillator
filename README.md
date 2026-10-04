@@ -34,12 +34,16 @@ See [release support and installation checks](docs/release.md) for the exact mat
 
 1. Run `skillator` inside a Git repository.
 2. Add the folders containing your skills to the Library. The default is `~/.skillator/library`.
-3. Press `Ctrl+L` to open the Skills view, then `Space` to select skills.
+3. Use `Ctrl+Left` / `Ctrl+Right` to select User or Repo, then `Space` to select skills.
 4. Press `s` to review and save, or `Ctrl+S` to save and exit when no confirmation is needed.
 
 Skills are linked by default, so library edits take effect immediately. Press `m` to switch to a separate copy. Skillator reports when a copy differs from the library.
 
-Use the `User` tab for skills available across projects. Add another skill tab for folders such as `.claude/skills`.
+User installs skills across projects; Repo installs them for the current Git checkout. Library manages available skills. The first line selects a scope; `Tab` / `Shift+Tab` selects its directories or Library hosts. The bottom line identifies the active scope and path.
+
+Press `Ctrl+T` in User or Repo to filter Generic/Codex (`.agents/skills`) and Claude (`.claude/skills`) presets. Use arrow keys and Enter to stage a directory, or enter a custom relative path when no preset matches. User paths are relative to your home; Repo paths are relative to the checkout. Directories and enablements are written only when you save.
+
+In Library, `Ctrl+T` stages a follower after verifying its hostname through SSH. Configure credentials and trusted keys in `~/.ssh/config` first. The SSH alias remains the destination even when its reported hostname differs. Save explicitly to persist the host. Follower tabs inspect delivered replicas read-only; registration and browsing do not synchronize content. See [Library delivery and follower tabs](docs/library-rsync.md).
 
 ## Command line
 
@@ -149,8 +153,10 @@ git rm --cached -- .agents/skillator.yaml
 | `h` / `l` | Collapse or expand a group |
 | `Space` | Toggle a skill or group |
 | `m` | Change how a skill is installed or tracked |
-| `Tab` / `Shift+Tab` | Switch skill folders or the User tab |
-| `Ctrl+L` | Switch between Skills and Library |
+| `Ctrl+Left` / `Ctrl+Right` | Cycle Library, User, and Repo scopes |
+| `Tab` / `Shift+Tab` | Cycle directories or Library hosts within the active scope |
+| `Ctrl+L` | Switch between Library and the last User/Repo scope |
+| `Ctrl+T` | Stage an agent directory, or verify and stage a Library follower |
 | `/` | Filter skills; `/pending` shows unsaved changes |
 | `s` | Review and save |
 | `Ctrl+S` | Save and exit when no confirmation is needed |
