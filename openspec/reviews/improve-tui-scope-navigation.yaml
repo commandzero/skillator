@@ -1,0 +1,33 @@
+change: improve-tui-scope-navigation
+reviewer: openai-codex-gpt-6.1-sol
+reviewed_at: 2026-10-04T21:21:15Z
+notes: |
+  # Semantic review: improve-tui-scope-navigation
+  
+  Reviewed by the coding assistant (openai-codex/gpt-6.1-sol), with separate read-only Standards and Spec review agents. This is an explicit semantic review record, not proof of human reviewer identity.
+  
+  ## Synchronization
+  
+  All five library-hosts added requirements and all six modified plus two added tui-workflows requirements match the synchronized main-spec requirement bodies and scenarios. Ten unrelated existing TUI requirements, including inheritance, reconciliation safety, and repository-owned skills, were preserved with every scenario. No capabilities or requirements were retired or renamed. The new library-hosts Purpose was copied from its delta; the existing TUI Purpose was preserved.
+  
+  ## Requirement review
+  
+  - Host registry: strict destination-only legacy entries remain valid; optional hostname is separately validated, never used as an SSH destination. Reserved/duplicate names and follower leader-role conflicts are rejected before SSH. Staged registration uses contained, fingerprint-protected atomic publication. Invalid, stale, unsaved, canceled and discarded state does not overwrite bytes. Saving preserves parsed entries, not YAML comments/formatting; comment preservation is not a specified contract.
+  - Probe: argument-separated noninteractive SSH uses existing trust/credentials with no updates. Exactly one successful DNS hostname line (optional LF/CRLF/final dot) is accepted, independently of sanitized stderr warnings. Banners, malformed/control output and nonzero exits fail. Time/output bounds, process-group cancellation and stale-response exclusion are implemented and exercised.
+  - Replica: Local first, follower aliases separately; ordinary SSH/POSIX read-only inspection of the owned replica requires no remote Skillator/Git. Full Source/Skill document paths include SourceKey/_skills/SKILL.md. Missing, offline and unsafe inventories retain their tabs and diagnostics, never local substituted rows. Remote inventory mutations are blocked. Replica Action remains blank, so /pending does not invent work. Safe Ctrl+S exits with only local plans; no remote inventory plan can be staged. Normal follower Save explains read-only inventory and local registry plans.
+  - Navigation/rendering: Library/User/Repo ordering, right-aligned title, indexed bone/blue/purple borders, scoped directory/host strip, bottom scope/path status and narrow-title fallback implemented. Per-scope identities and browse state restore across navigation and reload. Without Repository tabs initial launch selects User; explicitly selecting Repo preserves its unavailable state, and invalid Git Repository configuration remains diagnostic-only.
+  - Directory chooser: shared Generic/Codex and Claude filter presets, unavailable configured choices, arrow selection, literal input, validated no-match custom paths, containment/collision errors, and deferred save. User/Repo keys, labels and enablements stay separate, with inherited Repo override behavior unchanged.
+  - Transitions/save: same-configuration sub-tabs preserve staged edits; scope/host/target changes guard dirty plans. Acquisition Save-and-switch goes through the ordinary review and resumes navigation only after success. Target changes preserve the existing Discard/Return picker flow; separate save remains available. Host and Library outcomes are separate, with no cross-file atomicity claim. Clean s still confirms and safe Ctrl+S exits.
+  
+  ## Observed evidence
+  
+  Pinned-toolchain cargo build and full repository preflight passed after final code edits: Clippy, all-target tests, doc tests, shell/workflow checks, filenames, OKF, twelve main specs and release safeguards. Native PTYs on Jetfire/macOS arm64 exercised 100x28, 140x35, 55x18 and 22x16 layouts with isolated HOME/Git checkout and a disposable trusted-key OpenSSH daemon. The SSH alias scope-peer reported Jetfire; save/restart restored both. A private remote PATH lacked Skillator/Git while inspection displayed the actual remote document. Final replica and SSH config/credential/trust file fingerprints were unchanged. ECHO/ICANON/ISIG, cursor and alternate-screen restoration were observed.
+  
+  Actual scenarios covered independent User/Repo presets/custom directories, save/undo scope restoration, inherited Repo link, scoped Tab wrapping, Ctrl+L return, full remote inspector, no false /pending work, warning/banner handling, cancellation/late-result exclusion, interrupted inspection resumption, stale/invalid registry preservation, missing/unmarked/offline replica handling, dirty Target/host guards and clean fast-save exit. Native before/after reproduction proved acquisition review cancellation moves nothing and only explicit review confirmation moves the disposable skill before switching scope.
+  
+  Actionable findings from both review axes are closed. Optional duplication/naming/test-maintainability heuristics are not contract violations. README, Help, remote guide, unsafe exception documentation and changelog describe implemented behavior, including Tab/Ctrl+L changes and removing hostname before downgrade.
+no_spec_deltas: false
+archive_tree: 1781815ec9ab1ee28136269dd526a7cdb69f24b9
+specs:
+  openspec/specs/library-hosts/spec.md: 0d1bb7bb0e3cca1a14a48fe1fa1d0301bfec0e43
+  openspec/specs/tui-workflows/spec.md: 8ed0a49d06f41b1602482c6f4cc5b2554126eb54
