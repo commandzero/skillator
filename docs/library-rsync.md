@@ -3,7 +3,7 @@ type: Playbook
 title: Deliver leader skills to follower libraries
 description: Configure leader pushes and fresh follower pulls with SSH and ordinary rsync.
 status: draft
-generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T19:46:52Z }
+generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T20:13:56Z }
 ---
 
 # Deliver leader skills to follower libraries
@@ -81,7 +81,7 @@ Every follower receives the same layout beneath `~/.skillator/library/replica`:
 
 For example, `local/library` plus `demo` becomes `local/library/_skills/demo/SKILL.md`. A skill at a Source root uses `_skills/SKILL.md`. Equal skill names from different Sources remain separate. Overlapping root/nested skills are rejected rather than merged ambiguously.
 
-Acquisition-link roots are materialized as ordinary usable directories. Self-contained relative internal links remain links and retain their source timestamps, so repeated fresh exports converge with rsync implementations that preserve link times; escaping or dangling links block delivery. Regular files preserve their executable modes. Export preparation uses read-only hard links where possible and copies across filesystem boundaries; it does not chmod or rewrite the leader's files or acquisition links.
+Acquisition-link roots are materialized as ordinary usable directories. Self-contained relative internal links remain links and retain their source timestamps, so repeated fresh exports converge with rsync implementations that preserve link times; escaping or dangling links block delivery. Regular files preserve their executable modes, and skill-root and supporting-directory modes are retained rather than widened by the export's umask. Export preparation uses read-only hard links where possible and copies data with the original modes and times whenever linking is unavailable, including readable files that reject same-filesystem links. Copies do not inherit immutable flags that would block staging or cleanup. The leader's files and acquisition links are not chmodded or rewritten.
 
 Only skill content moves. Git administrative files, unrelated repository files outside skill directories, Library and User Scope configuration, credentials, registries, and materializations are not exported. No Git checkout, revision alignment, origin fetch, or remote registration occurs. Follower Library and User Scope configuration are neither read nor changed by a pull, even when malformed.
 
@@ -91,9 +91,9 @@ The directory containing `SKILL.md` defines the skill-content boundary; all its 
 
 ## Ownership and deletion boundary
 
-Rsync overwrites follower content and removes stale files **only inside `~/.skillator/library/replica`**. Skillator creates that root with a regular `.skillator-rsync-owned` marker containing its fixed ownership signature. Existing unmarked roots, invalid markers, and symlinked root/ancestors are refused; they are not adopted. Both previews and delivery reject multiply linked regular files, including the marker, because rsync metadata updates could otherwise affect an inode outside the replica. Do not place unrelated content in an owned replica.
+Rsync overwrites follower content and removes stale files **only inside `~/.skillator/library/replica`**. Skillator creates that root with a regular `.skillator-rsync-owned` marker containing its fixed ownership signature. Existing unmarked roots, invalid markers, and symlinked root/ancestors are refused; they are not adopted. Both previews and delivery reject multiply linked regular files and symlinks, including the marker, because rsync metadata updates could otherwise affect an inode outside the replica. Do not place unrelated content in an owned replica.
 
-The remote receiver's home must resolve to an existing absolute directory without control characters. Its physical home path is normalized before checking or creating replica entries, so trailing slashes and redundant path components do not cause writes followed by a rejected path. Symlinks below that home remain forbidden.
+Both the remote receiver's home and an initiating follower's local home must resolve to an existing absolute directory without control characters. The physical home path is normalized before checking or creating replica entries, so trailing slashes and redundant path components are accepted consistently. Symlinks below that home remain forbidden.
 
 Other library locations, checkouts, home siblings, configurations, and user materializations are untouched. The marker is protected from rsync deletion. Content comparison uses checksums, so equal-size/equal-timestamp edits are still replaced. There is no background watcher.
 

@@ -423,27 +423,62 @@ fn unowned_or_redirected_remote_and_local_replicas_are_not_adopted() {
 
 #[test]
 fn multiply_linked_replica_files_are_rejected_before_push_or_pull_even_in_check_mode() {
-    for pull in [false, true] {
+    for (pull, link_entry) in [(false, false), (true, false), (false, true), (true, true)] {
         let fixture = Fixture::new();
         fs::set_permissions(fixture.source(), fs::Permissions::from_mode(0o755)).unwrap();
+        if link_entry {
+            symlink("SKILL.md", fixture.source().with_file_name("alias.md")).unwrap();
+        }
         fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
         if pull {
             fixture.configure_follower();
         }
         let outside = fixture.root.path().join("unrelated hard link");
         let original = fs::read(fixture.source()).unwrap();
-        fs::write(&outside, &original).unwrap();
-        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+        if link_entry {
+            fs::write(fixture.root.path().join("SKILL.md"), &original).unwrap();
+            symlink("SKILL.md", &outside).unwrap();
+        } else {
+            fs::write(&outside, &original).unwrap();
+            fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let old_time =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
         fs::File::open(&outside)
             .unwrap()
             .set_times(fs::FileTimes::new().set_modified(old_time))
             .unwrap();
-        let received = fixture.received(&fixture.follower);
+        let received = if link_entry {
+            fixture
+                .received(&fixture.follower)
+                .with_file_name("alias.md")
+        } else {
+            fixture.received(&fixture.follower)
+        };
         fs::remove_file(&received).unwrap();
-        fs::hard_link(&outside, &received).unwrap();
-        let original_metadata = fs::metadata(&outside).unwrap();
+        if link_entry {
+            assert!(
+                std::process::Command::new("touch")
+                    .args(["-h", "-t", "200001010000.00"])
+                    .arg(&outside)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(
+                std::process::Command::new("ln")
+                    .arg("-P")
+                    .arg(&outside)
+                    .arg(&received)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(fs::symlink_metadata(&received).unwrap().is_symlink());
+        } else {
+            fs::hard_link(&outside, &received).unwrap();
+        }
+        let original_metadata = fs::symlink_metadata(&outside).unwrap();
         for check in [true, false] {
             let args: &[&str] = match (pull, check) {
                 (false, true) => &["--hosts", "dev", "--check"],
@@ -458,7 +493,7 @@ fn multiply_linked_replica_files_are_rejected_before_push_or_pull_even_in_check_
             };
             let report = fixture.report(home, args, 1);
             assert_eq!(report["changes"][0]["outcome"], "failed");
-            let metadata = fs::metadata(&outside).unwrap();
+            let metadata = fs::symlink_metadata(&outside).unwrap();
             assert_eq!(fs::read(&outside).unwrap(), original);
             assert_eq!(fs::read(&received).unwrap(), original);
             assert_eq!(
@@ -956,4 +991,57 @@ fn unsupported_rsync_options_fail_before_replica_creation() {
         assert!(!fixture.spare.join(REPLICA).exists(), "{endpoint}");
         fixture.assert_exports_cleaned();
     }
+}
+
+#[test]
+fn local_home_variants_pull_into_the_same_physical_replica() {
+    let fixture = Fixture::new();
+    fixture.configure_follower();
+    let alias = fixture.root.path().join("follower alias");
+    symlink(&fixture.follower, &alias).unwrap();
+    let homes = [
+        PathBuf::from(format!("{}/", fixture.follower.display())),
+        PathBuf::from(format!("{}/../follower home/", fixture.follower.display())),
+        alias,
+    ];
+    for (index, home) in homes.iter().enumerate() {
+        fs::write(
+            fixture.source(),
+            format!("---\nname: demo\ndescription: A skill\n---\nleader-version-{index}\n"),
+        )
+        .unwrap();
+        let preview = fixture.report(home, &["--check"], 1);
+        assert_eq!(preview["changes"][0]["action"], "pull");
+        if index == 0 {
+            assert!(!fixture.follower.join(REPLICA).exists());
+        }
+        let applied = fixture.report(home, &[], 0);
+        assert_eq!(applied["changes"][0]["action"], "pull");
+        assert_eq!(
+            fs::read(fixture.received(&fixture.follower)).unwrap(),
+            fs::read(fixture.source()).unwrap()
+        );
+        assert!(fixture.follower.join(REPLICA).join(MARKER).is_file());
+        fixture.report(home, &["--check"], 0);
+    }
+    assert!(!fixture.spare.join(REPLICA).exists());
+    fixture.assert_exports_cleaned();
+}
+
+#[test]
+fn local_home_resolving_to_control_character_path_cannot_create_replica() {
+    let fixture = Fixture::new();
+    let physical = fixture.root.path().join("invalid\nhome");
+    fs::create_dir_all(physical.join(".skillator")).unwrap();
+    fs::write(
+        physical.join(".skillator/config.yaml"),
+        "version: 1\nleader: {destination: leader.internal}\n",
+    )
+    .unwrap();
+    let alias = fixture.root.path().join("invalid home alias");
+    symlink(&physical, &alias).unwrap();
+    fixture.report(&physical, &[], 1);
+    fixture.report(&alias, &[], 1);
+    assert!(!physical.join(REPLICA).exists());
+    fixture.assert_exports_cleaned();
 }

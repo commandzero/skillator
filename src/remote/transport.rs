@@ -118,7 +118,7 @@ pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica>
          else\n\
            echo 'replica is unmarked; move the unmanaged replica aside' >&2; exit 1\n\
          fi\n\
-         linked=$(find \"$root\" -type f -links +1 -print) || {{ echo 'cannot inspect replica for hard links' >&2; exit 1; }}\n\
+         linked=$(find \"$root\" \\( -type f -o -type l \\) -links +1 -print) || {{ echo 'cannot inspect replica for hard links' >&2; exit 1; }}\n\
          if [ -n \"$linked\" ]; then echo 'replica contains a multiply linked file; move the unmanaged replica aside' >&2; exit 1; fi\n\
          if [ \"$fresh\" = yes ]; then printf 'created\\n%s\\n' \"$root\"; else printf 'existing\\n%s\\n' \"$root\"; fi\n",
         if create { "yes" } else { "no" },
@@ -156,7 +156,7 @@ fn reject_linked_files(directory: &Path) -> Result<()> {
         let entry = entry.map_err(Error::input_display)?;
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(Error::input_display)?;
-        if metadata.is_file() && metadata.nlink() > 1 {
+        if (metadata.is_file() || metadata.is_symlink()) && metadata.nlink() > 1 {
             return Err(Error::input(format!(
                 "replica contains a multiply linked file at {}; move the unmanaged replica aside",
                 path.display()
@@ -170,13 +170,22 @@ fn reject_linked_files(directory: &Path) -> Result<()> {
 }
 
 pub(super) fn local_replica(home: &Path, create: bool) -> Result<Replica> {
-    if !checked_absolute(home) || !home.is_dir() {
-        return Err(Error::input(
-            "local HOME must be an existing absolute directory",
-        ));
+    let invalid_home = || Error::input("local HOME must be an existing absolute directory");
+    if !home.is_absolute()
+        || home
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .any(u8::is_ascii_control)
+    {
+        return Err(invalid_home());
+    }
+    let home = fs::canonicalize(home).map_err(|_| invalid_home())?;
+    if !checked_absolute(&home) || !home.is_dir() {
+        return Err(invalid_home());
     }
     let root = home.join(REPLICA_RELATIVE);
-    let mut part = home.to_path_buf();
+    let mut part = home;
     let mut created_root = false;
     for name in [".skillator", "library", "replica"] {
         part.push(name);

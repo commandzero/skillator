@@ -186,10 +186,8 @@ fn copy_skill(
     let canonical_root = source
         .canonicalize()
         .map_err(|error| io_error(source, error))?;
-    if !fs::metadata(source)
-        .map_err(|error| io_error(source, error))?
-        .is_dir()
-    {
+    let source_metadata = fs::metadata(source).map_err(|error| io_error(source, error))?;
+    if !source_metadata.is_dir() {
         return Err(Error::input(format!(
             "cannot export `{}`: skill root is not a directory",
             source.display()
@@ -210,6 +208,8 @@ fn copy_skill(
         .canonicalize()
         .map_err(|error| io_error(destination, error))?;
     validate_export_links(&canonical_destination, &canonical_destination)?;
+    fs::set_permissions(destination, source_metadata.permissions())
+        .map_err(|error| io_error(destination, error))?;
     Ok(())
 }
 
@@ -248,6 +248,8 @@ fn copy_children(
                 &child_relative,
                 exclusions,
             )?;
+            fs::set_permissions(&target, metadata.permissions())
+                .map_err(|error| io_error(&target, error))?;
         } else if kind.is_symlink() {
             let link_target = fs::read_link(&path).map_err(|error| io_error(&path, error))?;
             validate_internal_symlink(root, canonical_root, &path, &link_target)
@@ -265,11 +267,15 @@ fn copy_children(
         } else if kind.is_file() {
             // Opening the original also detects unreadable content even when the filesystem
             // permits creating a hard link. No second in-memory content snapshot is needed.
-            File::open(&path).map_err(|error| io_error(&path, error))?;
+            let mut input = File::open(&path).map_err(|error| io_error(&path, error))?;
             match fs::hard_link(&path, &target) {
                 Ok(()) => {}
-                Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
-                    fs::copy(&path, &target).map_err(|error| io_error(&path, error))?;
+                Err(_) => {
+                    // Copy data only: platform clone APIs can inherit immutable flags.
+                    let mut output =
+                        File::create_new(&target).map_err(|error| io_error(&target, error))?;
+                    std::io::copy(&mut input, &mut output)
+                        .map_err(|error| io_error(&path, error))?;
                     let mut times = FileTimes::new();
                     if let Ok(accessed) = metadata.accessed() {
                         times = times.set_accessed(accessed);
@@ -277,11 +283,11 @@ fn copy_children(
                     if let Ok(modified) = metadata.modified() {
                         times = times.set_modified(modified);
                     }
-                    File::open(&target)
-                        .and_then(|file| file.set_times(times))
+                    output
+                        .set_times(times)
+                        .and_then(|()| output.set_permissions(metadata.permissions()))
                         .map_err(|error| io_error(&target, error))?;
                 }
-                Err(error) => return Err(io_error(&path, error)),
             }
         } else {
             return Err(Error::input(format!(
@@ -377,6 +383,113 @@ mod tests {
                     .exists()
             );
         }
+    }
+
+    #[test]
+    fn private_acquisition_root_and_nested_directory_modes_survive_export() {
+        use std::os::unix::fs::symlink;
+
+        let (home, paths) = fixture(&["~/library"]);
+        let origin = home.path().join("origin/demo");
+        skill(&origin, "demo");
+        let nested = origin.join("private");
+        fs::create_dir(&nested).unwrap();
+        let data = nested.join("data.txt");
+        fs::write(&data, b"private content").unwrap();
+        symlink("data.txt", nested.join("alias.txt")).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&origin, fs::Permissions::from_mode(0o700)).unwrap();
+        let library = home.path().join("library");
+        fs::create_dir(&library).unwrap();
+        symlink(&origin, library.join("demo")).unwrap();
+
+        let original_root = fs::metadata(&origin).unwrap().permissions().mode();
+        let original_nested = fs::metadata(&nested).unwrap().permissions().mode();
+        let original_data = fs::metadata(&data).unwrap().permissions().mode();
+        let export = prepare(&paths).unwrap();
+        let projected = export.path().join("local/library/_skills/demo");
+        assert_eq!(
+            fs::read(projected.join("private/alias.txt")).unwrap(),
+            b"private content"
+        );
+        assert_eq!(
+            fs::metadata(&projected).unwrap().permissions().mode(),
+            original_root
+        );
+        assert_eq!(
+            fs::metadata(projected.join("private"))
+                .unwrap()
+                .permissions()
+                .mode(),
+            original_nested
+        );
+        assert_eq!(
+            fs::metadata(&origin).unwrap().permissions().mode(),
+            original_root
+        );
+        assert_eq!(
+            fs::metadata(&nested).unwrap().permissions().mode(),
+            original_nested
+        );
+        assert_eq!(
+            fs::metadata(&data).unwrap().permissions().mode(),
+            original_data
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn copies_readable_files_when_same_filesystem_hard_links_are_forbidden() {
+        struct ClearImmutable(PathBuf);
+        impl Drop for ClearImmutable {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("chflags")
+                    .arg("nouchg")
+                    .arg(&self.0)
+                    .status();
+            }
+        }
+
+        let (home, paths) = fixture(&["~/library"]);
+        let source = home.path().join("library/demo");
+        skill(&source, "demo");
+        let data = source.join("data.txt");
+        fs::write(&data, b"readable immutable file").unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o640)).unwrap();
+        let original = fs::metadata(&data).unwrap();
+        assert!(
+            std::process::Command::new("chflags")
+                .arg("uchg")
+                .arg(&data)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let _clear_immutable = ClearImmutable(data.clone());
+        let link_error =
+            fs::hard_link(&data, home.path().join("same-filesystem-link")).unwrap_err();
+        assert_eq!(link_error.raw_os_error(), Some(libc::EPERM));
+
+        let export = prepare(&paths).unwrap();
+        let copied = export.path().join("local/library/_skills/demo/data.txt");
+        assert_eq!(fs::read(&copied).unwrap(), b"readable immutable file");
+        assert_eq!(
+            fs::metadata(&copied).unwrap().permissions().mode(),
+            original.permissions().mode()
+        );
+        assert_eq!(
+            fs::metadata(&copied).unwrap().modified().unwrap(),
+            original.modified().unwrap()
+        );
+        assert_eq!(
+            fs::metadata(&data).unwrap().permissions().mode(),
+            original.permissions().mode()
+        );
+        assert_eq!(
+            fs::metadata(&data).unwrap().modified().unwrap(),
+            original.modified().unwrap()
+        );
     }
 
     #[test]
