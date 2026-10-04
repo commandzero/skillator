@@ -228,17 +228,17 @@ fn copy_children(
             continue;
         }
         let path = entry.path();
-        let target = destination.join(entry.file_name());
         let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
         let kind = metadata.file_type();
+        let child_relative = location_relative.join(entry.file_name());
+        if exclusions
+            .matched_path_or_any_parents(&child_relative, kind.is_dir())
+            .is_ignore()
+        {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
         if kind.is_dir() {
-            let child_relative = location_relative.join(entry.file_name());
-            if exclusions
-                .matched_path_or_any_parents(&child_relative, true)
-                .is_ignore()
-            {
-                continue;
-            }
             fs::create_dir(&target).map_err(|error| io_error(&target, error))?;
             copy_children(
                 root,
@@ -420,10 +420,16 @@ mod tests {
         skill(&source, "demo");
         fs::create_dir_all(source.join("ignored")).unwrap();
         fs::write(source.join("ignored/secret"), b"not exported").unwrap();
+        fs::write(source.join("secret.env"), b"not exported").unwrap();
+        std::os::unix::fs::symlink("kept.txt", source.join("secret-link")).unwrap();
         fs::write(source.join("kept.txt"), b"exported").unwrap();
         let config = LibraryConfig::new(vec![LibraryLocationConfig::new(
             "~/library".into(),
-            vec!["demo/ignored".into()],
+            vec![
+                "demo/ignored".into(),
+                "demo/secret.env".into(),
+                "demo/secret-link".into(),
+            ],
             false,
         )])
         .unwrap();
@@ -435,6 +441,8 @@ mod tests {
         let export = prepare(&paths).unwrap();
         let projected = export.path().join("local/library/_skills/demo");
         assert!(!projected.join("ignored").exists());
+        assert!(!projected.join("secret.env").exists());
+        assert!(!projected.join("secret-link").exists());
         assert_eq!(fs::read(projected.join("kept.txt")).unwrap(), b"exported");
         assert!(source.join("ignored/secret").is_file());
     }

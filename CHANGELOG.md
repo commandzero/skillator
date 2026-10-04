@@ -6,7 +6,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ### Added
 
-- Deliver only discovered skill directories—not whole registered repositories—to owned follower replicas: push from the authoritative leader or pull fresh content from a follower, with read-only previews and host-local selections (#38).
+- Deliver only discovered skill directories—not whole registered repositories—to owned follower replicas: push from the authoritative leader or pull fresh content, respecting file and subtree exclusions with prerequisite checks before writes, read-only previews, and host-local selections (#38).
 - Update Library repositories with fast-forward-only pulls using `skillator library update`, with a preview before making changes (#31).
 - Automatically synchronize newly populated linked worktrees with an opt-in Git hook installed by `skillator hook install` (#20).
 

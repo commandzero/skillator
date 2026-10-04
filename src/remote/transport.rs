@@ -2,7 +2,7 @@ use super::{EXPORT_PREFIX, Error, MARKER_CONTENT, MARKER_NAME, REPLICA_RELATIVE,
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub(super) struct Replica {
     pub path: PathBuf,
@@ -14,6 +14,9 @@ pub(super) enum Direction {
     Push,
     Pull,
 }
+
+const RSYNC_OPTIONS: &str = "-rltp --checksum --safe-links --delete-delay --omit-dir-times --exclude=/.skillator-rsync-owned --itemize-changes --out-format=%i";
+const RSYNC_PROBE_OPTIONS: &str = "--dry-run --list-only -- /dev/null";
 
 const SSH_OPTIONS: &[&str] = &[
     "-oBatchMode=yes",
@@ -60,11 +63,16 @@ fn checked_absolute(path: &Path) -> bool {
 }
 
 pub(super) fn check_rsync() -> Result<()> {
-    process::capture(Command::new("rsync").arg("--version"))
+    process::capture(
+        Command::new("rsync")
+            .args(RSYNC_OPTIONS.split_ascii_whitespace())
+            .args(RSYNC_PROBE_OPTIONS.split_ascii_whitespace())
+            .stdout(Stdio::null()),
+    )
         .map(|_| ())
         .map_err(|error| {
             Error::input(format!(
-                "rsync is not available locally; install it and add it to PATH: {error}"
+                "rsync is unavailable or lacks required transfer options; install/update it and add it to PATH: {error}"
             ))
         })
 }
@@ -76,9 +84,15 @@ pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica>
     let script = format!(
         "set -eu\n\
          command -v rsync >/dev/null 2>&1 || {{ echo 'rsync is not installed on receiver; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         rsync {RSYNC_OPTIONS} {RSYNC_PROBE_OPTIONS} >/dev/null || {{ echo 'receiver rsync lacks required transfer options; update rsync' >&2; exit 1; }}\n\
          case ${{HOME:-}} in /*) ;; *) echo 'receiver HOME is not absolute' >&2; exit 1;; esac\n\
-         root=$HOME/{REPLICA_RELATIVE}\n\
-         part=$HOME\n\
+         case $HOME in *[[:cntrl:]]*) echo 'receiver HOME contains control characters' >&2; exit 1;; esac\n\
+         home=$(CDPATH= cd -P \"$HOME\" && printf '%s/' \"$PWD\") || {{ echo 'receiver HOME is not an existing directory' >&2; exit 1; }}\n\
+         case $home in /*) ;; *) echo 'receiver HOME is not absolute' >&2; exit 1;; esac\n\
+         case $home in *[[:cntrl:]]*) echo 'receiver HOME contains control characters' >&2; exit 1;; esac\n\
+         home=${{home%/}}\n\
+         root=${{home%/}}/{REPLICA_RELATIVE}\n\
+         part=${{home%/}}\n\
          fresh=no\n\
          for name in .skillator library replica; do\n\
            part=$part/$name\n\
@@ -217,10 +231,14 @@ fn valid_export_path(path: &Path) -> bool {
 }
 
 pub(super) fn remote_export(destination: &str) -> Result<PathBuf> {
-    let output = ssh(
-        destination,
-        "set -eu\ncommand -v rsync >/dev/null 2>&1 || { echo 'rsync is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }\ncommand -v skillator >/dev/null 2>&1 || { echo 'Skillator is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }\nskillator library rsync --prepare-export\n",
-    )?;
+    let script = format!(
+        "set -eu\n\
+         command -v rsync >/dev/null 2>&1 || {{ echo 'rsync is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         rsync {RSYNC_OPTIONS} {RSYNC_PROBE_OPTIONS} >/dev/null || {{ echo 'leader rsync lacks required transfer options; update rsync' >&2; exit 1; }}\n\
+         command -v skillator >/dev/null 2>&1 || {{ echo 'Skillator is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         skillator library rsync --prepare-export\n",
+    );
+    let output = ssh(destination, &script)?;
     let path = String::from_utf8(output).map_err(Error::input_display)?;
     let Some(raw) = path.strip_suffix('\n') else {
         return Err(Error::input(
@@ -272,16 +290,7 @@ pub(super) fn rsync(
     let mut command = Command::new("rsync");
     // Keep old and new rsync implementations' remote path parsing consistent.
     command.env("RSYNC_OLD_ARGS", "1");
-    command.args([
-        "-rltp",
-        "--checksum",
-        "--safe-links",
-        "--delete-delay",
-        "--omit-dir-times",
-        "--exclude=/.skillator-rsync-owned",
-        "--itemize-changes",
-        "--out-format=%i",
-    ]);
+    command.args(RSYNC_OPTIONS.split_ascii_whitespace());
     if check {
         command.arg("--dry-run");
     }

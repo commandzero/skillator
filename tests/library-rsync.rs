@@ -533,7 +533,7 @@ fn retry_converges_after_rsync_failure_leaves_partial_owned_content() {
     let remote_rsync = fixture.root.path().join("receiver-bin/rsync");
     fs::remove_file(&remote_rsync).unwrap();
     fs::write(&remote_rsync, format!(
-        "#!/bin/sh\ncase \"$*\" in\n *--server*) mkdir -p \"$HOME/{REPLICA}/local/library/_skills/demo\"; printf partial > \"$HOME/{REPLICA}/{SKILL}\"; exit 12;;\n *) exec {} \"$@\";;\nesac\n", quote(&executable("rsync"))
+        "#!/bin/sh\ncase \"$*\" in\n *--sender*) exec {} \"$@\";;\n *--server*) mkdir -p \"$HOME/{REPLICA}/local/library/_skills/demo\"; printf partial > \"$HOME/{REPLICA}/{SKILL}\"; exit 12;;\n *) exec {} \"$@\";;\nesac\n", quote(&executable("rsync")), quote(&executable("rsync"))
     )).unwrap();
     fs::set_permissions(&remote_rsync, fs::Permissions::from_mode(0o755)).unwrap();
     fixture.report(&fixture.leader, &["--hosts", "dev"], 1);
@@ -760,4 +760,81 @@ fn registered_git_repository_delivers_only_skill_content_on_push_and_fresh_pull(
     );
     assert!(repository.join(".git/config").is_file());
     fixture.assert_exports_cleaned();
+}
+
+#[test]
+fn remote_home_is_normalized_before_replica_creation() {
+    let fixture = Fixture::new();
+    let adapter = fixture.root.path().join("bin/ssh");
+    let script = fs::read_to_string(&adapter).unwrap();
+    let home = PathBuf::from(format!("{}/../follower home/", fixture.follower.display()));
+    fs::write(
+        &adapter,
+        script.replace(&quote(&fixture.follower), &quote(&home)),
+    )
+    .unwrap();
+    fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
+    assert_eq!(
+        fs::read(fixture.received(&fixture.follower)).unwrap(),
+        fs::read(fixture.source()).unwrap()
+    );
+    fixture.report(&fixture.leader, &["--hosts", "dev", "--check"], 0);
+    fixture.assert_exports_cleaned();
+}
+
+#[test]
+fn remote_home_with_control_characters_is_rejected_without_replica_writes() {
+    let fixture = Fixture::new();
+    let adapter = fixture.root.path().join("bin/ssh");
+    let script = fs::read_to_string(&adapter).unwrap();
+    let home = fixture.follower.join("bad\nhome");
+    fs::create_dir(&home).unwrap();
+    fs::write(
+        &adapter,
+        script.replace(&quote(&fixture.follower), &quote(&home)),
+    )
+    .unwrap();
+    fixture.report(&fixture.leader, &["--hosts", "dev"], 1);
+    assert!(!home.join(".skillator").exists());
+    fixture.assert_exports_cleaned();
+}
+
+#[test]
+fn unsupported_rsync_options_fail_before_replica_creation() {
+    for endpoint in ["local", "receiver", "leader"] {
+        let fixture = Fixture::new();
+        let program = fixture.root.path().join(match endpoint {
+            "local" => "bin/rsync",
+            "receiver" => "receiver-bin/rsync",
+            "leader" => "leader-bin/rsync",
+            _ => unreachable!(),
+        });
+        if endpoint != "local" {
+            fs::remove_file(&program).unwrap();
+        }
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nfor argument do\n if [ \"$argument\" = --delete-delay ]; then echo 'unsupported rsync option: --delete-delay' >&2; exit 1; fi\ndone\nexec {} \"$@\"\n",
+                quote(&executable("rsync")),
+            ),
+        ).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        if endpoint == "local" {
+            fixture
+                .command(&fixture.leader)
+                .args(["library", "rsync", "--hosts", "dev", "--format", "json"])
+                .assert()
+                .code(3)
+                .stdout("");
+        } else if endpoint == "receiver" {
+            fixture.report(&fixture.leader, &["--hosts", "dev"], 1);
+        } else {
+            fixture.configure_follower();
+            fixture.report(&fixture.follower, &[], 1);
+        }
+        assert!(!fixture.follower.join(REPLICA).exists(), "{endpoint}");
+        assert!(!fixture.spare.join(REPLICA).exists(), "{endpoint}");
+        fixture.assert_exports_cleaned();
+    }
 }

@@ -3,7 +3,7 @@ type: Playbook
 title: Deliver leader skills to follower libraries
 description: Configure leader pushes and fresh follower pulls with SSH and ordinary rsync.
 status: draft
-generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T18:27:22Z }
+generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T19:20:58Z }
 ---
 
 # Deliver leader skills to follower libraries
@@ -38,6 +38,8 @@ skillator library rsync --hosts build,development
 
 A pushed-to follower needs SSH, a POSIX shell, and rsync on its noninteractive PATH. It does not need Skillator or Git and does not need a Library configuration.
 
+Before replica creation, both local and remote rsync executables must pass a write-free probe of the required transfer options, including `--delete-delay`. An executable that only answers `--version` is insufficient; update older rsync installations before retrying.
+
 ## Configure a follower that initiates pulls
 
 Create `~/.skillator/config.yaml` on that follower:
@@ -69,7 +71,7 @@ Use SSH configuration for ports, jump hosts, keys, and authentication. Establish
 
 ## Inventory and replica layout
 
-The leader exports every discovered valid skill, including hidden and unselected skills, with its complete supporting files. Location exclusions apply. Unavailable Locations, invalid skills, ambiguous Source Keys, overlapping skill exports, unreadable content, and unsupported entries block the export before replica mutation. An explicitly configured, available empty library can remove stale replica skills; missing or inaccessible input cannot authorize deletion.
+The leader exports every discovered valid skill, including hidden and unselected skills, with its complete supporting files. Location exclusions apply to directories, regular files, and symlinks, including supporting content inside a skill. Unavailable Locations, invalid skills, ambiguous Source Keys, overlapping skill exports, unreadable content, and unsupported entries block the export before replica mutation. An explicitly configured, available empty library can remove stale replica skills; missing or inaccessible input cannot authorize deletion.
 
 Every follower receives the same layout beneath `~/.skillator/library/replica`:
 
@@ -90,6 +92,8 @@ The directory containing `SKILL.md` defines the skill-content boundary; all its 
 ## Ownership and deletion boundary
 
 Rsync overwrites follower content and removes stale files **only inside `~/.skillator/library/replica`**. Skillator creates that root with a regular `.skillator-rsync-owned` marker containing its fixed ownership signature. Existing unmarked roots, invalid markers, and symlinked root/ancestors are refused; they are not adopted. Do not place unrelated content in an owned replica.
+
+The remote receiver's home must resolve to an existing absolute directory without control characters. Its physical home path is normalized before checking or creating replica entries, so trailing slashes and redundant path components do not cause writes followed by a rejected path. Symlinks below that home remain forbidden.
 
 Other library locations, checkouts, home siblings, configurations, and user materializations are untouched. The marker is protected from rsync deletion. Content comparison uses checksums, so equal-size/equal-timestamp edits are still replaced. There is no background watcher.
 
