@@ -110,12 +110,14 @@ fn replica_script(expected_root: Option<&Path>) -> Result<String> {
     let expected_root = expected_root
         .map(|path| path_text(path).map(shell_quote))
         .transpose()?;
+    let linked_files = r"\( -type f -o -type l \) -links +1 -print";
     Ok(format!(
         "set -eu\n\
          command -v rsync >/dev/null 2>&1 || {{ echo 'rsync is not installed on receiver; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
          for utility in {}; do\n\
            command -v \"$utility\" >/dev/null 2>&1 || {{ echo \"$utility is not installed on receiver; install it and add it to the SSH shell PATH\" >&2; exit 1; }}\n\
          done\n\
+         find /dev/null {linked_files} >/dev/null || {{ echo 'receiver find lacks required hard-link predicates; install a compatible POSIX find' >&2; exit 1; }}\n\
          rsync {RSYNC_OPTIONS} {RSYNC_PROBE_OPTIONS} >/dev/null || {{ echo 'receiver rsync lacks required transfer options; update rsync' >&2; exit 1; }}\n\
          case ${{HOME:-}} in /*) ;; *) echo 'receiver HOME is not absolute' >&2; exit 1;; esac\n\
          case $HOME in *[[:cntrl:]]*) echo 'receiver HOME contains control characters' >&2; exit 1;; esac\n\
@@ -171,7 +173,7 @@ fn replica_script(expected_root: Option<&Path>) -> Result<String> {
              rollback_root marker\n\
            fi\n\
          fi\n\
-         linked=$(find \"$root\" \\( -type f -o -type l \\) -links +1 -print) || {{ echo 'cannot inspect replica for hard links' >&2; exit 1; }}\n\
+         linked=$(find \"$root\" {linked_files}) || {{ echo 'cannot inspect replica for hard links' >&2; exit 1; }}\n\
          if [ -n \"$linked\" ]; then echo 'replica contains a multiply linked file; move the unmanaged replica aside' >&2; exit 1; fi\n\
          if [ {} = no ]; then printf 'existing\\n%s\\n' \"$root\"; fi\n",
         if creating {

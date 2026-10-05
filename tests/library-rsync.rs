@@ -1471,6 +1471,39 @@ fn missing_rollback_utilities_block_fresh_replica_creation() {
 }
 
 #[test]
+fn unsupported_receiver_find_predicate_blocks_fresh_replica_writes() {
+    let fixture = Fixture::new();
+    let find = fixture.root.path().join("receiver-bin/find");
+    fs::remove_file(&find).unwrap();
+    fs::write(
+        &find,
+        format!(
+            "#!/bin/sh\nfor argument do\n if [ \"$argument\" = -links ]; then printf 'unsupported find predicate\\n' >&2; exit 2; fi\ndone\nexec {} \"$@\"\n",
+            quote(&executable("find")),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&find, fs::Permissions::from_mode(0o755)).unwrap();
+    let original = fs::read(fixture.source()).unwrap();
+    for args in [&["--hosts", "dev", "--check"][..], &["--hosts", "dev"][..]] {
+        let report = fixture.report(&fixture.leader, args, 1);
+        assert_eq!(report["changes"][0]["outcome"], "failed");
+        assert!(!fixture.follower.join(".skillator").exists());
+        assert_eq!(fs::read(fixture.source()).unwrap(), original);
+        fixture.assert_exports_cleaned();
+    }
+    fs::remove_file(&find).unwrap();
+    symlink(executable("find"), &find).unwrap();
+    fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
+    assert_eq!(
+        fs::read(fixture.received(&fixture.follower)).unwrap(),
+        original
+    );
+    fixture.report(&fixture.leader, &["--hosts", "dev", "--check"], 0);
+    fixture.assert_exports_cleaned();
+}
+
+#[test]
 fn rsync_ambiguous_destinations_fail_before_connection_or_replica_writes() {
     for destination in [
         "local:prod",

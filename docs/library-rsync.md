@@ -40,6 +40,8 @@ A pushed-to follower needs SSH, a POSIX shell, rsync, and POSIX `find`, `cmp`, a
 
 Before replica creation, both local and remote rsync executables must pass a write-free probe of the required transfer options, including `--delete-delay`. An executable that only answers `--version` is insufficient; update older rsync installations before retrying.
 
+Receiver `find` must also pass a write-free probe of the same regular-file/symlink and `-links +1` predicates used for inode safety. Finding an executable on PATH is insufficient. The probe runs before any replica directory or ownership marker is created, including when inspection reports an absent replica.
+
 ## Configure a follower that initiates pulls
 
 Create `~/.skillator/config.yaml` on that follower:
