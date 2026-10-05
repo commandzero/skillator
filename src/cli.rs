@@ -68,6 +68,11 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum LibraryCommand {
+    /// Push leader skills to followers, or pull from this follower's leader.
+    #[command(
+        long_about = "Deliver the leader's current skills using rsync over SSH. On the leader, push to configured followers; on a follower, pull from its configured leader. Leader content replaces follower edits and removes stale files only inside ~/.skillator/library/replica. User selections and materializations stay host-local."
+    )]
+    Rsync(RsyncArgs),
     /// Add a directory of skills to the Library.
     Add {
         location: String,
@@ -221,6 +226,20 @@ struct OutputArgs {
     /// Choose when to use color in text output.
     #[arg(long, value_enum)]
     color: Option<ColorPolicy>,
+}
+
+#[derive(Debug, clap::Args)]
+struct RsyncArgs {
+    /// On the leader, select follower aliases. Defaults to all configured followers.
+    #[arg(long, value_name = "ALIAS,...")]
+    hosts: Option<String>,
+    /// Preview delivery without changing the follower replica.
+    #[arg(long)]
+    check: bool,
+    #[arg(long, hide = true, conflicts_with_all = ["hosts", "check", "format", "color"])]
+    prepare_export: bool,
+    #[command(flatten)]
+    output: OutputArgs,
 }
 
 #[derive(Debug, clap::Args)]
@@ -388,6 +407,35 @@ fn validate_output(output: &OutputArgs) -> Result<(), ExitCode> {
 
 fn run_library_command(paths: &AppPaths, command: LibraryCommand) -> ExitCode {
     match command {
+        LibraryCommand::Rsync(arguments) => {
+            if arguments.prepare_export {
+                let mut stdout = std::io::stdout().lock();
+                return match crate::remote::prepare_export(paths, &mut stdout) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => diagnostic(error.code, &error.to_string()),
+                };
+            }
+            if let Err(code) = validate_output(&arguments.output) {
+                return code;
+            }
+            let options = crate::remote::Options {
+                hosts: arguments.hosts,
+                check: arguments.check,
+            };
+            match crate::remote::run(paths, options) {
+                Ok(report) => {
+                    let rendered = match arguments.output.format {
+                        OutputFormat::Text => Ok(report.text_with_color(color_enabled(
+                            arguments.output.color.unwrap_or(ColorPolicy::Auto),
+                        ))),
+                        OutputFormat::Json => render_json(&report),
+                        OutputFormat::Yaml => render_serialized_yaml(&report),
+                    };
+                    write_rendered(rendered, report.exit_status)
+                }
+                Err(error) => diagnostic(error.code, &error.to_string()),
+            }
+        }
         LibraryCommand::Update(arguments) => {
             if let Err(code) = validate_output(&arguments.output.output) {
                 return code;
@@ -953,14 +1001,8 @@ fn diagnostic(code: u8, message: &str) -> ExitCode {
     ExitCode::from(code)
 }
 
-pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
-    if report.mode == "library_update" || report.mode == "library_update_check" {
-        return crate::library_update::render_text(
-            report,
-            is_terminal::is_terminal(std::io::stdout()),
-        );
-    }
-    let color = match color {
+fn color_enabled(color: ColorPolicy) -> bool {
+    match color {
         ColorPolicy::Always => true,
         ColorPolicy::Never => false,
         ColorPolicy::Auto => {
@@ -968,7 +1010,17 @@ pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
                 && std::env::var_os("TERM").is_none_or(|term| term != "dumb")
                 && std::env::var_os("NO_COLOR").is_none()
         }
-    };
+    }
+}
+
+pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
+    if report.mode == "library_update" || report.mode == "library_update_check" {
+        return crate::library_update::render_text(
+            report,
+            is_terminal::is_terminal(std::io::stdout()),
+        );
+    }
+    let color = color_enabled(color);
     if report.status == ReportStatus::InSync
         && report.changes.is_empty()
         && report.diagnostics.is_empty()

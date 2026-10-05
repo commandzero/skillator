@@ -3,7 +3,7 @@ type: Playbook
 title: Contributing
 description: Local validation, pull-request checks, and contribution rules.
 status: draft
-generated: { by: codex/gpt-6, at: 2026-09-07T06:07:29Z }
+generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T20:54:56Z }
 ---
 
 # Contributing
@@ -17,7 +17,7 @@ bash scripts/preflight.sh
 ```
 
 Setup installs pinned Actionlint, OpenSpec, and OKF under the ignored `.tools` directory.
-ShellCheck and ripgrep must be on PATH. Rustup selects Rust 1.97.1 even when a system Cargo comes first on PATH.
+ShellCheck, ripgrep, Git, and rsync must be on PATH. Rsync must support `--delete-delay`; install a current rsync when an older system copy lacks it. Rustup selects Rust 1.97.1 even when a system Cargo comes first on PATH.
 
 The full preflight runs formatting, strict Clippy, locked behavior tests, library doctests, shell and workflow checks, documentation-bundle validation, main-spec validation, and repository-tool tests.
 Preflight runs Rust tests serially within each test binary. Parallel tests that write executable fixtures and spawn subprocesses can briefly retain writable descriptors across a fork on Linux, causing `Text file busy` when another test executes a new hook. CI platform jobs still run in parallel.
@@ -42,7 +42,7 @@ Changes to broader draft standards do not silently change this contract.
 Keep the product as one crate until a real consumer or dependency boundary justifies a split.
 The repository checker is a Cargo example using existing development dependencies; it adds no installed command.
 
-Unsafe code is denied by default. The private filesystem module calls atomic rename APIs absent from the standard library.
+Unsafe code is denied by default. The private filesystem module uses atomic rename APIs and `utimensat(..., AT_SYMLINK_NOFOLLOW)` absent from the standard library's safe filesystem interfaces. The no-follow operation preserves exported link timestamps without changing their targets. Library delivery uses ordinary SSH and rsync without descriptor-binding or a custom remote server.
 The private update-process module uses POSIX signal handlers, process-group signals, and nonblocking pipe flags to bound Git pull subprocesses.
 Keep CString lifetime, signal ownership, descriptor lifetime, and platform-flag safety explanations next to each unsafe block. Expand this exception only with a documented need and focused behavior tests.
 
