@@ -36,7 +36,7 @@ skillator library rsync
 skillator library rsync --hosts build,development
 ```
 
-A pushed-to follower needs SSH, a POSIX shell, rsync, and POSIX `find`, `cmp`, and `mkdir` on its noninteractive PATH. These dependencies are checked before any replica writes. It does not need Skillator or Git and does not need a Library configuration.
+A pushed-to follower needs SSH, a POSIX shell, rsync, and POSIX `find`, `cmp`, and `mkdir` on its noninteractive PATH. Creating a fresh replica also requires `rm` and `rmdir` for marker-failure cleanup. Each dependency is checked before the operation that needs it makes replica writes. The follower does not need Skillator or Git and does not need a Library configuration.
 
 Before replica creation, both local and remote rsync executables must pass a write-free probe of the required transfer options, including `--delete-delay`. An executable that only answers `--version` is insufficient; update older rsync installations before retrying.
 
@@ -95,15 +95,21 @@ The directory containing `SKILL.md` defines the skill-content boundary; all its 
 
 Rsync overwrites follower content and removes stale files **only inside `~/.skillator/library/replica`**. Skillator creates that root with a regular `.skillator-rsync-owned` marker containing its fixed ownership signature. Existing unmarked roots, invalid markers, and symlinked root/ancestors are refused; they are not adopted. Both previews and delivery reject multiply linked regular files and symlinks, including the marker, because rsync metadata updates could otherwise affect an inode outside the replica. Do not place unrelated content in an owned replica.
 
+If ownership-marker initialization fails for a newly created replica, Skillator removes only its own partial marker and empty root so a healthy retry can create the replica normally. Foreign markers and unrelated contents are preserved. Cleanup failures report the original error and retained root on stderr.
+
 Both the remote receiver's home and an initiating follower's local home must resolve to an existing absolute directory without control characters. The physical home path is normalized before checking or creating replica entries, so trailing slashes and redundant path components are accepted consistently. The local follower HOME and the generated leader export path must be representable as UTF-8 in both their configured and physical forms; unsupported paths fail before local replica creation or export publication. Symlinks below that home remain forbidden.
+
+Remote replica inspection is read-only. Skillator validates its complete UTF-8 response and canonical physical root before a separate creation call. Creation rechecks the physical home and replica ancestors and refuses to write if the root changed since inspection. Unsolicited inspection output and non-UTF-8 physical receiver homes therefore fail before receiver directory creation.
 
 Other library locations, checkouts, home siblings, configurations, and user materializations are untouched. The marker is protected from rsync deletion. Content comparison uses checksums, so equal-size/equal-timestamp edits are still replaced. There is no background watcher.
 
 ## Preview, reports, and retry
 
-`--check` prepares a temporary leader export but performs no persistent library, replica, marker, or configuration writes. Missing replicas are reported as pending without creating them. Fresh export directory timestamps and marker timestamps do not produce false pending changes; internal link timestamps are preserved from the source. The export is removed after previews and pulls, including transfer failure.
+`--check` prepares a temporary leader export but performs no persistent library, replica, marker, or configuration writes. Missing replicas are reported as pending without creating them. Fresh export directory timestamps and marker timestamps do not produce false pending changes; internal link timestamps are preserved from the source. Validated exports are removed after previews and pulls, including transfer failure.
 
 Read-only skill directories retain their source modes during transfer. Before deleting a temporary export, cleanup grants owner access only to its physical directories; it does not follow links or chmod files that may share leader inodes. Ordinary preparation errors use the same cleanup, so a partially built read-only export is removed rather than silently retained. The leader helper also cleans its export if publishing the path fails, including a broken stdout or SSH connection. If cleanup fails, stderr reports both the original failure and the retained export path.
+
+If the leader helper published an export path but a subsequent physical validation call fails, stderr names the candidate export that may remain for manual inspection. Skillator refuses to delete that path until its location and ownership are validated.
 
 Text reports distinguish push and pull. JSON and YAML retain the normal report envelope with `mode: library_rsync`; changes use follower aliases or `leader`, `push`/`pull` actions, and the home-relative replica path. Cleanup diagnostics identify `leader` even when the transfer needed no changes. Network addresses and temporary export paths are not inserted into machine reports. Child diagnostics go to stderr.
 

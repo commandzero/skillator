@@ -104,14 +104,16 @@ pub(super) fn check_rsync(ipv6: bool) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica> {
-    // A missing destination is not created during preview; rsync dry-run is only
-    // necessary when there is an existing, marked destination to compare.
+fn replica_script(expected_root: Option<&Path>) -> Result<String> {
+    let creating = expected_root.is_some();
     let marker_content = shell_quote(MARKER_CONTENT);
-    let script = format!(
+    let expected_root = expected_root
+        .map(|path| path_text(path).map(shell_quote))
+        .transpose()?;
+    Ok(format!(
         "set -eu\n\
          command -v rsync >/dev/null 2>&1 || {{ echo 'rsync is not installed on receiver; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
-         for utility in find cmp mkdir; do\n\
+         for utility in {}; do\n\
            command -v \"$utility\" >/dev/null 2>&1 || {{ echo \"$utility is not installed on receiver; install it and add it to the SSH shell PATH\" >&2; exit 1; }}\n\
          done\n\
          rsync {RSYNC_OPTIONS} {RSYNC_PROBE_OPTIONS} >/dev/null || {{ echo 'receiver rsync lacks required transfer options; update rsync' >&2; exit 1; }}\n\
@@ -122,6 +124,7 @@ pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica>
          case $home in *[[:cntrl:]]*) echo 'receiver HOME contains control characters' >&2; exit 1;; esac\n\
          home=${{home%/}}\n\
          root=${{home%/}}/{REPLICA_RELATIVE}\n\
+         if [ {creation} = yes ] && [ \"$root\" != {expected_root} ]; then echo 'receiver HOME or replica root changed since inspection' >&2; exit 1; fi\n\
          part=${{home%/}}\n\
          fresh=no\n\
          for name in .skillator library replica; do\n\
@@ -138,22 +141,55 @@ pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica>
            fi\n\
          done\n\
          marker=$root/{MARKER_NAME}\n\
-         if [ -e \"$marker\" ] || [ -L \"$marker\" ]; then\n\
-           if [ -L \"$marker\" ] || [ ! -f \"$marker\" ] || ! printf %s {marker_content} | cmp - \"$marker\" >/dev/null 2>&1; then\n\
+         rollback_root() {{\n\
+           if [ \"$1\" = marker ]; then\n\
+             rm -- \"$marker\" || echo \"cannot remove partial replica marker at $marker\" >&2\n\
+           fi\n\
+           rmdir -- \"$root\" || echo \"newly created replica root retained at $root; remove it after inspection before retrying\" >&2\n\
+           exit 1\n\
+         }}\n\
+         if [ \"$fresh\" = yes ]; then\n\
+           if [ -e \"$marker\" ] || [ -L \"$marker\" ]; then\n\
+             echo 'replica ownership marker appeared during creation; refusing to replace it' >&2\n\
+             rollback_root no-marker\n\
+           fi\n\
+         elif [ -e \"$marker\" ] || [ -L \"$marker\" ]; then\n\
+           if [ -L \"$marker\" ] || [ ! -f \"$marker\" ] || ! printf %s {} | cmp - \"$marker\" >/dev/null 2>&1; then\n\
              echo 'replica ownership marker is invalid; move the unmanaged replica aside' >&2; exit 1\n\
            fi\n\
-         elif [ \"$fresh\" = yes ]; then\n\
-           printf %s {marker_content} > \"$marker\"\n\
          else\n\
            echo 'replica is unmarked; move the unmanaged replica aside' >&2; exit 1\n\
          fi\n\
+         if [ {} = yes ]; then\n\
+           if [ \"$fresh\" != yes ]; then echo 'replica root changed since inspection; refusing creation' >&2; exit 1; fi\n\
+           if ! (set -C; : > \"$marker\"); then\n\
+             echo \"cannot create replica ownership marker at $marker\" >&2\n\
+             rollback_root no-marker\n\
+           fi\n\
+           if ! printf %s {} > \"$marker\"; then\n\
+             echo \"cannot write replica ownership marker at $marker\" >&2\n\
+             rollback_root marker\n\
+           fi\n\
+         fi\n\
          linked=$(find \"$root\" \\( -type f -o -type l \\) -links +1 -print) || {{ echo 'cannot inspect replica for hard links' >&2; exit 1; }}\n\
          if [ -n \"$linked\" ]; then echo 'replica contains a multiply linked file; move the unmanaged replica aside' >&2; exit 1; fi\n\
-         if [ \"$fresh\" = yes ]; then printf 'created\\n%s\\n' \"$root\"; else printf 'existing\\n%s\\n' \"$root\"; fi\n",
-        if create { "yes" } else { "no" },
-    );
-    // The receiver only creates the marker when it created the replica root.
-    let output = ssh(destination, &script)?;
+         if [ {} = no ]; then printf 'existing\\n%s\\n' \"$root\"; fi\n",
+        if creating {
+            "find cmp mkdir rm rmdir"
+        } else {
+            "find cmp mkdir"
+        },
+        if creating { "yes" } else { "no" },
+        marker_content,
+        if creating { "yes" } else { "no" },
+        marker_content,
+        if creating { "yes" } else { "no" },
+        expected_root = expected_root.as_deref().unwrap_or("''"),
+        creation = if creating { "yes" } else { "no" },
+    ))
+}
+
+fn inspected_replica(output: Vec<u8>) -> Result<Replica> {
     let text = String::from_utf8(output).map_err(Error::input_display)?;
     let (status, raw) = text
         .strip_suffix('\n')
@@ -164,18 +200,26 @@ pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica>
         return Err(Error::input("receiver returned an invalid replica path"));
     }
     match status {
-        "existing" | "created" => Ok(Replica {
+        "existing" | "absent" => Ok(Replica {
             path,
-            exists: true,
-            created: status == "created",
-        }),
-        "absent" if !create => Ok(Replica {
-            path,
-            exists: false,
+            exists: status == "existing",
             created: false,
         }),
         _ => Err(Error::input("receiver returned an invalid replica state")),
     }
+}
+
+pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica> {
+    // Validate the complete read-only inspection response before creating anything.
+    let mut replica = inspected_replica(ssh(destination, &replica_script(None)?)?)?;
+    if create && !replica.exists {
+        // The creation script checks its physical root against the inspected
+        // path before any writes. It emits no response requiring validation.
+        ssh(destination, &replica_script(Some(&replica.path))?)?;
+        replica.exists = true;
+        replica.created = true;
+    }
+    Ok(replica)
 }
 
 fn reject_linked_files(directory: &Path) -> Result<()> {
@@ -196,6 +240,29 @@ fn reject_linked_files(directory: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn rollback_local_marker(root: &Path, marker: &Path, owned_marker: bool, failure: Error) -> Error {
+    use std::fmt::Write as _;
+
+    let mut message = failure.to_string();
+    if owned_marker && let Err(error) = fs::remove_file(marker) {
+        write!(
+            message,
+            "; cannot remove partial replica marker at {}: {error}",
+            marker.display()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    if let Err(error) = fs::remove_dir(root) {
+        write!(
+            message,
+            "; newly created replica root retained at {}: {error}",
+            root.display()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    Error::input(message)
 }
 
 pub(super) fn local_replica(home: &Path, create: bool) -> Result<Replica> {
@@ -246,14 +313,28 @@ pub(super) fn local_replica(home: &Path, create: bool) -> Result<Replica> {
     let marker = root.join(MARKER_NAME);
     match fs::symlink_metadata(&marker) {
         Ok(meta) => {
-            if !meta.is_file()
-                || meta.file_type().is_symlink()
-                || fs::read(&marker).map_err(Error::input_display)? != MARKER_CONTENT.as_bytes()
-            {
-                return Err(Error::input(format!(
+            let valid = if !meta.is_file() || meta.file_type().is_symlink() {
+                false
+            } else {
+                fs::read(&marker).map_err(|error| {
+                    let failure = Error::input_display(error);
+                    if created_root {
+                        rollback_local_marker(&root, &marker, false, failure)
+                    } else {
+                        failure
+                    }
+                })? == MARKER_CONTENT.as_bytes()
+            };
+            if !valid {
+                let failure = Error::input(format!(
                     "replica ownership marker is invalid at {}; move the unmanaged replica aside",
                     root.display()
-                )));
+                ));
+                return Err(if created_root {
+                    rollback_local_marker(&root, &marker, false, failure)
+                } else {
+                    failure
+                });
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && created_root => {
@@ -261,15 +342,32 @@ pub(super) fn local_replica(home: &Path, create: bool) -> Result<Replica> {
                 .write(true)
                 .create_new(true)
                 .open(&marker)
-                .map_err(Error::input_display)?;
-            file.write_all(MARKER_CONTENT.as_bytes())
-                .map_err(Error::input_display)?;
+                .map_err(|error| {
+                    rollback_local_marker(&root, &marker, false, Error::input_display(error))
+                })?;
+            if let Err(error) = file.write_all(MARKER_CONTENT.as_bytes()) {
+                drop(file);
+                return Err(rollback_local_marker(
+                    &root,
+                    &marker,
+                    true,
+                    Error::input_display(error),
+                ));
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(Error::input(format!(
                 "replica is unmarked at {}; move the unmanaged replica aside",
                 root.display()
             )));
+        }
+        Err(error) if created_root => {
+            return Err(rollback_local_marker(
+                &root,
+                &marker,
+                false,
+                Error::input_display(error),
+            ));
         }
         Err(error) => return Err(Error::input_display(error)),
     }
@@ -337,8 +435,16 @@ pub(super) fn remote_export(destination: &str) -> Result<PathBuf> {
         ));
     }
     // Validate the same physical parent, directory and marker used for cleanup
-    // before handing the leader's path to rsync.
-    ssh(destination, &validated_export_script(&path)?)?;
+    // before handing the leader's path to rsync. A failed validation cannot
+    // safely authorize cleanup, so expose the retained path for manual recovery.
+    validated_export_script(&path)
+        .and_then(|script| ssh(destination, &script).map(|_| ()))
+        .map_err(|error| {
+            Error::input(format!(
+                "leader export may remain at {} after physical validation failed: {error}; refusing cleanup",
+                path.display()
+            ))
+        })?;
     Ok(path)
 }
 
@@ -447,6 +553,90 @@ mod tests {
         ] {
             assert!(!valid_destination(destination), "accepted {destination}");
         }
+    }
+
+    #[test]
+    fn receiver_inspection_requires_one_utf8_fixed_root_and_valid_state() {
+        let root = b"/home/a/.skillator/library/replica";
+        for response in [
+            b"absent\n/home/a/.skillator/library/replica\nextra\n".as_slice(),
+            b"created\n/home/a/.skillator/library/replica\n",
+            b"absent\n/home/a/.skillator/library/replica",
+            b"absent\n/home/a/../a/.skillator/library/replica\n",
+            b"absent\n/home/a/other\n",
+            b"absent\nrelative/.skillator/library/replica\n",
+            b"absent\n/home/a/.skillator/library/replica\n\xff",
+        ] {
+            assert!(inspected_replica(response.to_vec()).is_err());
+        }
+        let mut response = b"absent\n".to_vec();
+        response.extend_from_slice(root);
+        response.push(b'\n');
+        let replica = inspected_replica(response).unwrap();
+        assert!(!replica.exists);
+        assert!(!replica.created);
+        assert_eq!(
+            replica.path,
+            Path::new("/home/a/.skillator/library/replica")
+        );
+    }
+
+    #[test]
+    fn receiver_creation_requires_the_previously_inspected_physical_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let changed_home = temp.path().join("changed");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(&changed_home).unwrap();
+        let run = |home: &Path, expected: Option<&Path>| {
+            process::capture(
+                Command::new("sh")
+                    .arg("-c")
+                    .arg(replica_script(expected).unwrap())
+                    .env("HOME", home),
+            )
+        };
+
+        let inspection = inspected_replica(run(&home, None).unwrap()).unwrap();
+        assert!(!inspection.exists);
+        assert!(!home.join(".skillator").exists());
+        assert!(run(&changed_home, Some(&inspection.path)).is_err());
+        assert!(!changed_home.join(".skillator").exists());
+        assert!(run(&home, Some(&changed_home.join(REPLICA_RELATIVE))).is_err());
+        assert!(!home.join(".skillator").exists());
+
+        run(&home, Some(&inspection.path)).unwrap();
+        assert_eq!(
+            fs::read(inspection.path.join(MARKER_NAME)).unwrap(),
+            MARKER_CONTENT.as_bytes()
+        );
+        assert!(inspected_replica(run(&home, None).unwrap()).unwrap().exists);
+        assert!(run(&home, Some(&inspection.path)).is_err());
+    }
+
+    #[test]
+    fn local_marker_rollback_removes_only_its_own_partial_marker_and_empty_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("replica");
+        let marker = root.join(MARKER_NAME);
+        let failure = || Error::input("marker write failed");
+        fs::create_dir(&root).unwrap();
+        fs::write(&marker, "partial").unwrap();
+        let error = rollback_local_marker(&root, &marker, true, failure());
+        assert!(error.to_string().contains("marker write failed"));
+        assert!(!root.exists());
+
+        fs::create_dir(&root).unwrap();
+        fs::write(&marker, "foreign marker").unwrap();
+        let error = rollback_local_marker(&root, &marker, false, failure());
+        assert!(error.to_string().contains("marker write failed"));
+        assert!(error.to_string().contains("root retained"));
+        assert_eq!(fs::read(&marker).unwrap(), b"foreign marker");
+        fs::remove_file(&marker).unwrap();
+        fs::write(root.join("unrelated"), "keep").unwrap();
+        let error = rollback_local_marker(&root, &marker, false, failure());
+        assert!(error.to_string().contains("root retained"));
+        assert_eq!(fs::read(root.join("unrelated")).unwrap(), b"keep");
     }
 
     #[cfg(target_os = "linux")]

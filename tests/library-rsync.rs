@@ -49,7 +49,7 @@ impl Fixture {
         ] {
             fs::create_dir_all(directory).unwrap();
         }
-        for name in ["rsync", "mkdir", "cmp", "rm", "find"] {
+        for name in ["rsync", "mkdir", "cmp", "rm", "rmdir", "find"] {
             let program = executable(name);
             symlink(&program, receiver_bin.join(name)).unwrap();
             symlink(&program, leader_bin.join(name)).unwrap();
@@ -950,6 +950,207 @@ fn remote_home_is_normalized_before_replica_creation() {
     fixture.report(&fixture.leader, &["--hosts", "dev", "--check"], 0);
     fixture.assert_exports_cleaned();
 }
+#[test]
+fn unsolicited_receiver_stdout_cannot_create_a_fresh_replica() {
+    for args in [&["--hosts", "dev", "--check"][..], &["--hosts", "dev"][..]] {
+        let fixture = Fixture::new();
+        let adapter = fixture.root.path().join("bin/ssh");
+        let script = fs::read_to_string(&adapter).unwrap();
+        let receiver = format!(
+            "receiver-a.internal) export HOME={} PATH={};;",
+            quote(&fixture.follower),
+            quote(&fixture.root.path().join("receiver-bin")),
+        );
+        let noisy = receiver.replace(";;", "; printf 'unsolicited receiver output\\n';;");
+        assert!(script.contains(&receiver));
+        fs::write(&adapter, script.replace(&receiver, &noisy)).unwrap();
+        let original = fs::read(fixture.source()).unwrap();
+        let report = fixture.report(&fixture.leader, args, 1);
+        assert_eq!(report["changes"][0]["outcome"], "failed");
+        assert!(!fixture.follower.join(".skillator").exists());
+        assert!(!fixture.follower.join(REPLICA).join(MARKER).exists());
+        assert_eq!(fs::read(fixture.source()).unwrap(), original);
+        fixture.assert_exports_cleaned();
+    }
+}
+
+#[test]
+fn failed_remote_marker_initialization_rolls_back_and_retry_delivers() {
+    let fixture = Fixture::new();
+    let mkdir = fixture.root.path().join("receiver-bin/mkdir");
+    fs::remove_file(&mkdir).unwrap();
+    fs::write(
+        &mkdir,
+        format!(
+            "#!/bin/sh\n{} \"$@\" || exit $?\nfor path do\n if [ \"$path\" = {} ]; then /bin/chmod 0555 \"$path\"; fi\ndone\n",
+            quote(&executable("mkdir")),
+            quote(&fs::canonicalize(&fixture.follower).unwrap().join(REPLICA)),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&mkdir, fs::Permissions::from_mode(0o755)).unwrap();
+    let original = fs::read(fixture.source()).unwrap();
+    let unrelated = fixture.follower.join("unrelated.txt");
+    fs::write(&unrelated, "keep").unwrap();
+    let failed = fixture.report(&fixture.leader, &["--hosts", "dev"], 1);
+    assert_eq!(failed["changes"][0]["outcome"], "failed");
+    assert!(!fixture.follower.join(REPLICA).exists());
+    assert!(!fixture.follower.join(REPLICA).join(MARKER).exists());
+    assert_eq!(fs::read_to_string(&unrelated).unwrap(), "keep");
+    assert_eq!(fs::read(fixture.source()).unwrap(), original);
+    fixture.assert_exports_cleaned();
+
+    fs::remove_file(&mkdir).unwrap();
+    symlink(executable("mkdir"), &mkdir).unwrap();
+    fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
+    assert_eq!(
+        fs::read(fixture.received(&fixture.follower)).unwrap(),
+        original
+    );
+    assert!(fixture.follower.join(REPLICA).join(MARKER).is_file());
+    fixture.report(&fixture.leader, &["--hosts", "dev", "--check"], 0);
+    fixture.assert_exports_cleaned();
+}
+
+#[test]
+fn failed_local_marker_initialization_rolls_back_and_retry_delivers() {
+    let fixture = Fixture::new();
+    fixture.configure_follower();
+    fs::create_dir_all(fixture.follower.join(".skillator/library")).unwrap();
+    let unrelated = fixture.follower.join(".skillator/library/unrelated.txt");
+    fs::write(&unrelated, "keep").unwrap();
+    let adapter = fixture.root.path().join("bin/ssh");
+    let script = fs::read_to_string(&adapter).unwrap();
+    assert!(script.contains("exec /bin/sh -c"));
+    fs::write(
+        &adapter,
+        script.replace("exec /bin/sh -c", "umask 022\nexec /bin/sh -c"),
+    )
+    .unwrap();
+    let original = fs::read(fixture.source()).unwrap();
+    let failed = Command::new("/bin/sh")
+        .env("HOME", &fixture.follower)
+        .env("PATH", &fixture.path)
+        .env("TMPDIR", &fixture.temporary)
+        .args(["-c", "umask 0222; exec \"$@\"", "marker-initialization"])
+        .arg(assert_cmd::cargo::cargo_bin("skillator"))
+        .args(["library", "rsync", "--format", "json"])
+        .assert()
+        .code(1);
+    let report: Value = serde_json::from_slice(&failed.get_output().stdout).unwrap();
+    assert_eq!(report["changes"][0]["outcome"], "failed");
+    assert!(!fixture.follower.join(REPLICA).exists());
+    assert!(!fixture.follower.join(REPLICA).join(MARKER).exists());
+    assert_eq!(fs::read_to_string(&unrelated).unwrap(), "keep");
+    assert_eq!(fs::read(fixture.source()).unwrap(), original);
+    fixture.assert_exports_cleaned();
+
+    fixture.report(&fixture.follower, &[], 0);
+    assert_eq!(
+        fs::read(fixture.received(&fixture.follower)).unwrap(),
+        original
+    );
+    assert!(fixture.follower.join(REPLICA).join(MARKER).is_file());
+    assert_eq!(fs::read_to_string(&unrelated).unwrap(), "keep");
+    fixture.report(&fixture.follower, &["--check"], 0);
+    fixture.assert_exports_cleaned();
+}
+
+#[test]
+fn post_publication_validation_failure_identifies_retained_export() {
+    let fixture = Fixture::new();
+    fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
+    fixture.configure_follower();
+    let preserved = b"follower edit that must survive validation failure";
+    fs::write(fixture.received(&fixture.follower), preserved).unwrap();
+    let helper = fixture.root.path().join("leader-bin/skillator");
+    fs::remove_file(&helper).unwrap();
+    let disconnected = fixture.root.path().join("disconnect-after-export");
+    fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\nset -eu\nexport_path=$({} \"$@\")\nprintf '%s\\n' \"$export_path\"\n: > {}\n",
+            quote(&assert_cmd::cargo::cargo_bin("skillator")),
+            quote(&disconnected),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    let adapter = fixture.root.path().join("bin/ssh");
+    let script = fs::read_to_string(&adapter).unwrap();
+    assert!(script.contains("exec /bin/sh -c"));
+    fs::write(
+        &adapter,
+        script.replace(
+            "exec /bin/sh -c",
+            &format!(
+                "if [ -e {} ]; then printf 'leader disconnected\\n' >&2; exit 255; fi\nexec /bin/sh -c",
+                quote(&disconnected),
+            ),
+        ),
+    )
+    .unwrap();
+    let assertion = fixture
+        .command(&fixture.follower)
+        .args(["library", "rsync", "--format", "json"])
+        .assert()
+        .code(1);
+    let output = assertion.get_output();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["changes"][0]["outcome"], "failed");
+    assert_eq!(
+        fs::read(fixture.received(&fixture.follower)).unwrap(),
+        preserved
+    );
+    assert!(disconnected.is_file());
+    let retained: Vec<_> = fs::read_dir(&fixture.temporary)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(retained.len(), 1);
+    assert!(retained[0].join(MARKER).is_file());
+    let candidate = retained[0].to_str().unwrap();
+    assert!(String::from_utf8_lossy(&output.stderr).contains(candidate));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(candidate));
+    fs::write(&adapter, script).unwrap();
+    fs::remove_file(&disconnected).unwrap();
+    fs::remove_file(&helper).unwrap();
+    symlink(assert_cmd::cargo::cargo_bin("skillator"), &helper).unwrap();
+    fs::remove_dir_all(&retained[0]).unwrap();
+    fixture.assert_exports_cleaned();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_physical_receiver_home_fails_before_fresh_replica_creation() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let fixture = Fixture::new();
+    let physical = fixture
+        .root
+        .path()
+        .join(OsStr::from_bytes(b"receiver-home-\xff"));
+    fs::create_dir(&physical).unwrap();
+    let alias = fixture.root.path().join("receiver-home-alias");
+    symlink(&physical, &alias).unwrap();
+    let adapter = fixture.root.path().join("bin/ssh");
+    let script = fs::read_to_string(&adapter).unwrap();
+    assert!(script.contains(&quote(&fixture.follower)));
+    fs::write(
+        &adapter,
+        script.replace(&quote(&fixture.follower), &quote(&alias)),
+    )
+    .unwrap();
+    assert_eq!(fs::canonicalize(&alias).unwrap(), physical);
+    for args in [&["--hosts", "dev", "--check"][..], &["--hosts", "dev"][..]] {
+        let report = fixture.report(&fixture.leader, args, 1);
+        assert_eq!(report["changes"][0]["outcome"], "failed");
+        assert!(!physical.join(".skillator").exists());
+        assert!(!physical.join(REPLICA).join(MARKER).exists());
+        fixture.assert_exports_cleaned();
+    }
+}
 
 #[test]
 fn remote_home_with_control_characters_is_rejected_without_replica_writes() {
@@ -1234,6 +1435,17 @@ fn missing_receiver_utilities_block_writes_to_fresh_and_existing_replicas() {
             );
             fixture.assert_exports_cleaned();
         }
+    }
+}
+
+#[test]
+fn missing_rollback_utilities_block_fresh_replica_creation() {
+    for utility in ["rm", "rmdir"] {
+        let fixture = Fixture::new();
+        fs::remove_file(fixture.root.path().join("receiver-bin").join(utility)).unwrap();
+        fixture.report(&fixture.leader, &["--hosts", "dev"], 1);
+        assert!(!fixture.follower.join(".skillator").exists(), "{utility}");
+        fixture.assert_exports_cleaned();
     }
 }
 
