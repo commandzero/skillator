@@ -125,6 +125,16 @@ impl Fixture {
         report
     }
 
+    fn invalid_local_input(&self, home: &Path, args: &[&str]) {
+        self.command(home)
+            .args(["library", "rsync"])
+            .args(args)
+            .args(["--format", "json"])
+            .assert()
+            .code(3)
+            .stdout("");
+    }
+
     fn configure_follower(&self) {
         fs::create_dir_all(self.follower.join(".skillator")).unwrap();
         fs::write(
@@ -408,7 +418,7 @@ fn unowned_or_redirected_remote_and_local_replicas_are_not_adopted() {
     assert_eq!(fs::read_to_string(&existing).unwrap(), "keep");
     assert!(!fixture.follower.join(REPLICA).join(MARKER).exists());
     fixture.configure_follower();
-    fixture.report(&fixture.follower, &[], 1);
+    fixture.invalid_local_input(&fixture.follower, &[]);
     assert_eq!(fs::read_to_string(&existing).unwrap(), "keep");
     fs::remove_dir_all(fixture.follower.join(REPLICA)).unwrap();
     let outside = fixture.root.path().join("outside");
@@ -416,7 +426,7 @@ fn unowned_or_redirected_remote_and_local_replicas_are_not_adopted() {
     fs::write(outside.join("keep"), "keep").unwrap();
     symlink(&outside, fixture.follower.join(REPLICA)).unwrap();
     fixture.report(&fixture.leader, &["--hosts", "dev"], 1);
-    fixture.report(&fixture.follower, &[], 1);
+    fixture.invalid_local_input(&fixture.follower, &[]);
     assert_eq!(fs::read_to_string(outside.join("keep")).unwrap(), "keep");
     assert!(!outside.join(MARKER).exists());
     fixture.assert_exports_cleaned();
@@ -492,8 +502,12 @@ fn multiply_linked_replica_files_are_rejected_before_push_or_pull_even_in_check_
             } else {
                 &fixture.leader
             };
-            let report = fixture.report(home, args, 1);
-            assert_eq!(report["changes"][0]["outcome"], "failed");
+            if pull {
+                fixture.invalid_local_input(home, args);
+            } else {
+                let report = fixture.report(home, args, 1);
+                assert_eq!(report["changes"][0]["outcome"], "failed");
+            }
             let metadata = fs::symlink_metadata(&outside).unwrap();
             assert_eq!(fs::read(&outside).unwrap(), original);
             assert_eq!(fs::read(&received).unwrap(), original);
@@ -535,8 +549,12 @@ fn multiply_linked_replica_markers_are_rejected_before_push_or_pull() {
             } else {
                 &fixture.leader
             };
-            let report = fixture.report(home, args, 1);
-            assert_eq!(report["changes"][0]["outcome"], "failed");
+            if pull {
+                fixture.invalid_local_input(home, args);
+            } else {
+                let report = fixture.report(home, args, 1);
+                assert_eq!(report["changes"][0]["outcome"], "failed");
+            }
             let metadata = fs::metadata(&outside).unwrap();
             assert_eq!(fs::read(&outside).unwrap(), original);
             assert_eq!(
@@ -1256,8 +1274,11 @@ fn local_home_resolving_to_control_character_path_cannot_create_replica() {
     .unwrap();
     let alias = fixture.root.path().join("invalid home alias");
     symlink(&physical, &alias).unwrap();
-    fixture.report(&physical, &[], 1);
-    fixture.report(&alias, &[], 1);
+    for home in [&physical, &alias] {
+        for args in [&["--check"][..], &[][..]] {
+            fixture.invalid_local_input(home, args);
+        }
+    }
     assert!(!physical.join(REPLICA).exists());
     fixture.assert_exports_cleaned();
 }
@@ -1567,7 +1588,7 @@ fn non_utf8_generated_and_physical_paths_fail_without_replica_or_export_writes()
     symlink(&physical_home, &home_alias).unwrap();
     for home in [&physical_home, &home_alias] {
         for args in [&["--check"][..], &[][..]] {
-            fixture.report(home, args, 1);
+            fixture.invalid_local_input(home, args);
             assert!(!physical_home.join(".skillator/library").exists());
             fixture.assert_exports_cleaned();
         }

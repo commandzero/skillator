@@ -230,7 +230,7 @@ pub(crate) fn run(paths: &AppPaths, options: Options) -> Result<Report> {
             ));
         }
         transport::check_rsync(leader.destination.contains('['))?;
-        pull(paths, &leader.destination, options.check, &mut report);
+        pull(paths, &leader.destination, options.check, &mut report)?;
     } else {
         let followers = config.select(options.hosts.as_deref())?;
         transport::check_rsync(
@@ -272,19 +272,13 @@ pub(crate) fn run(paths: &AppPaths, options: Options) -> Result<Report> {
     Ok(report)
 }
 
-fn pull(paths: &AppPaths, destination: &str, check: bool, report: &mut Report) {
-    let replica = match transport::local_replica(paths.home(), false) {
-        Ok(replica) => replica,
-        Err(error) => {
-            report.transfer("leader", "pull", check, Err(error));
-            return;
-        }
-    };
+fn pull(paths: &AppPaths, destination: &str, check: bool, report: &mut Report) -> Result<()> {
+    let replica = transport::local_replica(paths.home(), false)?;
     let export = match transport::remote_export(destination) {
         Ok(export) => export,
         Err(error) => {
             report.transfer("leader", "pull", check, Err(error));
-            return;
+            return Ok(());
         }
     };
     let result = (|| {
@@ -308,4 +302,5 @@ fn pull(paths: &AppPaths, destination: &str, check: bool, report: &mut Report) {
             "Could not remove the temporary leader export; see stderr for cleanup details.",
         );
     }
+    Ok(())
 }

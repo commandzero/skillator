@@ -115,6 +115,8 @@ Text reports distinguish push and pull. JSON and YAML retain the normal report e
 
 Exit codes are `0` for successful delivery or an in-sync check, `1` for pending check work or a reported transfer/cleanup failure, `2` for invalid arguments, `3` for invalid or unavailable required local input, and `5` for fatal command/output failures. Independent follower pushes continue when another follower fails.
 
+An invalid local follower HOME, unsafe replica path, ownership marker, or inode boundary is rejected before contacting the leader with exit status `3` and no stdout report, including in `--check` mode. After that local validation, remote preparation, replica initialization, transfer, and cleanup failures remain reported failures with exit status `1`.
+
 Interrupted rsync can leave a partially updated owned replica. Fix the connection or input and rerun: the next complete transfer converges to current leader content. This is ordinary rsync, not an atomic multi-host transaction. There is no synchronization history, acknowledgement, rollback journal, or all-host rollback guarantee. If temporary export cleanup fails, stderr reports its retained path for manual removal; the command reports failure. No bounded-memory or network-operation timeout guarantee is provided.
 
 ## Migrate earlier unreleased builds
