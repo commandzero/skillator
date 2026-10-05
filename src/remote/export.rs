@@ -156,11 +156,33 @@ pub(super) fn prepare(paths: &AppPaths) -> Result<TempDir> {
         .prefix(EXPORT_PREFIX)
         .tempdir()
         .map_err(|error| Error::input(format!("cannot create temporary leader export: {error}")))?;
+    finish_export(export, &skills, &exclusions)
+}
+
+fn finish_export(
+    export: TempDir,
+    skills: &[SkillExport<'_>],
+    exclusions: &[Gitignore],
+) -> Result<TempDir> {
     let result = (|| {
+        // Both the generated spelling and the physical path must survive transport
+        // through UTF-8 shell arguments and the printed --prepare-export response.
+        if export.path().to_str().is_none()
+            || export
+                .path()
+                .canonicalize()
+                .map_err(|error| io_error(export.path(), error))?
+                .to_str()
+                .is_none()
+        {
+            return Err(Error::input(
+                "temporary leader export path cannot be represented on a remote shell",
+            ));
+        }
         fs::set_permissions(export.path(), fs::Permissions::from_mode(0o700))
             .map_err(|error| io_error(export.path(), error))?;
         for skill in skills {
-            let destination = export.path().join(skill.destination);
+            let destination = export.path().join(&skill.destination);
             fs::create_dir_all(destination.parent().expect("skill export has a parent"))
                 .map_err(|error| io_error(&destination, error))?;
             copy_skill(
@@ -268,20 +290,27 @@ fn copy_children(
     let entries = fs::read_dir(directory).map_err(|error| io_error(directory, error))?;
     for entry in entries {
         let entry = entry.map_err(|error| io_error(directory, error))?;
-        if entry.file_name() == ".git" {
+        let name = entry.file_name();
+        if name == ".git" {
             continue;
         }
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
         let kind = metadata.file_type();
-        let child_relative = location_relative.join(entry.file_name());
+        let child_relative = location_relative.join(&name);
         if exclusions
             .matched_path_or_any_parents(&child_relative, kind.is_dir())
             .is_ignore()
         {
+            if directory == root && name == "SKILL.md" {
+                return Err(Error::input(format!(
+                    "cannot export `{}`: exclusion removes the skill's defining SKILL.md",
+                    path.display()
+                )));
+            }
             continue;
         }
-        let target = destination.join(entry.file_name());
+        let target = destination.join(name);
         if kind.is_dir() {
             fs::create_dir(&target).map_err(|error| io_error(&target, error))?;
             copy_children(
@@ -722,6 +751,121 @@ mod tests {
         assert!(!projected.join("secret-link").exists());
         assert_eq!(fs::read(projected.join("kept.txt")).unwrap(), b"exported");
         assert!(source.join("ignored/secret").is_file());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_generated_and_physical_export_paths_are_cleaned_without_touching_sources() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::symlink;
+
+        let (home, _) = fixture(&["~/library"]);
+        let source = home.path().join("library/demo");
+        skill(&source, "demo");
+        fs::write(source.join("data.txt"), b"source content").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o555)).unwrap();
+        let metadata = fs::metadata(&source).unwrap();
+        let physical = home
+            .path()
+            .join(std::ffi::OsString::from_vec(b"non-utf8-\xff".to_vec()));
+        fs::create_dir(&physical).unwrap();
+        let alias = home.path().join("utf8-alias");
+        symlink(&physical, &alias).unwrap();
+        let exclusions = [GitignoreBuilder::new(home.path().join("library"))
+            .build()
+            .unwrap()];
+        let skills = [SkillExport {
+            source: &source,
+            destination: PathBuf::from("local/library/_skills/demo"),
+            location_relative: PathBuf::from("demo"),
+            location_index: 0,
+        }];
+
+        for parent in [&physical, &alias] {
+            let export = Builder::new()
+                .prefix(EXPORT_PREFIX)
+                .tempdir_in(parent)
+                .unwrap();
+            let path = export.path().to_owned();
+            assert!(path.canonicalize().unwrap().to_str().is_none());
+            assert_eq!(path.to_str().is_some(), parent == &alias);
+            let error = finish_export(export, &skills, &exclusions).unwrap_err();
+            assert_eq!(error.code, 3);
+            assert!(error.to_string().contains("cannot be represented"));
+            assert!(
+                !path.exists(),
+                "failed export remains at {}",
+                path.display()
+            );
+            assert_eq!(
+                fs::read(source.join("data.txt")).unwrap(),
+                b"source content"
+            );
+            assert!(source.join("SKILL.md").is_file());
+            assert_eq!(
+                fs::metadata(&source).unwrap().permissions().mode(),
+                metadata.permissions().mode()
+            );
+        }
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn excluding_a_discovered_skills_root_metadata_fails_closed() {
+        for (source_suffix, name, exclusion) in [
+            ("library/demo", "demo", "demo/SKILL.md"),
+            ("library", "library", "SKILL.md"),
+        ] {
+            let (home, paths) = fixture(&["~/library"]);
+            let source = home.path().join(source_suffix);
+            skill(&source, name);
+            let metadata = fs::read(source.join("SKILL.md")).unwrap();
+            let follower = home.path().join("follower/SKILL.md");
+            fs::create_dir_all(follower.parent().unwrap()).unwrap();
+            fs::write(&follower, b"follower metadata remains unchanged").unwrap();
+            let config = LibraryConfig::new(vec![LibraryLocationConfig::new(
+                "~/library".into(),
+                vec![exclusion.into()],
+                false,
+            )])
+            .unwrap();
+            fs::write(
+                paths.library_config(),
+                LibraryConfigCodec::render(&config).unwrap(),
+            )
+            .unwrap();
+
+            let error = prepare(&paths).unwrap_err();
+            assert_eq!(error.code, 3);
+            assert!(error.to_string().contains("defining SKILL.md"));
+            assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), metadata);
+            assert_eq!(
+                fs::read(&follower).unwrap(),
+                b"follower metadata remains unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn excluding_nested_metadata_does_not_remove_the_skill_root_metadata() {
+        let (home, _) = fixture(&["~/library"]);
+        let source = home.path().join("library/demo");
+        skill(&source, "demo");
+        fs::create_dir(source.join("nested")).unwrap();
+        fs::write(source.join("nested/SKILL.md"), b"nested supporting file").unwrap();
+        fs::write(source.join("nested/data.txt"), b"kept").unwrap();
+        let mut builder = GitignoreBuilder::new(home.path().join("library"));
+        builder.add_line(None, "demo/nested/SKILL.md").unwrap();
+        let exclusions = builder.build().unwrap();
+        let export = tempdir().unwrap();
+        let projected = export.path().join("demo");
+        copy_skill(&source, &projected, Path::new("demo"), &exclusions).unwrap();
+        assert!(projected.join("SKILL.md").is_file());
+        assert!(!projected.join("nested/SKILL.md").exists());
+        assert_eq!(
+            fs::read(projected.join("nested/data.txt")).unwrap(),
+            b"kept"
+        );
     }
 
     #[test]

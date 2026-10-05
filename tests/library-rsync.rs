@@ -642,6 +642,7 @@ fn missing_leader_skillator_and_invalid_export_paths_preserve_existing_replica()
 fn failed_export_cleanup_reports_the_retained_path_without_claiming_success() {
     let fixture = Fixture::new();
     fixture.configure_follower();
+    fixture.report(&fixture.follower, &[], 0);
     let remote_rm = fixture.root.path().join("leader-bin/rm");
     fs::remove_file(&remote_rm).unwrap();
     fs::write(
@@ -660,6 +661,12 @@ fn failed_export_cleanup_reports_the_retained_path_without_claiming_success() {
     assert_eq!(
         report["diagnostics"][0]["code"],
         "leader_export_cleanup_failed"
+    );
+    assert_eq!(report["changes"], serde_json::json!([]));
+    assert_eq!(report["diagnostics"][0]["data"]["host"], "leader");
+    assert_eq!(
+        report["diagnostics"][0]["data"]["path"],
+        "~/.skillator/library/replica"
     );
     assert_eq!(
         fs::read(fixture.received(&fixture.follower)).unwrap(),
@@ -735,6 +742,7 @@ fn non_normalized_leader_tmpdir_still_supports_fresh_pull_and_cleanup() {
 #[test]
 fn failed_local_export_cleanup_reports_failure_and_retained_path() {
     let fixture = Fixture::new();
+    fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
     let adapter = fixture.root.path().join("bin/ssh");
     let script = fs::read_to_string(&adapter).unwrap().replace(
         "exec /bin/sh -c",
@@ -752,6 +760,12 @@ fn failed_local_export_cleanup_reports_failure_and_retained_path() {
     assert_eq!(
         report["diagnostics"][0]["code"],
         "leader_export_cleanup_failed"
+    );
+    assert_eq!(report["changes"], serde_json::json!([]));
+    assert_eq!(report["diagnostics"][0]["data"]["host"], "leader");
+    assert_eq!(
+        report["diagnostics"][0]["data"]["path"],
+        "~/.skillator/library/replica"
     );
     assert_eq!(
         fs::read(fixture.received(&fixture.follower)).unwrap(),
@@ -1218,6 +1232,177 @@ fn missing_receiver_utilities_block_writes_to_fresh_and_existing_replicas() {
                 "preserved follower edit",
                 "{utility}"
             );
+            fixture.assert_exports_cleaned();
+        }
+    }
+}
+
+#[test]
+fn rsync_ambiguous_destinations_fail_before_connection_or_replica_writes() {
+    for destination in [
+        "local:prod",
+        "user@local:prod",
+        "host::module",
+        "host:22",
+        "::1",
+        "[::1]:22",
+        "[invalid]",
+        "user@-host",
+    ] {
+        let fixture = Fixture::new();
+        let adapter = fixture.root.path().join("bin/ssh");
+        let contacted = fixture.root.path().join("unexpected-connection");
+        fs::write(
+            &adapter,
+            format!(
+                "#!/bin/sh\nprintf connected > {}\nexit 99\n",
+                quote(&contacted)
+            ),
+        )
+        .unwrap();
+        for role in ["hosts:\n  dev", "leader"] {
+            fs::write(
+                fixture.leader.join(".skillator/config.yaml"),
+                format!("version: 1\n{role}: {{destination: '{destination}'}}\n"),
+            )
+            .unwrap();
+            fixture
+                .command(&fixture.leader)
+                .args(["library", "rsync", "--format", "json"])
+                .assert()
+                .code(3)
+                .stdout("");
+            assert!(!contacted.exists(), "{destination}");
+            assert!(!fixture.follower.join(REPLICA).exists(), "{destination}");
+            fixture.assert_exports_cleaned();
+        }
+    }
+}
+
+#[test]
+fn excluded_skill_metadata_blocks_push_and_pull_without_replacing_replica() {
+    let fixture = Fixture::new();
+    fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
+    fixture.configure_follower();
+    fs::write(
+        fixture.received(&fixture.follower),
+        "preserved follower content",
+    )
+    .unwrap();
+    fs::write(
+        fixture.leader.join(".skillator/library.yaml"),
+        "version: 1\nlocations:\n  - path: '~/.skillator/library'\n    exclusions: ['demo/SKILL.md']\n",
+    )
+    .unwrap();
+    for args in [&["--hosts", "dev", "--check"][..], &["--hosts", "dev"][..]] {
+        fixture
+            .command(&fixture.leader)
+            .args(["library", "rsync"])
+            .args(args)
+            .assert()
+            .code(3)
+            .stdout("");
+    }
+    for args in [&["--check"][..], &[][..]] {
+        fixture.report(&fixture.follower, args, 1);
+    }
+    assert_eq!(
+        fs::read_to_string(fixture.received(&fixture.follower)).unwrap(),
+        "preserved follower content"
+    );
+    fixture.assert_exports_cleaned();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_generated_and_physical_paths_fail_without_replica_or_export_writes() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let fixture = Fixture::new();
+    let physical_temp = fixture
+        .root
+        .path()
+        .join(OsStr::from_bytes(b"temporary-\xff"));
+    fs::create_dir(&physical_temp).unwrap();
+    let temp_alias = fixture.root.path().join("temporary-alias");
+    symlink(&physical_temp, &temp_alias).unwrap();
+    for temporary in [&physical_temp, &temp_alias] {
+        for args in [
+            &["library", "rsync", "--hosts", "dev"][..],
+            &["library", "rsync", "--prepare-export"][..],
+        ] {
+            fixture
+                .command(&fixture.leader)
+                .env("TMPDIR", temporary)
+                .args(args)
+                .assert()
+                .code(3)
+                .stdout("");
+            assert!(!fixture.follower.join(REPLICA).exists());
+            assert!(fs::read_dir(&physical_temp).unwrap().next().is_none());
+            fixture.assert_exports_cleaned();
+        }
+    }
+    let physical_home = fixture.root.path().join(OsStr::from_bytes(b"home-\xff"));
+    fs::create_dir_all(physical_home.join(".skillator")).unwrap();
+    fs::write(
+        physical_home.join(".skillator/config.yaml"),
+        "version: 1\nleader: {destination: leader.internal}\n",
+    )
+    .unwrap();
+    let home_alias = fixture.root.path().join("home-alias");
+    symlink(&physical_home, &home_alias).unwrap();
+    for home in [&physical_home, &home_alias] {
+        for args in [&["--check"][..], &[][..]] {
+            fixture.report(home, args, 1);
+            assert!(!physical_home.join(".skillator/library").exists());
+            fixture.assert_exports_cleaned();
+        }
+    }
+}
+
+#[test]
+fn missing_local_ipv6_capability_blocks_both_roles_before_connection_or_writes() {
+    let fixture = Fixture::new();
+    let bin = fixture.root.path().join("no-ipv6-bin");
+    fs::create_dir(&bin).unwrap();
+    let rsync = bin.join("rsync");
+    fs::write(
+        &rsync,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in --version) printf 'Capabilities:\\n  no IPv6, symlinks\\n'; exit 0;; esac\nexec {} \"$@\"\n",
+            quote(&executable("rsync"))
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&rsync, fs::Permissions::from_mode(0o755)).unwrap();
+    let contacted = fixture.root.path().join("unexpected-ipv6-connection");
+    fs::write(
+        fixture.root.path().join("bin/ssh"),
+        format!(
+            "#!/bin/sh\nprintf connected > {}\nexit 99\n",
+            quote(&contacted)
+        ),
+    )
+    .unwrap();
+    for role in ["hosts:\n  dev", "leader"] {
+        fs::write(
+            fixture.leader.join(".skillator/config.yaml"),
+            format!("version: 1\n{role}: {{destination: '[::1]'}}\n"),
+        )
+        .unwrap();
+        for args in [&["--check"][..], &[][..]] {
+            fixture
+                .command(&fixture.leader)
+                .env("PATH", format!("{}:{}", bin.display(), fixture.path))
+                .args(["library", "rsync"])
+                .args(args)
+                .assert()
+                .code(3)
+                .stdout("");
+            assert!(!contacted.exists());
+            assert!(!fixture.follower.join(REPLICA).exists());
             fixture.assert_exports_cleaned();
         }
     }

@@ -229,11 +229,15 @@ pub(crate) fn run(paths: &AppPaths, options: Options) -> Result<Report> {
                 "--hosts selects followers on a leader; it cannot be used on a follower",
             ));
         }
-        transport::check_rsync()?;
+        transport::check_rsync(leader.destination.contains('['))?;
         pull(paths, &leader.destination, options.check, &mut report);
     } else {
         let followers = config.select(options.hosts.as_deref())?;
-        transport::check_rsync()?;
+        transport::check_rsync(
+            followers
+                .iter()
+                .any(|(_, follower)| follower.destination.contains('[')),
+        )?;
         let export = export::prepare(paths)?;
         for (alias, follower) in followers {
             let result = (|| {
@@ -259,7 +263,7 @@ pub(crate) fn run(paths: &AppPaths, options: Options) -> Result<Report> {
                 export.display()
             );
             report.problem(
-                None,
+                Some("leader"),
                 "leader_export_cleanup_failed",
                 "Could not remove the temporary leader export; see stderr for cleanup details.",
             );
@@ -299,7 +303,7 @@ fn pull(paths: &AppPaths, destination: &str, check: bool, report: &mut Report) {
             export.display()
         );
         report.problem(
-            None,
+            Some("leader"),
             "leader_export_cleanup_failed",
             "Could not remove the temporary leader export; see stderr for cleanup details.",
         );

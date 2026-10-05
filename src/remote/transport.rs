@@ -1,4 +1,5 @@
 use super::{EXPORT_PREFIX, Error, MARKER_CONTENT, MARKER_NAME, REPLICA_RELATIVE, Result, process};
+use std::borrow::Cow;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -38,9 +39,21 @@ fn ssh(destination: &str, script: &str) -> Result<Vec<u8>> {
         Command::new("ssh")
             .args(SSH_OPTIONS)
             .arg("--")
-            .arg(destination)
+            .arg(ssh_destination(destination).as_ref())
             .arg(script),
     )
+}
+
+fn ssh_destination(destination: &str) -> Cow<'_, str> {
+    // rsync strips IPv6 brackets before invoking ssh; preflight must connect
+    // to the same literal host, not try to resolve "[::1]" as a hostname.
+    match destination.split_once('[') {
+        Some(("", bracketed)) => Cow::Borrowed(bracketed.trim_end_matches(']')),
+        Some((prefix, bracketed)) => {
+            Cow::Owned(format!("{prefix}{}", bracketed.trim_end_matches(']')))
+        }
+        None => Cow::Borrowed(destination),
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -62,19 +75,33 @@ fn checked_absolute(path: &Path) -> bool {
                 .all(|part| !part.is_empty() && part != b"." && part != b".."))
 }
 
-pub(super) fn check_rsync() -> Result<()> {
+pub(super) fn check_rsync(ipv6: bool) -> Result<()> {
     process::capture(
         Command::new("rsync")
             .args(RSYNC_OPTIONS.split_ascii_whitespace())
             .args(RSYNC_PROBE_OPTIONS.split_ascii_whitespace())
             .stdout(Stdio::null()),
     )
-        .map(|_| ())
-        .map_err(|error| {
-            Error::input(format!(
-                "rsync is unavailable or lacks required transfer options; install/update it and add it to PATH: {error}"
-            ))
-        })
+    .map_err(|error| {
+        Error::input(format!(
+            "rsync is unavailable or lacks required transfer options; install/update it and add it to PATH: {error}"
+        ))
+    })?;
+    if ipv6 {
+        // System openrsync accepts --ipv6 but splits bracketed hosts at the first colon.
+        // Require advertised IPv6 support, in addition to the shared option probe.
+        let capabilities = process::capture(Command::new("rsync").arg("--version"))
+            .map_err(Error::input_display)?;
+        if !capabilities
+            .split(|byte| *byte == b',' || *byte == b'\n')
+            .any(|capability| capability.trim_ascii() == b"IPv6")
+        {
+            return Err(Error::input(
+                "local rsync does not advertise IPv6 support; install GNU rsync for bracketed IPv6 destinations",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica> {
@@ -174,6 +201,7 @@ fn reject_linked_files(directory: &Path) -> Result<()> {
 pub(super) fn local_replica(home: &Path, create: bool) -> Result<Replica> {
     let invalid_home = || Error::input("local HOME must be an existing absolute directory");
     if !home.is_absolute()
+        || home.to_str().is_none()
         || home
             .as_os_str()
             .as_encoded_bytes()
@@ -183,7 +211,7 @@ pub(super) fn local_replica(home: &Path, create: bool) -> Result<Replica> {
         return Err(invalid_home());
     }
     let home = fs::canonicalize(home).map_err(|_| invalid_home())?;
-    if !checked_absolute(&home) || !home.is_dir() {
+    if !checked_absolute(&home) || home.to_str().is_none() || !home.is_dir() {
         return Err(invalid_home());
     }
     let root = home.join(REPLICA_RELATIVE);
@@ -359,21 +387,85 @@ pub(super) fn rsync(
     Ok(!process::capture(&mut command)?.is_empty())
 }
 
-fn valid_destination(destination: &str) -> bool {
-    !destination.is_empty()
-        && !destination.starts_with('-')
-        && destination
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "@._-:[]".contains(c))
-        && destination.matches('@').count() <= 1
-        && !destination.starts_with('@')
-        && !destination.ends_with('@')
+pub(super) fn valid_destination(destination: &str) -> bool {
+    let (user, host) = destination
+        .split_once('@')
+        .map_or((None, destination), |(user, host)| (Some(user), host));
+    if user.is_some_and(|user| !ordinary_name(user)) {
+        return false;
+    }
+    if let Some(address) = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+    {
+        address.parse::<std::net::Ipv6Addr>().is_ok()
+    } else {
+        ordinary_name(host)
+    }
+}
+
+fn ordinary_name(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn rsync_and_ssh_destination_forms_keep_the_same_host() {
+        for (rsync_host, ssh_host) in [
+            ("alias_1", "alias_1"),
+            ("user@host.example", "user@host.example"),
+            ("[::1]", "::1"),
+            ("user@[2001:db8::1]", "user@2001:db8::1"),
+        ] {
+            assert!(valid_destination(rsync_host));
+            assert_eq!(ssh_destination(rsync_host), ssh_host);
+        }
+        for destination in [
+            "local:prod",
+            "user@local:prod",
+            "host::module",
+            "::1",
+            "host:22",
+            "host:/path",
+            "[::1]:22",
+            "[invalid]",
+            "user@[::1]suffix",
+            "user@host[::1]",
+            "user@-host",
+            "-user@host",
+            "@host",
+            "user@",
+            "user@@host",
+        ] {
+            assert!(!valid_destination(destination), "accepted {destination}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_replica_rejects_non_utf8_original_and_physical_home_before_writes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let physical = parent.path().join(OsStr::from_bytes(b"home-\xff"));
+        fs::create_dir(&physical).unwrap();
+        let utf8_alias = parent.path().join("home-alias");
+        symlink(&physical, &utf8_alias).unwrap();
+        for (home, original_is_utf8) in [(&physical, false), (&utf8_alias, true)] {
+            assert_eq!(home.to_str().is_some(), original_is_utf8);
+            assert!(local_replica(home, true).is_err());
+            assert!(!physical.join(".skillator").exists());
+        }
+    }
 
     #[test]
     fn local_replica_checks_ownership_before_writes() {

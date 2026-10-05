@@ -67,11 +67,13 @@ The initiating follower needs Skillator, SSH, and rsync. The leader's noninterac
 
 All roles need a rsync that supports `--delete-delay`. Upgrade an older system copy when that option is unavailable; Skillator does not install or replace it.
 
+Destinations are ordinary SSH aliases or hostnames, optionally prefixed with `user@`. IPv6 literals must be bracketed, for example `destination: 'user@[2001:db8::1]'`; unbracketed colons, port suffixes, and remote paths are rejected. An invocation selecting an IPv6 destination requires the initiating rsync to advertise IPv6 capability, as GNU rsync does. System openrsync accepts `--ipv6` but misparses bracketed hosts, so it is refused before connections, export preparation, or replica writes for such an invocation. Receiving rsync servers do not need to parse the destination.
+
 Use SSH configuration for ports, jump hosts, keys, and authentication. Establish host trust separately. Connections use batch authentication, require trusted host keys, and suppress trust-file and persistent connection updates.
 
 ## Inventory and replica layout
 
-The leader exports every discovered valid skill, including hidden and unselected skills, with its complete supporting files. Location exclusions apply to directories, regular files, and symlinks, including supporting content inside a skill. Unavailable Locations, invalid skills, ambiguous Source Keys, overlapping skill exports, unreadable content, and unsupported entries block the export before replica mutation. An explicitly configured, available empty library can remove stale replica skills; missing or inaccessible input cannot authorize deletion.
+The leader exports every discovered valid skill, including hidden and unselected skills, with its complete supporting files. Location exclusions apply to directories, regular files, and symlinks, including supporting content inside a skill. An exclusion matching a discovered skill's root `SKILL.md` rejects the export rather than delivering an invalid skill; nested metadata and supporting-file exclusions remain effective. Unavailable Locations, invalid skills, ambiguous Source Keys, overlapping skill exports, unreadable content, and unsupported entries block the export before replica mutation. Library expressions use UTF-8 environment variables; unrepresentable variables are treated as unavailable rather than panicking. An explicitly configured, available empty library can remove stale replica skills; missing or inaccessible input cannot authorize deletion.
 
 Every follower receives the same layout beneath `~/.skillator/library/replica`:
 
@@ -93,7 +95,7 @@ The directory containing `SKILL.md` defines the skill-content boundary; all its 
 
 Rsync overwrites follower content and removes stale files **only inside `~/.skillator/library/replica`**. Skillator creates that root with a regular `.skillator-rsync-owned` marker containing its fixed ownership signature. Existing unmarked roots, invalid markers, and symlinked root/ancestors are refused; they are not adopted. Both previews and delivery reject multiply linked regular files and symlinks, including the marker, because rsync metadata updates could otherwise affect an inode outside the replica. Do not place unrelated content in an owned replica.
 
-Both the remote receiver's home and an initiating follower's local home must resolve to an existing absolute directory without control characters. The physical home path is normalized before checking or creating replica entries, so trailing slashes and redundant path components are accepted consistently. Symlinks below that home remain forbidden.
+Both the remote receiver's home and an initiating follower's local home must resolve to an existing absolute directory without control characters. The physical home path is normalized before checking or creating replica entries, so trailing slashes and redundant path components are accepted consistently. The local follower HOME and the generated leader export path must be representable as UTF-8 in both their configured and physical forms; unsupported paths fail before local replica creation or export publication. Symlinks below that home remain forbidden.
 
 Other library locations, checkouts, home siblings, configurations, and user materializations are untouched. The marker is protected from rsync deletion. Content comparison uses checksums, so equal-size/equal-timestamp edits are still replaced. There is no background watcher.
 
@@ -103,7 +105,7 @@ Other library locations, checkouts, home siblings, configurations, and user mate
 
 Read-only skill directories retain their source modes during transfer. Before deleting a temporary export, cleanup grants owner access only to its physical directories; it does not follow links or chmod files that may share leader inodes. Ordinary preparation errors use the same cleanup, so a partially built read-only export is removed rather than silently retained. The leader helper also cleans its export if publishing the path fails, including a broken stdout or SSH connection. If cleanup fails, stderr reports both the original failure and the retained export path.
 
-Text reports distinguish push and pull. JSON and YAML retain the normal report envelope with `mode: library_rsync`; changes use follower aliases or `leader`, `push`/`pull` actions, and the home-relative replica path. Network addresses and temporary export paths are not inserted into machine reports. Child diagnostics go to stderr.
+Text reports distinguish push and pull. JSON and YAML retain the normal report envelope with `mode: library_rsync`; changes use follower aliases or `leader`, `push`/`pull` actions, and the home-relative replica path. Cleanup diagnostics identify `leader` even when the transfer needed no changes. Network addresses and temporary export paths are not inserted into machine reports. Child diagnostics go to stderr.
 
 Exit codes are `0` for successful delivery or an in-sync check, `1` for pending check work or a reported transfer/cleanup failure, `2` for invalid arguments, `3` for invalid or unavailable required local input, and `5` for fatal command/output failures. Independent follower pushes continue when another follower fails.
 
