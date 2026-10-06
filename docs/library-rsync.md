@@ -3,7 +3,7 @@ type: Playbook
 title: Deliver leader skills to follower libraries
 description: Configure leader pushes and fresh follower pulls with SSH and ordinary rsync.
 status: draft
-generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T19:46:52Z }
+generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-05T05:18:44Z }
 ---
 
 # Deliver leader skills to follower libraries
@@ -85,9 +85,11 @@ Use SSH configuration for ports, jump hosts, keys, and authentication. Establish
 
 Select Library and press `Ctrl+T`. Enter a unique follower name matching an SSH alias in `~/.ssh/config`; `local` is reserved. Skillator runs an argument-separated `ssh -T destination hostname` with batch authentication and existing trusted keys. It never edits SSH configuration or establishes trust. A valid single hostname is required on stdout; stderr warnings are displayed separately. Authentication, trust, connection, timeout, or malformed-output failures leave the registry unchanged. Fix the SSH setup externally and retry.
 
-A successful probe stages a host tab and preserves the input alias as its destination even if the reported hostname differs. Press `s` and confirm to publish `~/.skillator/config.yaml`; quit or discard without saving to leave it unchanged. Invalid registries and externally changed files are not overwritten. A pull-initiating follower's `leader` role is preserved and cannot register downstream followers. Library inventory and host-registry saves report their separate outcomes.
+A successful probe stages a host tab and preserves the input alias as its destination even if the reported hostname differs. Press `s` on Local and confirm to publish `~/.skillator/config.yaml`; quit or discard without saving to leave it unchanged. After a successful save adds a follower, Skillator asks whether to initialize it with a sync; when several new hosts were saved, it asks in registration order. Declining keeps each registration without creating its replica. A host-only `Ctrl+S` save-and-exit waits for these decisions and any accepted delivery before exiting. Invalid registries and externally changed files are not overwritten. A pull-initiating follower's `leader` role is preserved and cannot register downstream followers. Library inventory and host-registry saves report their separate outcomes.
 
-Use `Tab` / `Shift+Tab` to browse Local and follower Library tabs. Follower tabs inspect only the owned `~/.skillator/library/replica` through ordinary SSH/POSIX tools, without remote Skillator or Git. They display delivered Source/Skill metadata and document diagnostics, not a copy of local inventory. Mutation actions are disabled. Registration does not deliver a replica: run leader-authoritative `skillator library rsync` separately. Missing, offline, unmarked, multiply linked, or symlinked replicas remain unavailable with diagnostics; other scopes stay usable.
+Use `Tab` / `Shift+Tab` to browse Local and follower Library tabs. On a saved remote host, `s` and `Ctrl+S` both request synchronization of **only the selected follower** from this leader; neither saves pending Local/registry edits nor exits. Confirm the warning before transfer: rsync may overwrite content and delete stale files only inside that follower's **owned** `~/.skillator/library/replica`. Cancel the prompt to leave the replica unchanged. On Local, `s` retains its confirmed save behavior and `Ctrl+S` retains safe save-and-exit. Pending changes still require the normal save/discard/return decision before host navigation; an unsaved registration or dirty Library inventory is not transfer input. An externally changed saved alias/destination or invalid/unavailable leader source blocks delivery, rather than silently targeting another host or using cached inventory.
+
+Delivery runs in the background so navigation remains responsive; repeated sync keys do not start duplicate transfers. Switching away cancels the running local SSH/rsync process groups and ignores stale results. Interrupted rsync may leave partial changes **inside the owned replica**; there is no atomic transfer, rollback, or rsync/network timeout guarantee. The TUI presents transfer/cleanup failures, including a retained private export path when cleanup fails, and refreshes inspection after successful delivery. Follower tabs otherwise inspect only the owned replica through ordinary SSH/POSIX tools, without remote Skillator or Git. They display delivered Source/Skill metadata and document diagnostics, not a copy of local inventory. Mutation actions remain disabled. Missing, offline, unmarked, multiply linked, or symlinked replicas remain unavailable with diagnostics; other scopes stay usable.
 
 TUI hostname probes have a 15-second overall deadline and 4 KiB stdout/stderr limits. Replica inspection has a 30-second deadline, a 4 MiB inventory-output limit, a 4 KiB stderr limit, and a 256 KiB limit per skill document. Escape cancels a pending probe; switching away cancels inspection and ignores stale replies. These bounds apply to TUI SSH operations, not rsync delivery.
 
@@ -95,6 +97,8 @@ TUI hostname probes have a 15-second overall deadline and 4 KiB stdout/stderr li
 ## Inventory and replica layout
 
 The leader exports every discovered valid skill, including hidden and unselected skills, with its complete supporting files. Location exclusions apply to directories, regular files, and symlinks, including supporting content inside a skill. Unavailable Locations, invalid skills, ambiguous Source Keys, overlapping skill exports, unreadable content, and unsupported entries block the export before replica mutation. An explicitly configured, available empty library can remove stale replica skills; missing or inaccessible input cannot authorize deletion.
+
+Naming-style deviations and differences between a safe frontmatter name and its source directory are advisory warnings, not invalid skills: they do not block export or delivery. Local, Target and follower skill details show these warnings separately from blocking errors. Delivery preserves the original `SKILL.md`; it does not rewrite metadata or normalize directory names.
 
 Every follower receives the same layout beneath `~/.skillator/library/replica`:
 

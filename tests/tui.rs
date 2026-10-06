@@ -2,9 +2,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier};
 use ratatui::{Terminal, backend::TestBackend};
 use skillator::domain::MaterializationKind;
-use skillator::tui::{
-    Action, CheckState, Effect, Model, Overlay, Row, Workspace, action_for_key, reduce, render,
-};
+use skillator::tui::input::action_for_key;
+use skillator::tui::model::{Action, CheckState, Effect, Model, Overlay, Row, Workspace};
+use skillator::tui::reducer::reduce;
+use skillator::tui::render::render;
 
 #[test]
 fn source_bulk_toggle_includes_filtered_and_collapsed_children() {
@@ -67,10 +68,6 @@ fn vim_keys_and_save_keys_map_to_the_approved_actions() {
         Some(Action::Expand)
     );
     assert_eq!(
-        action_for_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
-        Some(Action::ToggleLibrary)
-    );
-    assert_eq!(
         action_for_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
         Some(Action::NewTargetTab)
     );
@@ -105,14 +102,6 @@ fn vim_keys_and_save_keys_map_to_the_approved_actions() {
             Some(action)
         );
     }
-    assert_eq!(
-        action_for_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL)),
-        Some(Action::PreviousScope)
-    );
-    assert_eq!(
-        action_for_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)),
-        Some(Action::NextScope)
-    );
     for key in [KeyCode::Down, KeyCode::Up] {
         assert_eq!(
             action_for_key(KeyEvent::new(key, KeyModifiers::CONTROL)),
@@ -136,7 +125,7 @@ fn staged_workspace_switch_requires_discard_or_return() {
         )],
     );
     reduce(&mut model, Action::Toggle);
-    let effects = reduce(&mut model, Action::ToggleLibrary);
+    let effects = reduce(&mut model, Action::NextScope);
     assert!(effects.is_empty());
     assert!(matches!(model.overlay(), Overlay::ScopeSwitch { .. }));
 
@@ -486,50 +475,6 @@ fn library_add_uses_location_editor_and_delete_requires_confirmation() {
 }
 
 #[test]
-fn library_footer_explains_how_to_apply_pending_changes() {
-    let model = Model::new(Workspace::Library, vec![Row::location("./library")]);
-    let backend = TestBackend::new(140, 14);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
-    let lines = terminal
-        .backend()
-        .buffer()
-        .content()
-        .chunks(140)
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-        .collect::<Vec<_>>();
-    let screen = lines.join("\n");
-
-    assert!(screen.contains("s save"));
-    assert!(screen.contains("Ctrl+S save & exit"));
-    assert!(screen.contains("m mode"));
-    assert!(screen.contains("/ filter"));
-    assert!(!screen.contains("PgUp/PgDn"));
-    assert!(!screen.contains("move/copy/link"));
-    assert!(screen.contains("Location"));
-    assert!(!screen.contains("Name"));
-    let action_line = lines
-        .iter()
-        .position(|line| line.contains("Ctrl+S save & exit"))
-        .unwrap();
-    assert!(lines[action_line].ends_with("? help ▟"));
-    assert!(
-        lines
-            .iter()
-            .skip(action_line + 1)
-            .all(|line| !line.contains('▄'))
-    );
-    assert!(
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .any(|cell| { cell.symbol() == "▄" && cell.fg == Color::Indexed(230) })
-    );
-}
-
-#[test]
 fn target_footer_keeps_modes_and_navigation_in_help() {
     let model = Model::new(
         Workspace::Target,
@@ -581,24 +526,6 @@ fn help_scrolls_to_the_full_mode_reference_and_q_closes_it() {
 }
 
 #[test]
-fn library_table_uses_a_bone_frame() {
-    let model = Model::new(Workspace::Library, vec![Row::location("./library")]);
-    let backend = TestBackend::new(80, 12);
-    let mut terminal = Terminal::new(backend).unwrap();
-
-    terminal.draw(|frame| render(frame, &model)).unwrap();
-
-    assert!(
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .any(|cell| cell.symbol() == "▛" && cell.fg == Color::Indexed(230))
-    );
-}
-
-#[test]
 fn library_keeps_the_default_location_in_the_table_until_edit_is_requested() {
     let mut model = Model::new(Workspace::Library, vec![Row::location("./library")]);
     let backend = TestBackend::new(140, 14);
@@ -644,7 +571,7 @@ fn confirmation_uses_a_descriptive_title_and_bottom_border_controls() {
         )],
     );
     reduce(&mut model, Action::Toggle);
-    reduce(&mut model, Action::ToggleLibrary);
+    reduce(&mut model, Action::NextScope);
 
     let backend = TestBackend::new(100, 14);
     let mut terminal = Terminal::new(backend).unwrap();

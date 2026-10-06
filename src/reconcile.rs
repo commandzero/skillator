@@ -47,6 +47,7 @@ enum Operation {
     },
     Materialize {
         source: PathBuf,
+        metadata_name: String,
         source_expected: EntryFingerprint,
         kind: MaterializationKind,
         expected: EntryFingerprint,
@@ -308,6 +309,11 @@ pub fn plan(
             } else {
                 Operation::Materialize {
                     source: source.expect("checked above").to_owned(),
+                    metadata_name: resolved
+                        .expect("checked above")
+                        .name()
+                        .expect("valid skill has a name")
+                        .to_owned(),
                     source_expected: resolved.expect("checked above").fingerprint().clone(),
                     kind: observation.enablement().materialization(),
                     expected: observation.fingerprint().clone(),
@@ -937,6 +943,7 @@ fn apply_operation_with(
         }
         Operation::Materialize {
             source,
+            metadata_name,
             source_expected,
             kind,
             expected,
@@ -949,8 +956,9 @@ fn apply_operation_with(
                 return Err(ApplyFailure::Changed);
             }
             let source = canonical_source;
-            let expected_name = item.path.file_name().and_then(|name| name.to_str());
-            if crate::library::validated_skill_name_at(&source).as_deref() != expected_name {
+            if crate::library::validated_skill_name_at(&source).as_deref()
+                != Some(metadata_name.as_str())
+            {
                 return Err(ApplyFailure::Changed);
             }
             if *kind == MaterializationKind::Copied

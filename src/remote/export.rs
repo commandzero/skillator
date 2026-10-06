@@ -380,6 +380,20 @@ mod tests {
     }
 
     #[test]
+    fn exports_divergent_names_without_rewriting_skill_metadata() {
+        let (home, paths) = fixture(&["~/library"]);
+        let source = home.path().join("library/bot-ui");
+        skill(&source, "Make Bot UI");
+        let original = fs::read(source.join("SKILL.md")).unwrap();
+        let export = prepare(&paths).unwrap();
+        assert_eq!(
+            fs::read(export.path().join("local/library/_skills/bot-ui/SKILL.md")).unwrap(),
+            original
+        );
+        assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), original);
+    }
+
+    #[test]
     fn git_root_skill_exports_content_without_git_administrative_state() {
         let (home, paths) = fixture(&["~/repo"]);
         let root = home.path().join("repo");
@@ -471,7 +485,7 @@ mod tests {
         let (home, paths) = fixture(&["~/missing"]);
         invalid(&paths);
         let root = home.path().join("missing");
-        skill(&root.join("demo"), "incorrect-name");
+        skill(&root.join("demo"), "../outside");
         invalid(&paths);
         fs::remove_dir_all(root.join("demo")).unwrap();
         let export = prepare(&paths).unwrap();

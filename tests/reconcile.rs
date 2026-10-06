@@ -54,6 +54,92 @@ fn safe_plan_materializes_missing_link_and_control_file() {
 
 #[cfg(unix)]
 #[test]
+fn divergent_skill_names_materialize_by_registered_path_in_both_modes() {
+    for materialization in ["linked", "copied"] {
+        let mut fixture = Fixture::new(materialization);
+        let original =
+            b"---\nname: Make Bot UI\ndescription: Prepare a release\n---\nOriginal instructions\n";
+        std::fs::write(fixture.skill.join("SKILL.md"), original).unwrap();
+        fixture.rescan();
+        let skill = fixture
+            .library
+            .source("local/library")
+            .unwrap()
+            .skill("release-checklist")
+            .unwrap();
+        assert_eq!(skill.name(), Some("Make Bot UI"));
+        assert!(skill.diagnostics().is_empty());
+        assert_eq!(skill.warnings().len(), 2);
+        let result = execute(
+            prepare_check(&fixture.target, &fixture.repository, &fixture.library).unwrap(),
+            Authorization::SafeOnly,
+            &fixture.target,
+            &fixture.repository,
+            &fixture.library,
+        );
+        let destination = fixture
+            .target
+            .root()
+            .join(".agents/skills/release-checklist");
+        assert!(
+            result.outcomes().iter().any(|outcome| {
+                outcome.path == destination && outcome.outcome == Outcome::Applied
+            })
+        );
+        assert_eq!(
+            std::fs::read(destination.join("SKILL.md")).unwrap(),
+            original
+        );
+        assert_eq!(
+            std::fs::read(fixture.skill.join("SKILL.md")).unwrap(),
+            original
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn root_skill_uses_its_safe_metadata_name_as_destination() {
+    let mut fixture = Fixture::new("linked");
+    let source = fixture.skill.parent().unwrap();
+    let original = b"---\nname: Make Bot UI\ndescription: Root skill\n---\n";
+    std::fs::write(source.join("SKILL.md"), original).unwrap();
+    fixture.rescan();
+    let LoadResult::Valid(repository) = RepositoryConfigCodec::parse(
+        b"version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements:\n  - directory: agents\n    skill:\n      source: local/library\n      path: .\n    materialization: linked\n",
+    ) else {
+        panic!("valid root-skill enablement");
+    };
+    fixture.repository = repository.value().clone();
+    let skill = fixture
+        .library
+        .source("local/library")
+        .unwrap()
+        .skill(".")
+        .unwrap();
+    assert!(skill.warnings().len() == 1);
+    let result = execute(
+        prepare_check(&fixture.target, &fixture.repository, &fixture.library).unwrap(),
+        Authorization::SafeOnly,
+        &fixture.target,
+        &fixture.repository,
+        &fixture.library,
+    );
+    let destination = fixture.target.root().join(".agents/skills/Make Bot UI");
+    assert!(
+        result
+            .outcomes()
+            .iter()
+            .any(|outcome| { outcome.path == destination && outcome.outcome == Outcome::Applied })
+    );
+    assert_eq!(
+        std::fs::read(destination.join("SKILL.md")).unwrap(),
+        original
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn guarded_conflict_requires_all_guarded_authorization() {
     let fixture = Fixture::new("linked");
     let occupant = fixture
@@ -553,7 +639,13 @@ fn linked_source_replacement_with_a_symlink_is_blocked() {
 
 #[test]
 fn linked_source_frontmatter_name_change_after_planning_is_blocked() {
-    let fixture = Fixture::new("linked");
+    let mut fixture = Fixture::new("linked");
+    std::fs::write(
+        fixture.skill.join("SKILL.md"),
+        "---\nname: Different Name\ndescription: Prepare a release\n---\n",
+    )
+    .unwrap();
+    fixture.rescan();
     let prepared = prepare_check(&fixture.target, &fixture.repository, &fixture.library).unwrap();
     std::fs::write(
         fixture.skill.join("SKILL.md"),

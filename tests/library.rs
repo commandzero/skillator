@@ -28,9 +28,9 @@ fn library_scan_keeps_one_inventory_across_local_and_git_sources() {
     std::fs::create_dir_all(git_source.join("nested")).unwrap();
     write_skill(&git_source.join("nested"), "nested", "Nested skill");
 
-    let invalid = library.join("legacy-helper");
-    std::fs::create_dir_all(&invalid).unwrap();
-    write_skill(&invalid, "different-name", "Invalid name");
+    let divergent = library.join("legacy-helper");
+    std::fs::create_dir_all(&divergent).unwrap();
+    write_skill(&divergent, "different-name", "Legacy helper");
 
     let yaml = format!(
         "version: 1\nlocations:\n  - path: {}\n    exclusions: []\n    allow_overlap: false\n    sources:\n      - key: local/library\n        path: .\n        skills:\n          - path: local-skill\n      - key: elastic/agent-skills\n        path: agent-skills\n        skills:\n          - path: .\n",
@@ -50,9 +50,14 @@ fn library_scan_keeps_one_inventory_across_local_and_git_sources() {
     assert_eq!(snapshot.sources().len(), 2);
     let local = snapshot.source("local/library").unwrap();
     assert_eq!(local.kind(), SourceKind::Local);
-    assert_eq!(
-        local.skill("legacy-helper").unwrap().validity(),
-        SkillValidity::Invalid
+    let legacy = local.skill("legacy-helper").unwrap();
+    assert_eq!(legacy.validity(), SkillValidity::Valid);
+    assert!(legacy.diagnostics().is_empty());
+    assert!(
+        legacy
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("does not match directory"))
     );
     let git = snapshot.source("elastic/agent-skills").unwrap();
     assert_eq!(git.kind(), SourceKind::Git);
@@ -167,6 +172,7 @@ fn repository_root_skill_uses_frontmatter_name_independently_of_source_directory
         .skill(".")
         .unwrap();
     assert_eq!(skill.name(), Some("portable-skill"));
+    assert!(skill.warnings().is_empty());
     assert_eq!(skill.validity(), SkillValidity::Valid);
 }
 
@@ -236,12 +242,12 @@ fn legacy_source_inventory_does_not_create_phantom_sources() {
 }
 
 #[test]
-fn invalid_registered_skill_keeps_its_registration_identity() {
+fn differently_named_registered_skill_keeps_its_registration_identity() {
     let home = support::TestHome::new();
     let library = home.path().join("library");
-    let invalid = library.join("legacy-helper");
-    std::fs::create_dir_all(&invalid).unwrap();
-    write_skill(&invalid, "different-name", "Legacy helper");
+    let divergent = library.join("legacy-helper");
+    std::fs::create_dir_all(&divergent).unwrap();
+    write_skill(&divergent, "different-name", "Legacy helper");
     let yaml = format!(
         "version: 1\nlocations:\n  - path: {}\n    sources:\n      - key: local/library\n        path: .\n        skills:\n          - path: legacy-helper\n",
         serde_json::to_string(library.to_str().unwrap()).unwrap()
@@ -262,7 +268,11 @@ fn invalid_registered_skill_keeps_its_registration_identity() {
         .skill("legacy-helper")
         .unwrap();
 
-    assert_eq!(skill.validity(), SkillValidity::Invalid);
+    assert_eq!(skill.validity(), SkillValidity::Valid);
+    assert_eq!(skill.path(), "legacy-helper");
+    assert_eq!(skill.name(), Some("different-name"));
+    assert!(skill.diagnostics().is_empty());
+    assert_eq!(skill.warnings().len(), 1);
 }
 
 #[test]
@@ -310,6 +320,82 @@ fn colliding_source_keys_cannot_resolve_a_skill() {
         2
     );
     assert!(snapshot.resolve(&key).is_none());
+}
+
+#[test]
+fn human_readable_names_are_usable_and_unsafe_or_incomplete_metadata_is_not() {
+    let home = support::TestHome::new();
+    let library = home.path().join("library");
+    std::fs::create_dir_all(&library).unwrap();
+    let readable = library.join("bot-ui");
+    std::fs::create_dir_all(&readable).unwrap();
+    write_skill(&readable, "Make Bot UI", "Build bot interfaces");
+    for (directory, name) in [
+        ("empty", ""),
+        ("dot", "."),
+        ("parent", ".."),
+        ("slash", "../outside"),
+        ("backslash", "some\\path"),
+        ("control", "some\u{0007}name"),
+    ] {
+        let path = library.join(directory);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("SKILL.md"),
+            format!(
+                "---\nname: {}\ndescription: Example\n---\n",
+                serde_json::to_string(name).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    let incomplete = library.join("incomplete");
+    std::fs::create_dir_all(&incomplete).unwrap();
+    write_skill(&incomplete, "Incomplete Skill", "\"\"");
+    let malformed = library.join("malformed");
+    std::fs::create_dir_all(&malformed).unwrap();
+    std::fs::write(malformed.join("SKILL.md"), "not YAML frontmatter").unwrap();
+    let missing_name = library.join("missing-name");
+    std::fs::create_dir_all(&missing_name).unwrap();
+    std::fs::write(
+        missing_name.join("SKILL.md"),
+        "---\ndescription: No name provided\n---\n",
+    )
+    .unwrap();
+    let yaml = format!(
+        "version: 1\nlocations:\n  - path: {}\n",
+        serde_json::to_string(library.to_str().unwrap()).unwrap()
+    );
+    let LoadResult::Valid(config) = LibraryConfigCodec::parse(yaml.as_bytes()) else {
+        panic!("valid fixture config");
+    };
+    let snapshot = scan_library(
+        config.value(),
+        &home.library_config(),
+        home.path(),
+        &BTreeMap::new(),
+    );
+    let source = snapshot.source("local/library").unwrap();
+    let readable = source.skill("bot-ui").unwrap();
+    assert_eq!(readable.name(), Some("Make Bot UI"));
+    assert_eq!(readable.validity(), SkillValidity::Valid);
+    assert!(readable.diagnostics().is_empty());
+    assert_eq!(readable.warnings().len(), 2);
+    for directory in [
+        "empty",
+        "dot",
+        "parent",
+        "slash",
+        "backslash",
+        "control",
+        "incomplete",
+        "malformed",
+        "missing-name",
+    ] {
+        let skill = source.skill(directory).unwrap();
+        assert_eq!(skill.validity(), SkillValidity::Invalid, "{directory}");
+        assert!(!skill.diagnostics().is_empty(), "{directory}");
+    }
 }
 
 fn write_skill(directory: &std::path::Path, name: &str, description: &str) {

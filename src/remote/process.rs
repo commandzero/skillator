@@ -19,6 +19,114 @@ pub(super) fn capture(command: &mut Command) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+/// Capture a delivery subprocess without terminal output. Unlike host probes,
+/// rsync inventory is unbounded and transfers have no artificial deadline.
+pub(super) fn capture_transfer(
+    command: &mut Command,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Error::input("Skill delivery cancelled"));
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = command.spawn().map_err(|error| {
+        Error::input(format!(
+            "cannot start {}: {error}",
+            command.get_program().to_string_lossy()
+        ))
+    })?;
+    fn read_pipe<R: Read + Send + 'static>(
+        mut pipe: R,
+        limit: Option<usize>,
+    ) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                let count = pipe.read(&mut buffer)?;
+                if count == 0 {
+                    return Ok(output);
+                }
+                let retain = limit.map_or(count, |max| max.saturating_sub(output.len()).min(count));
+                output.extend_from_slice(&buffer[..retain]);
+            }
+        })
+    }
+    let stdout = read_pipe(child.stdout.take().expect("piped stdout"), None);
+    // A broken remote can produce unlimited stderr. Retain useful diagnostics
+    // while continuing to drain its pipe so it cannot block the transfer.
+    let stderr = read_pipe(child.stderr.take().expect("piped stderr"), Some(65536));
+    let mut status = None;
+    let result = loop {
+        if cancel.load(Ordering::Relaxed) {
+            break Err(Error::input("Skill delivery cancelled"));
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(found) => status = found,
+                Err(error) => {
+                    break Err(Error::input(format!(
+                        "cannot wait for {}: {error}",
+                        command.get_program().to_string_lossy()
+                    )));
+                }
+            }
+        }
+        if let Some(finished_status) = status
+            && stdout.is_finished()
+            && stderr.is_finished()
+        {
+            break Ok(finished_status);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if result.is_err() {
+        // SAFETY: process_group(0) created a private group led by this child;
+        // a negative PID signals its descendants even if the leader already
+        // exited but a descendant still holds a pipe open.
+        if let Ok(group) = i32::try_from(child.id()) {
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+        }
+        let _ = child.wait();
+    }
+    let stdout = stdout
+        .join()
+        .map_err(|_| Error::input("delivery stdout reader failed"))?
+        .map_err(|error| Error::input(format!("cannot read delivery stdout: {error}")))?;
+    let stderr = stderr
+        .join()
+        .map_err(|_| Error::input("delivery stderr reader failed"))?
+        .map_err(|error| Error::input(format!("cannot read delivery stderr: {error}")))?;
+    let status = result?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Error::input("Skill delivery cancelled"));
+    }
+    if !status.success() {
+        let diagnostic = sanitized(&stderr);
+        return Err(Error::input(if diagnostic.is_empty() {
+            format!(
+                "{} failed with {status}",
+                command.get_program().to_string_lossy()
+            )
+        } else {
+            format!(
+                "{} failed with {status}: {diagnostic}",
+                command.get_program().to_string_lossy()
+            )
+        }));
+    }
+    Ok(stdout)
+}
+
 #[derive(Debug)]
 pub(super) struct BoundedOutput {
     pub stdout: Vec<u8>,
@@ -248,5 +356,71 @@ mod tests {
         );
         thread.join().unwrap();
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn transfer_keeps_entire_large_itemized_inventory() {
+        let cancel = AtomicBool::new(false);
+        let output = capture_transfer(
+            Command::new("sh").args([
+                "-c",
+                "i=0; while [ \"$i\" -lt 12000 ]; do printf '>f+++++++++ path/%s\\n' \"$i\"; i=$((i+1)); done",
+            ]),
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(output.iter().filter(|&&byte| byte == b'\n').count(), 12000);
+    }
+
+    #[test]
+    fn transfer_captures_failure_without_writing_to_terminal() {
+        let cancel = AtomicBool::new(false);
+        let error = capture_transfer(
+            Command::new("sh").args([
+                "-c",
+                "printf 'private inventory\\n'; printf 'receiver refused the transfer\\n' >&2; exit 23",
+            ]),
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("receiver refused the transfer"));
+        assert!(!error.to_string().contains("private inventory"));
+    }
+
+    #[test]
+    fn transfer_cancellation_reaps_descendants_holding_pipes() {
+        use std::fs;
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("ready");
+        let delayed = root.path().join("delayed");
+        let signal = Arc::new(AtomicBool::new(false));
+        let child_signal = signal.clone();
+        let ready_path = ready.clone();
+        let delayed_path = delayed.clone();
+        let runner = std::thread::spawn(move || {
+            capture_transfer(
+                Command::new("sh")
+                    .arg("-c")
+                    .arg("sh -c 'sleep 1; printf escaped > \"$1\"' sh \"$2\" & printf ready > \"$1\"; wait")
+                    .arg("sh")
+                    .arg(ready_path)
+                    .arg(delayed_path),
+                &child_signal,
+            )
+        });
+        let start = Instant::now();
+        while !ready.exists() && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "subprocess did not begin");
+        signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        let start = Instant::now();
+        let result = runner.join().unwrap();
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(!delayed.exists(), "descendant survived cancellation");
+        assert_eq!(fs::read(&ready).unwrap(), b"ready");
     }
 }

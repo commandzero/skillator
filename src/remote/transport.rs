@@ -1,4 +1,6 @@
-use super::{EXPORT_PREFIX, Error, MARKER_CONTENT, MARKER_NAME, REPLICA_RELATIVE, Result, process};
+use super::{
+    EXPORT_PREFIX, Error, Execution, MARKER_CONTENT, MARKER_NAME, REPLICA_RELATIVE, Result,
+};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -30,11 +32,11 @@ const SSH_OPTIONS: &[&str] = &[
     "-oServerAliveCountMax=2",
 ];
 
-fn ssh(destination: &str, script: &str) -> Result<Vec<u8>> {
+fn ssh(destination: &str, script: &str, execution: &Execution<'_>) -> Result<Vec<u8>> {
     if !valid_destination(destination) {
         return Err(Error::input("invalid SSH destination"));
     }
-    process::capture(
+    execution.capture(
         Command::new("ssh")
             .args(SSH_OPTIONS)
             .arg("--")
@@ -62,22 +64,26 @@ fn checked_absolute(path: &Path) -> bool {
                 .all(|part| !part.is_empty() && part != b"." && part != b".."))
 }
 
-pub(super) fn check_rsync() -> Result<()> {
-    process::capture(
+pub(super) fn check_rsync(execution: &Execution<'_>) -> Result<()> {
+    execution.capture(
         Command::new("rsync")
             .args(RSYNC_OPTIONS.split_ascii_whitespace())
             .args(RSYNC_PROBE_OPTIONS.split_ascii_whitespace())
             .stdout(Stdio::null()),
     )
-        .map(|_| ())
-        .map_err(|error| {
-            Error::input(format!(
-                "rsync is unavailable or lacks required transfer options; install/update it and add it to PATH: {error}"
-            ))
-        })
+    .map(|_| ())
+    .map_err(|error| {
+        Error::input(format!(
+            "rsync is unavailable or lacks required transfer options; install/update it and add it to PATH: {error}"
+        ))
+    })
 }
 
-pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica> {
+pub(super) fn remote_replica(
+    destination: &str,
+    create: bool,
+    execution: &Execution<'_>,
+) -> Result<Replica> {
     // A missing destination is not created during preview; rsync dry-run is only
     // necessary when there is an existing, marked destination to compare.
     let marker_content = shell_quote(MARKER_CONTENT);
@@ -124,7 +130,7 @@ pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica>
         if create { "yes" } else { "no" },
     );
     // The receiver only creates the marker when it created the replica root.
-    let output = ssh(destination, &script)?;
+    let output = ssh(destination, &script, execution)?;
     let text = String::from_utf8(output).map_err(Error::input_display)?;
     let (status, raw) = text
         .strip_suffix('\n')
@@ -272,7 +278,7 @@ fn validated_export_script(path: &Path) -> Result<String> {
     ))
 }
 
-pub(super) fn remote_export(destination: &str) -> Result<PathBuf> {
+pub(super) fn remote_export(destination: &str, execution: &Execution<'_>) -> Result<PathBuf> {
     let script = format!(
         "set -eu\n\
          command -v rsync >/dev/null 2>&1 || {{ echo 'rsync is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
@@ -280,7 +286,7 @@ pub(super) fn remote_export(destination: &str) -> Result<PathBuf> {
          command -v skillator >/dev/null 2>&1 || {{ echo 'Skillator is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
          skillator library rsync --prepare-export\n",
     );
-    let output = ssh(destination, &script)?;
+    let output = ssh(destination, &script, execution)?;
     let path = String::from_utf8(output).map_err(Error::input_display)?;
     let Some(raw) = path.strip_suffix('\n') else {
         return Err(Error::input(
@@ -295,17 +301,21 @@ pub(super) fn remote_export(destination: &str) -> Result<PathBuf> {
     }
     // Validate the same physical parent, directory and marker used for cleanup
     // before handing the leader's path to rsync.
-    ssh(destination, &validated_export_script(&path)?)?;
+    ssh(destination, &validated_export_script(&path)?, execution)?;
     Ok(path)
 }
 
-pub(super) fn cleanup_export(destination: &str, path: &Path) -> Result<()> {
+pub(super) fn cleanup_export(
+    destination: &str,
+    path: &Path,
+    execution: &Execution<'_>,
+) -> Result<()> {
     if !valid_export_path(path) {
         return Err(Error::input("invalid leader export path; refusing cleanup"));
     }
     let mut script = validated_export_script(path)?;
     script.push_str("rm -r -- \"$dir\"\n");
-    ssh(destination, &script).map(|_| ())
+    ssh(destination, &script, execution).map(|_| ())
 }
 
 pub(super) fn rsync(
@@ -314,6 +324,7 @@ pub(super) fn rsync(
     replica: &Path,
     direction: Direction,
     check: bool,
+    execution: &Execution<'_>,
 ) -> Result<bool> {
     if !valid_destination(destination) {
         return Err(Error::input("invalid SSH destination"));
@@ -339,7 +350,7 @@ pub(super) fn rsync(
             command.arg("--").arg(remote_arg(&export)).arg(replica);
         }
     }
-    Ok(!process::capture(&mut command)?.is_empty())
+    Ok(!execution.capture(&mut command)?.is_empty())
 }
 
 fn valid_destination(destination: &str) -> bool {
@@ -355,6 +366,7 @@ fn valid_destination(destination: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::process;
     use super::*;
     use std::os::unix::fs::symlink;
 

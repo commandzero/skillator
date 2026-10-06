@@ -1583,7 +1583,17 @@ impl LibraryWorkflow {
                         path: skill.path().to_owned(),
                         name: skill.name().map(str::to_owned),
                         valid: skill.validity() == SkillValidity::Valid,
-                        diagnostics: skill.diagnostics().to_vec(),
+                        diagnostics: skill
+                            .diagnostics()
+                            .iter()
+                            .cloned()
+                            .chain(
+                                skill
+                                    .warnings()
+                                    .iter()
+                                    .map(|warning| format!("Warning: {warning}")),
+                            )
+                            .collect(),
                     })
                     .collect(),
             })

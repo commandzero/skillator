@@ -3,7 +3,7 @@ type: Playbook
 title: Contributing
 description: Local validation, pull-request checks, and contribution rules.
 status: draft
-generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-04T05:27:41Z }
+generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-06T05:31:16Z }
 ---
 
 # Contributing
@@ -44,8 +44,23 @@ The repository checker is a Cargo example using existing development dependencie
 
 Unsafe code is denied by default. The private filesystem module uses atomic rename APIs absent from the standard library. Library delivery uses ordinary SSH and rsync without descriptor-binding or a custom remote server.
 The private update-process module uses POSIX signal handlers, process-group signals, and nonblocking pipe flags to bound Git pull subprocesses.
-The private remote-process module uses process-group signals to cancel and bound TUI SSH probes and replica inspection, including their descendants.
+The private remote-process module uses process-group signals to cancel TUI SSH/rsync delivery and to cancel and bound hostname probes and replica inspection, including their descendants. Delivery has no artificial transfer deadline.
 Keep CString lifetime, signal ownership, descriptor lifetime, and platform-flag safety explanations next to each unsafe block. Expand this exception only with a documented need and focused behavior tests.
+
+## TUI module boundaries
+
+Keep scope workflows in `src/tui/`:
+
+- `user.rs` owns User loading and directory-tab construction.
+- `repo.rs` owns Repo loading, repository-owned skills and tracking exceptions.
+- `library.rs` owns Library discovery, acquisition, host browsing and follower delivery.
+- `target.rs` shares the User/Repo directory-editing, background-loading and save lifecycle.
+
+`mod.rs` owns terminal restoration, cached scope navigation and event dispatch.
+`model.rs`, `reducer.rs`, `input.rs` and `render.rs` share state, transitions, key decoding and rendering.
+Scope workflows execute effects; navigation uses typed outcomes rather than reserved exit statuses.
+Keep User/Repo differences in their scope modules instead of duplicating the directory event loop.
+Cross-scope behavior coverage lives in `src/tui/tests.rs`; public interaction coverage lives in `tests/tui.rs` and `tests/acceptance.rs`.
 
 ## Commits and history
 
@@ -116,9 +131,11 @@ Repository administrators must enforce these rules in GitHub; workflow files alo
 
 Automated TUI tests run in preflight. For changes to terminal interaction, also use an isolated HOME and a temporary Git repository.
 
-1. Start the TUI in an interactive terminal and open help.
-2. Resize the terminal, cycle Library/User/Repo with Ctrl+Left/Right, cycle sub-tabs with Tab, and filter the list.
-3. Use Ctrl+T to stage a preset and custom directory; cancel/discard and confirm no skill files or configuration changed. Save and restart to check scope isolation. With a disposable trusted-key SSH follower, verify its differing alias/hostname and read-only replica tab without changing SSH trust or replica contents.
+1. Start the TUI in an interactive terminal and open help. Verify root startup selects Repo in Git and User in the physical home directory, including home-as-Git and absent Library config.
+2. Resize the terminal, cycle Library/User/Repo with Ctrl+H/Ctrl+L (also from `skillator library`), cycle sub-tabs with Tab, and filter the list. Check gray Library borders, bone titles, editor Backspace and dirty-scope guards.
+   With deliberately slow Git discovery, check cached Library entry renders without waiting and cold `skillator library` accepts input while loading. Add a skill externally and verify background updates preserve selected identity/filter/collapse state. Complete a refresh during an editor or staged acquisition, then cancel/undo and check no edits are lost. Replace Library configuration during a scan and confirm obsolete replies are ignored; change filesystem safety after caching and confirm Save revalidates it. Check SSH inspection cancels on scope/host exit and restarts in the retained follower tab.
+   Check both exits from Library, including first User/Repo entry after explicit Library launch: cached/loading views and scope controls must not wait for destination observation. While refresh runs, stage checks/modes in one directory, browse another, and open an editor; no state may be overwritten. Insert a configured directory externally and check selected directory/row identity, filters and collapse state survive. Undo and save must discard old replies, reload fresh state and retain live configuration/destination guards.
+3. Use `Ctrl+T` to stage a preset and custom directory; cancel/discard and confirm no skill files or configuration changed. Save and restart to check scope isolation. With a disposable trusted-key SSH follower, verify its differing alias/hostname and read-only replica tab without changing SSH trust or unrelated replica contents. Save a newly registered host, decline initialization, and confirm its registration persists without a replica; repeat with two new hosts to check prompt order and host-only `Ctrl+S` deferred exit. On a saved follower, confirm `s` and `Ctrl+S` offer the owned-replica overwrite/stale-file-deletion boundary and never save Local edits or exit. Decline once, then accept and observe a real leader-to-selected-follower rsync and refreshed inspection; verify Local `s` still saves. During a slow transfer, navigate away and check the UI remains responsive, duplicates do not start another transfer, cancellation stops local SSH/rsync descendants, private exports are cleaned, and stale results do not replace the next host's view. If a transfer is interrupted, check the owned replica for partial content instead of assuming rollback. Inspect failure details and retained export cleanup diagnostics when relevant.
 4. Quit and check that normal input, echo, cursor visibility, and the alternate screen recover.
 
 Record the host and terminal used. Linux, WSL, and release-target checks require those actual environments.

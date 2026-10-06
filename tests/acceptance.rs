@@ -13,7 +13,8 @@ use skillator::domain::MaterializationKind;
 use skillator::library::{LibrarySnapshot, SkillValidity, scan_library};
 use skillator::reconcile::{Authorization, Outcome, Safety, execute, plan, prepare_check};
 use skillator::target::{Comparison, MaterializationState, ObservedState, Target, observe};
-use skillator::tui::{Action as TuiAction, CheckState, Model, Overlay, Row, Workspace, reduce};
+use skillator::tui::model::{Action as TuiAction, CheckState, Model, Overlay, Row, Workspace};
+use skillator::tui::reducer::reduce;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -36,8 +37,8 @@ impl AcceptanceFixture {
         let copy_helper = primary.join("copy-helper");
         write_skill(&copy_helper, "copy-helper", "Copy safely");
         std::os::unix::fs::symlink("/tmp", copy_helper.join("absolute-link")).unwrap();
-        let invalid = primary.join("legacy-helper");
-        write_skill(&invalid, "wrong-name", "Invalid metadata");
+        let divergent = primary.join("legacy-helper");
+        write_skill(&divergent, "wrong-name", "Legacy helper");
 
         let nested = primary.join("tools");
         support::git_init(&nested);
@@ -147,11 +148,13 @@ fn wayfinder_02_keeps_registered_valid_skills_available() {
 }
 
 #[test]
-fn wayfinder_03_surfaces_invalid_skills_without_registering_them() {
+fn wayfinder_03_surfaces_name_divergence_without_blocking_discovery() {
     let fixture = AcceptanceFixture::new();
     let source = fixture.library.source("local/catalog").unwrap();
     assert!(source.skills().any(|skill| {
-        skill.path() == "legacy-helper" && skill.validity() == SkillValidity::Invalid
+        skill.path() == "legacy-helper"
+            && skill.validity() == SkillValidity::Valid
+            && !skill.warnings().is_empty()
     }));
 }
 
@@ -381,11 +384,11 @@ fn wayfinder_20_prompts_before_discarding_staged_tui_edits() {
         )],
     );
     reduce(&mut model, TuiAction::Toggle);
-    reduce(&mut model, TuiAction::ToggleLibrary);
+    reduce(&mut model, TuiAction::NextScope);
     assert_eq!(
         model.overlay(),
         &Overlay::ScopeSwitch {
-            destination: skillator::tui::Scope::Library,
+            destination: skillator::tui::model::Scope::Library,
             host_to: None,
         }
     );

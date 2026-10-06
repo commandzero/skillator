@@ -39,6 +39,7 @@ pub struct LibrarySkill {
     validity: SkillValidity,
     available: bool,
     diagnostics: Vec<String>,
+    warnings: Vec<String>,
     absolute_path: Option<PathBuf>,
     fingerprint: EntryFingerprint,
 }
@@ -66,6 +67,10 @@ impl LibrarySkill {
 
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     pub fn absolute_path(&self) -> Option<&Path> {
@@ -568,6 +573,13 @@ struct SkillFrontmatter {
     description: String,
 }
 
+pub(crate) struct SkillMetadata {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) errors: Vec<String>,
+    pub(crate) warnings: Vec<String>,
+}
+
 fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
     let path = path_text(relative);
     let absolute_path = directory.canonicalize().ok();
@@ -576,29 +588,16 @@ fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
         .map(skill_fingerprint)
         .unwrap_or(EntryFingerprint::Uninspectable);
     let bytes = fs::read(directory.join("SKILL.md"));
-    let mut diagnostics = Vec::new();
+    let directory_name = (!relative.as_os_str().is_empty() && relative != Path::new("."))
+        .then(|| directory.file_name().and_then(OsStr::to_str))
+        .flatten();
     let metadata = match bytes {
-        Ok(bytes) => parse_frontmatter(&bytes),
+        Ok(bytes) => inspect_skill_metadata(&bytes, directory_name),
         Err(error) => Err(format!("cannot read SKILL.md: {error}")),
     };
     match metadata {
         Ok(metadata) => {
-            let basename = directory.file_name().and_then(OsStr::to_str);
-            if !valid_skill_name(&metadata.name) {
-                diagnostics.push("SKILL.md name must be 1 to 64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen".to_owned());
-            }
-            if !relative.as_os_str().is_empty()
-                && relative != Path::new(".")
-                && basename != Some(metadata.name.as_str())
-            {
-                diagnostics.push(format!(
-                    "SKILL.md name `{}` does not match directory",
-                    metadata.name
-                ));
-            }
-            if metadata.description.trim().is_empty() {
-                diagnostics.push("SKILL.md description is empty".to_owned());
-            }
+            let diagnostics = metadata.errors;
             LibrarySkill {
                 path,
                 name: Some(metadata.name),
@@ -610,6 +609,7 @@ fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
                 },
                 available: true,
                 diagnostics,
+                warnings: metadata.warnings,
                 absolute_path,
                 fingerprint,
             }
@@ -621,6 +621,7 @@ fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
             validity: SkillValidity::Invalid,
             available: true,
             diagnostics: vec![error],
+            warnings: Vec::new(),
             absolute_path,
             fingerprint,
         },
@@ -650,12 +651,52 @@ fn parse_frontmatter(bytes: &[u8]) -> Result<SkillFrontmatter, String> {
     serde_saphyr::from_str(&yaml).map_err(|error| error.to_string())
 }
 
+pub(crate) fn inspect_skill_metadata(
+    bytes: &[u8],
+    directory_name: Option<&str>,
+) -> Result<SkillMetadata, String> {
+    let metadata = parse_frontmatter(bytes)?;
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let safe_name = safe_skill_name(&metadata.name);
+    if !safe_name {
+        errors.push("SKILL.md name must be a nonempty, safe directory name".to_owned());
+    } else if !valid_skill_name(&metadata.name) {
+        warnings.push("SKILL.md name should be 1 to 64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen".to_owned());
+    }
+    if let Some(directory_name) = directory_name
+        && safe_name
+        && directory_name != metadata.name
+    {
+        warnings.push(format!(
+            "SKILL.md name `{}` does not match directory",
+            metadata.name
+        ));
+    }
+    if metadata.description.trim().is_empty() {
+        errors.push("SKILL.md description is empty".to_owned());
+    }
+    Ok(SkillMetadata {
+        name: metadata.name,
+        description: metadata.description,
+        errors,
+        warnings,
+    })
+}
+
 pub(crate) fn validated_skill_metadata_at(directory: &Path) -> Option<(String, String)> {
-    let metadata = fs::read(directory.join("SKILL.md"))
-        .ok()
-        .and_then(|bytes| parse_frontmatter(&bytes).ok())?;
-    (valid_skill_name(&metadata.name) && !metadata.description.trim().is_empty())
+    let bytes = fs::read(directory.join("SKILL.md")).ok()?;
+    let metadata = parse_frontmatter(&bytes).ok()?;
+    (safe_skill_name(&metadata.name) && !metadata.description.trim().is_empty())
         .then_some((metadata.name, metadata.description))
+}
+
+fn safe_skill_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && !matches!(name, "." | "..")
+        && !name
+            .chars()
+            .any(|character| matches!(character, '/' | '\\') || character.is_control())
 }
 
 pub(crate) fn validated_skill_name_at(directory: &Path) -> Option<String> {

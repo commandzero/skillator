@@ -74,6 +74,95 @@ fn library_acquisition_link_preserves_the_source_and_links_into_the_local_librar
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn importing_a_human_readable_name_preserves_the_original_skill_file() {
+    for mode in [
+        LibraryAcquisitionMode::Copy,
+        LibraryAcquisitionMode::Link,
+        LibraryAcquisitionMode::Move,
+    ] {
+        let fixture = AcquisitionFixture::new();
+        let original =
+            b"---\nname: Make Bot UI\ndescription: Demo Skill\n---\nOriginal instructions\n";
+        std::fs::write(fixture.source_skill.join("SKILL.md"), original).unwrap();
+        let session = LibraryWorkflow::load(&fixture.paths).unwrap();
+        LibraryWorkflow::save_with_acquisitions(
+            &fixture.paths,
+            &session,
+            &fixture.staged,
+            &[LibraryAcquisition::new(
+                fixture.source_skill.clone(),
+                "Make Bot UI".to_owned(),
+                mode,
+                false,
+            )],
+            true,
+        )
+        .unwrap();
+        let imported = fixture.local_root.join("Make Bot UI");
+        assert_eq!(std::fs::read(imported.join("SKILL.md")).unwrap(), original);
+        let session = LibraryWorkflow::load(&fixture.paths).unwrap();
+        let inventory = LibraryWorkflow::snapshot(&fixture.paths, &session.config);
+        let skill = inventory
+            .source("local/library")
+            .unwrap()
+            .skill("Make Bot UI")
+            .unwrap();
+        assert_eq!(skill.name(), Some("Make Bot UI"));
+        assert_eq!(skill.validity(), skillator::library::SkillValidity::Valid);
+        assert!(!skill.warnings().is_empty());
+        let report = LibraryWorkflow::inventory(&fixture.paths, None).unwrap();
+        let reported = report
+            .sources
+            .iter()
+            .flat_map(|source| &source.skills)
+            .find(|skill| skill.path == "Make Bot UI")
+            .unwrap();
+        assert!(reported.valid);
+        assert!(
+            reported
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.starts_with("Warning: "))
+        );
+    }
+}
+
+#[test]
+fn importing_an_unsafe_metadata_name_cannot_escape_the_library() {
+    let fixture = AcquisitionFixture::new();
+    std::fs::write(
+        fixture.source_skill.join("SKILL.md"),
+        "---\nname: ../outside\ndescription: Demo Skill\n---\n",
+    )
+    .unwrap();
+    let session = LibraryWorkflow::load(&fixture.paths).unwrap();
+    let error = LibraryWorkflow::save_with_acquisitions(
+        &fixture.paths,
+        &session,
+        &fixture.staged,
+        &[LibraryAcquisition::new(
+            fixture.source_skill.clone(),
+            "../outside".to_owned(),
+            LibraryAcquisitionMode::Copy,
+            false,
+        )],
+        true,
+    )
+    .unwrap_err();
+    std::assert_matches!(error, WorkflowError::InvalidInput { .. });
+    assert!(fixture.source_skill.join("SKILL.md").is_file());
+    assert!(
+        !fixture
+            .local_root
+            .parent()
+            .unwrap()
+            .join("outside")
+            .exists()
+    );
+}
+
 #[test]
 fn acquisition_collision_preserves_the_source_destination_and_configuration() {
     let fixture = AcquisitionFixture::new();

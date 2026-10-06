@@ -2,7 +2,7 @@
 use super::{MARKER_CONTENT, MARKER_NAME, REPLICA_RELATIVE, config::Config, process};
 use crate::config::{Fingerprint, save_bytes};
 use crate::domain::{SkillPath, SourceKey};
-use serde::Deserialize;
+use crate::library::inspect_skill_metadata;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -196,6 +196,7 @@ pub(crate) struct ReplicaSkill {
     pub description: String,
     pub document: String,
     pub diagnostic: Option<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -305,7 +306,7 @@ fn decode_inventory(output: &[u8], warning: Option<String>) -> Result<ReplicaInv
         }
         let document_bytes = &remaining[..size];
         remaining = &remaining[size..];
-        let (description, diagnostic) = metadata(document_bytes, skill_path);
+        let (description, diagnostic, warnings) = metadata(document_bytes, skill_path);
         let document = String::from_utf8_lossy(document_bytes)
             .chars()
             .map(|character| {
@@ -322,6 +323,7 @@ fn decode_inventory(output: &[u8], warning: Option<String>) -> Result<ReplicaInv
             description,
             document,
             diagnostic,
+            warnings,
         });
     }
     skills.sort_by(|left, right| {
@@ -334,80 +336,35 @@ fn decode_inventory(output: &[u8], warning: Option<String>) -> Result<ReplicaInv
     })
 }
 
-#[derive(Deserialize)]
-struct Frontmatter {
-    name: String,
-    description: String,
-}
-
-fn metadata(bytes: &[u8], path: &str) -> (String, Option<String>) {
-    let parsed = (|| {
-        let document = std::str::from_utf8(bytes)
-            .map_err(|error| format!("SKILL.md is not UTF-8: {error}"))?;
-        let mut lines = document.lines();
-        if lines.next() != Some("---") {
-            return Err("SKILL.md must start with YAML metadata between --- lines".to_owned());
-        }
-        let mut yaml = String::new();
-        let mut closed = false;
-        for line in lines {
-            if line == "---" {
-                closed = true;
-                break;
-            }
-            yaml.push_str(line);
-            yaml.push('\n');
-        }
-        if !closed {
-            return Err("SKILL.md metadata is missing its closing --- line".to_owned());
-        }
-        serde_saphyr::from_str::<Frontmatter>(&yaml).map_err(|error| error.to_string())
-    })();
-    let front = match parsed {
-        Ok(front) => front,
-        Err(issue) => return (String::new(), Some(process::sanitized(issue.as_bytes()))),
-    };
-    let mut diagnostics = Vec::new();
-    if !(1..=64).contains(&front.name.len())
-        || front.name.starts_with('-')
-        || front.name.ends_with('-')
-        || front.name.contains("--")
-        || !front
-            .name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    {
-        diagnostics.push("SKILL.md name must be 1 to 64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen".to_owned());
+fn metadata(bytes: &[u8], path: &str) -> (String, Option<String>, Vec<String>) {
+    let directory_name = (path != ".").then(|| path.rsplit('/').next().unwrap_or(path));
+    match inspect_skill_metadata(bytes, directory_name) {
+        Ok(metadata) => (
+            metadata
+                .description
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        ' '
+                    } else {
+                        character
+                    }
+                })
+                .collect(),
+            (!metadata.errors.is_empty())
+                .then(|| process::sanitized(metadata.errors.join("; ").as_bytes())),
+            metadata
+                .warnings
+                .into_iter()
+                .map(|warning| process::sanitized(warning.as_bytes()))
+                .collect(),
+        ),
+        Err(issue) => (
+            String::new(),
+            Some(process::sanitized(issue.as_bytes())),
+            Vec::new(),
+        ),
     }
-    let basename = path.rsplit('/').next().unwrap_or(path);
-    if path != "." && front.name != basename {
-        diagnostics.push(format!(
-            "SKILL.md name `{}` does not match directory",
-            front.name
-        ));
-    }
-    if front.description.trim().is_empty() {
-        diagnostics.push("SKILL.md description is empty".to_owned());
-    }
-    let description = if front.description.chars().any(char::is_control) {
-        front
-            .description
-            .chars()
-            .map(|character| {
-                if character.is_control() {
-                    ' '
-                } else {
-                    character
-                }
-            })
-            .collect()
-    } else {
-        front.description
-    };
-    (
-        description,
-        (!diagnostics.is_empty()).then(|| process::sanitized(diagnostics.join("; ").as_bytes())),
-    )
 }
 
 #[cfg(test)]
@@ -554,11 +511,33 @@ mod tests {
             "---\nname: demo\ndescription: \"{}\\u001b[31m\"\n---\n",
             "A".repeat(700)
         );
-        let (description, diagnostic) = metadata(source.as_bytes(), "demo");
+        let (description, diagnostic, warnings) = metadata(source.as_bytes(), "demo");
         assert!(diagnostic.is_none());
+        assert!(warnings.is_empty());
         assert!(description.starts_with(&"A".repeat(700)));
         assert!(description.ends_with(" [31m"));
         assert!(!description.chars().any(char::is_control));
+        let (description, diagnostic, warnings) =
+            metadata(b"---\nname: demo\ndescription: Root skill\n---\n", ".");
+        assert_eq!(description, "Root skill");
+        assert!(diagnostic.is_none());
+        assert!(warnings.is_empty());
+        let (_, diagnostic, warnings) = metadata(
+            b"---\nname: \"bad\\u001b[31m\"\ndescription: unsafe\n---\n",
+            "demo",
+        );
+        assert!(diagnostic.is_some());
+        assert!(
+            diagnostic
+                .unwrap()
+                .chars()
+                .all(|character| !character.is_control())
+        );
+        assert!(
+            warnings
+                .iter()
+                .all(|warning| !warning.chars().any(char::is_control))
+        );
     }
 
     #[test]
@@ -619,11 +598,26 @@ mod tests {
         .unwrap();
         let inspected = execute();
         assert!(inspected.status.success());
+        let decoded = decode_inventory(&inspected.stdout, None).unwrap();
+        assert!(decoded.skills[0].diagnostic.is_none());
         assert!(
-            decode_inventory(&inspected.stdout, None).unwrap().skills[0]
-                .diagnostic
-                .is_some()
+            decoded.skills[0]
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("directory"))
         );
+        assert_eq!(
+            decoded.skills[0].document,
+            "---\nname: wrong\ndescription: Remote\n---\n"
+        );
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: ../unsafe\ndescription: Remote\n---\n",
+        )
+        .unwrap();
+        let inspected = execute();
+        let decoded = decode_inventory(&inspected.stdout, None).unwrap();
+        assert!(decoded.skills[0].diagnostic.is_some());
         fs::hard_link(skill.join("SKILL.md"), skill.join("second.md")).unwrap();
         assert!(!execute().status.success());
         fs::remove_file(skill.join("second.md")).unwrap();
