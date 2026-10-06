@@ -1,0 +1,28 @@
+change: fix-tui-scope-controls
+reviewer: openai-codex/gpt-6.1-sol
+reviewed_at: 2026-10-06T06:25:15Z
+notes: |
+  # OpenSpec semantic review: fix-tui-scope-controls
+  
+  Reviewer: openai-codex/gpt-6.1-sol
+  Reviewed committed implementation/spec/archive head: `09406cd589a540316aeb1f899147809c3c2f220b`.
+  
+  ## Findings
+  
+  The five modified requirements retain indexed palette roles, home-over-Git startup precedence without Library setup, directional scope cycling, scope-contained literal-input directory selection, and save/discard/return isolation. Their descriptions and every named scenario match the committed main TUI spec.
+  
+  - `openspec/specs/tui-workflows/spec.md`: **The TUI uses a consistent 256-color visual hierarchy** — exact statement and 3 scenario matches; no delta content omitted.
+  - `openspec/specs/tui-workflows/spec.md`: **The Target shows one Skill Directory at a time** — exact statement and 6 scenario matches; no delta content omitted.
+  - `openspec/specs/tui-workflows/spec.md`: **Target navigation follows the approved key contract** — exact statement and 9 scenario matches; no delta content omitted.
+  - `openspec/specs/tui-workflows/spec.md`: **Skill Directory edits use one validated overlay** — exact statement and 7 scenario matches; no delta content omitted.
+  - `openspec/specs/tui-workflows/spec.md`: **Workspace and Target changes do not carry staged edits** — exact statement and 5 scenario matches; no delta content omitted.
+  
+  No removed or renamed requirements or capabilities are declared. Every delta capability has its main spec; no intentional spec absence or no-delta exception is needed. Existing main-spec content outside the selected requirements was preserved during archival; all deltas were already synchronized before the archive command. All proposals, designs, tasks, delta specs and schema metadata are committed.
+  
+  ## Verification boundary
+  
+  Strict validation passed for all five active changes and 12 main specs before archival. Native archived-task validation passed for all 13 archives after archival, and post-archive policy preflight passed. The implementation previously passed full preflight (335 tests) and native macOS PTY/SSH/rsync smoke; no implementation files changed during archival or commit preparation. This receipt records semantic delta-to-main correspondence, not an independent human review or Linux/WSL verification.
+no_spec_deltas: false
+archive_tree: 0683cc65050aefed3557d223c510953d61c63856
+specs:
+  openspec/specs/tui-workflows/spec.md: 7d595af9e5d724865a1e124f974c032c8a6c2e34

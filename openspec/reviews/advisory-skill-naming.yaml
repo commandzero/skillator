@@ -1,0 +1,26 @@
+change: advisory-skill-naming
+reviewer: openai-codex/gpt-6.1-sol
+reviewed_at: 2026-10-06T06:25:18Z
+notes: |
+  # OpenSpec semantic review: advisory-skill-naming
+  
+  Reviewer: openai-codex/gpt-6.1-sol
+  Reviewed committed implementation/spec/archive head: `09406cd589a540316aeb1f899147809c3c2f220b`.
+  
+  ## Findings
+  
+  The Library inventory requirement keeps identity based on Source Key and registered directory path, makes safe naming differences advisory, and retains unsafe or malformed metadata as blocking errors. The inspector requirement distinguishes warnings from errors across Local, Targets and read-only followers without rewriting skill documents or adding naming-only error markers. All scenarios match the two committed main specs.
+  
+  - `openspec/specs/library-management/spec.md`: **Skill inventory is live** — exact statement and 5 scenario matches; no delta content omitted.
+  - `openspec/specs/tui-workflows/spec.md`: **The Library inspector exposes contextual diagnostics** — exact statement and 4 scenario matches; no delta content omitted.
+  
+  No removed or renamed requirements or capabilities are declared. Every delta capability has its main spec; no intentional spec absence or no-delta exception is needed. Existing main-spec content outside the selected requirements was preserved during archival; all deltas were already synchronized before the archive command. All proposals, designs, tasks, delta specs and schema metadata are committed.
+  
+  ## Verification boundary
+  
+  Strict validation passed for all five active changes and 12 main specs before archival. Native archived-task validation passed for all 13 archives after archival, and post-archive policy preflight passed. The implementation previously passed full preflight (335 tests) and native macOS PTY/SSH/rsync smoke; no implementation files changed during archival or commit preparation. This receipt records semantic delta-to-main correspondence, not an independent human review or Linux/WSL verification.
+no_spec_deltas: false
+archive_tree: d621ff48399ff8182d5110e3f424a242c11a6ad0
+specs:
+  openspec/specs/library-management/spec.md: 22de5828315fcacd6da396286cc0445335156a9b
+  openspec/specs/tui-workflows/spec.md: 7d595af9e5d724865a1e124f974c032c8a6c2e34
