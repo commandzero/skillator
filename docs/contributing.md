@@ -42,7 +42,7 @@ Changes to broader draft standards do not silently change this contract.
 Keep the product as one crate until a real consumer or dependency boundary justifies a split.
 The repository checker is a Cargo example using existing development dependencies; it adds no installed command.
 
-Unsafe code is denied by default. The private filesystem module uses atomic rename APIs absent from the standard library. Library delivery uses ordinary SSH and rsync without descriptor-binding or a custom remote server.
+Unsafe code is denied by default. The private filesystem module uses atomic rename APIs and `utimensat(..., AT_SYMLINK_NOFOLLOW)` absent from the standard library's safe filesystem interfaces. The no-follow operation preserves exported link timestamps without changing their targets. Library delivery uses ordinary SSH and rsync without descriptor-binding or a custom remote server.
 The private update-process module uses POSIX signal handlers, process-group signals, and nonblocking pipe flags to bound Git pull subprocesses.
 The private remote-process module uses process-group signals to cancel TUI SSH/rsync delivery and to cancel and bound hostname probes and replica inspection, including their descendants. Delivery has no artificial transfer deadline.
 Keep CString lifetime, signal ownership, descriptor lifetime, and platform-flag safety explanations next to each unsafe block. Expand this exception only with a documented need and focused behavior tests.

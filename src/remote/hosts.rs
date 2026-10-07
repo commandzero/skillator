@@ -146,20 +146,21 @@ fn ssh(destination: &str) -> Result<Command, String> {
     super::config::validate_destination(destination, destination)
         .map_err(|error| error.to_string())?;
     let mut command = Command::new("ssh");
-    command.args([
-        "-T",
-        "-oBatchMode=yes",
-        "-oStrictHostKeyChecking=yes",
-        "-oUpdateHostKeys=no",
-        "-oControlMaster=no",
-        "-oControlPath=none",
-        "-oControlPersist=no",
-        "-oConnectTimeout=10",
-        "-oServerAliveInterval=10",
-        "-oServerAliveCountMax=1",
-        "--",
-        destination,
-    ]);
+    command
+        .args([
+            "-T",
+            "-oBatchMode=yes",
+            "-oStrictHostKeyChecking=yes",
+            "-oUpdateHostKeys=no",
+            "-oControlMaster=no",
+            "-oControlPath=none",
+            "-oControlPersist=no",
+            "-oConnectTimeout=10",
+            "-oServerAliveInterval=10",
+            "-oServerAliveCountMax=1",
+            "--",
+        ])
+        .arg(&*super::transport::ssh_destination(destination));
     Ok(command)
 }
 

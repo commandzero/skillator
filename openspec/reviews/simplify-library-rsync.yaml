@@ -1,28 +1,74 @@
 change: simplify-library-rsync
 reviewer: openai-codex/gpt-6.1-sol
-reviewed_at: 2026-10-07T03:56:54Z
+reviewed_at: 2026-10-04T21:02:31Z
 notes: |
-  # Refreshed OpenSpec semantic review: simplify-library-rsync
+  # Clean-main semantic synchronization review
   
-  Reviewer: openai-codex/gpt-6.1-sol
-  Reviewed implementation/spec/archive head: `a78ff15346e87f45a5beb7ee4c54799a0cf929a6`.
+  Reviewer: openai-codex/gpt-6.1-sol (parent assistant, inline review).
+  Repository: commandzero/skillator.
+  Base: 233e0dbb1795da9f7c0471994b1d10babd36eaee.
+  Reviewed implementation/spec commit: 66f48a5f4261d465c315b3ca46e5dd73d41cd954.
+  Change: simplify-library-rsync.
   
-  ## Delta correspondence and later changes
+  The parallel spec reviewer failed before substantive review because its provider could not connect. These findings are the parent assistant's explicit review, not independent reviewer approval or automated equivalence proof.
   
-  All eight library-rsync requirements and both selected library-management requirements retain their archived statements and scenarios. They preserve explicit leader/follower roles, complete discovered skill content, leader authority, isolated owned replicas, incomplete-input refusal, SSH/rsync delivery, write-free previews, retryable outcomes, unresolved missing inventory, and explicit acquisition modes. All six cli-contract requirements remain present; machine-report, determinism, Git-composition and rsync outcome/non-interactive scenarios are retained.
+  ## Baseline and scope
   
-  The CLI default-root scenario intentionally follows the later archived fix-tui-scope-controls contract rather than restoring historical Library-first startup. Root selects Repo inside Git and User at physical home (including home-as-Git) or outside Git, even without Library configuration. Onboarding occurs only when Library is explicitly opened. The stale cli-contract scenario and library-management onboarding reference were corrected to this already-implemented contract. This is documentation maintenance, not repeated synchronization or mutation of an archived change. No capability or requirement was removed or renamed.
+  Main has no library-rsync capability. The complete remote capability is ADDED, not MODIFIED. No REMOVED requirements from unpublished PR #32 are applied to main. The replacement proposal records this baseline and supersedes CLOSED PR #32. Old reconciliation commits, two old archives, and old review receipts are deliberately excluded. Main's user-scope-onboarding spec, app, library, library-update, reconcile, and fs-safety implementations remain unchanged. No unpublished Rust API removal or library-writer lock changes ship. Existing local acquisition and update semantics are preserved. The only shared source adjustments are crate-private access to existing strict YAML parsing and existing internal-symlink validation, plus CLI integration and the remote module declaration. Tempfile changes from an existing development dependency to a runtime dependency.
   
-  The newer advisory-skill-naming Library inventory contract remains authoritative: safe naming deviations are warnings and do not block export, while unsafe metadata remains blocking. No old naming policy was restored. Follower inspection now reads self-contained relative SKILL.md link chains at their registered identity without replica writes, while rejecting unsafe chains and preserving output/document limits. Delivery still preserves complete supporting content and original links.
+  ## library-rsync: all eight added requirements and their scenarios match main
   
-  ## Implementation and exercised evidence
+  - Hosts are configured explicitly: mutually exclusive leader hosts and follower leader.destination, strict version/fields/destinations, alias subset/deduplication, follower selector rejection, existing SSH authentication, labels rather than identities. Explicit subset, follower invocation, and ambiguous-role scenarios are present.
+  - All skill content participates: hidden/unselected skills, location exclusions, complete supporting files/modes, materialized acquisition-link roots, self-contained internal links, and exclusion of Git/outside-skill/configuration/selection/materialization state. Hidden supporting-content, linked acquisition, and equal-name source-grouping scenarios are present. The skill-directory boundary includes valid root skills; no arbitrary extension allowlist is inferred.
+  - Leader authority regardless of initiator: current leader export is the source for push and fresh follower pull; no uploads, editing histories, conflicts, or Git checkout management. Main-host update, fresh pull without push, follower edit replacement, receiver edit replacement on push, and bounded deletion scenarios are present.
+  - Receiver replicas are isolated: fixed home-relative replica, creation and managed marker, refusal of unmarked or redirected roots, deletion only in that replica. Initial delivery, unmanaged destination, unrelated sibling preservation, and redirected-root scenarios are present.
+  - Incomplete leader input does not authorize mirroring: usable complete discovery before mutation, unavailable/unreadable/invalid/unsupported/colliding/overlapping input rejected, inspected empty input distinguished from unavailable input. Unavailable source and intentionally empty library scenarios are present.
+  - Delivery uses existing SSH and rsync: pushed-to receivers require no Git/Skillator; pulls require Skillator on invoking follower and leader, existing trust/authentication, prerequisite failures before replica writes. No receiver Skillator/Git, missing rsync, and failed leader export scenarios are present.
+  - Preview is write-free: existing-replica dry-run, absent-replica reporting without creation, cleanup and cleanup-failure reporting, meaningful 0/1 outcomes. Initial delivery, stale remote content, and follower preview scenarios are present.
+  - Ordinary retryable failures: independent leader push outcomes, one follower affected by pull, no rollback/atomicity claim, no source mutation, no history/enrollment dependency. Unreachable receiver and retry after partial transfer scenarios are present.
   
-  Full repository preflight passed: formatting, Clippy, 347 passing tests, OKF, all 12 main specs and release safeguards. Native macOS arm64 PTY smoke exercised actual root context/onboarding, scope-local deletion, fresh Target disk inventory, canceled/accepted Target changes and unchanged saved configuration. A disposable key-only SSH server plus real rsync delivered a relative-linked SKILL.md; the native read-only follower tab and inspector showed the linked document body and preserved the symlink. Filesystem-backed inspection regressions cover relative/physical-parent chains, trailing-newline targets, supporting directories named SKILL.md, escaping/absolute/broken/cyclic/overlong chains, hard links, unsupported documents and size limits. Strict main-spec validation and native archived-task validation passed (12 specs, 13 archives).
+  ## cli-contract: four modified and two added requirements match main
   
-  All associated artifacts remain committed and task-complete. This receipt binds the preserved archive and current main-spec Git objects; it is not an independent human review or Linux/WSL execution claim.
+  - Interactive defaults/explicit groups include non-interactive library rsync and retain all eight existing root/library/sync/hook scenarios. The already implemented library update command remains in the explicit command list.
+  - Compact JSON/YAML envelope retains existing fields, format version, equivalence and advisory discovery scenarios; rsync adds mode library_rsync, initiating home target, and host labels only to relevant entries/data.
+  - Deterministic ANSI-free machine output retains YAML scalar behavior and existing constraints while distinguishing configured aliases/leader labels from network destinations.
+  - Git composition retains ordinary clone and worktree examples, forbids rsync Git manipulation/bootstrap, and preserves the separately specified bounded library update contract.
+  - Added follower-replica outcomes specify labels, path, direction, action/failure, statuses, and stdout completed reports; independent failure and no-op scenarios are present.
+  - Added non-interactive leader-authoritative command specifies supported selector/check/format/color options and invalid policy/force options; default direction, follower selector rejection, and unsupported old policy scenarios are present. These negative migration constraints intentionally prevent legacy compatibility paths; they do not preserve reconciliation policy behavior.
+  
+  No CLI requirement was removed, and unrelated hook, Target/worktree, read-only, mutation, update, status, and platform requirements remain.
+  
+  ## library-management: both modified requirements match main
+  
+  - Missing inventory retains unresolved declarations and both source-missing/skill-moved scenarios, limits ordinary synchronization to no inventory creation, and specifies dedicated-replica delivery without registration and complete input before deletion.
+  - Explicit local acquisition retains first-location-only move/copy/link behavior and both existing acquisition scenarios; the new paragraph keeps rsync independent and configuration-preserving.
+  
+  No Library requirement was removed. Existing strict configuration, path expansion, discovery, exclusions, source identity, overlaps, live inventory, acquisition failure, add/remove/prune/filter, and update contracts remain.
+  
+  No user-scope delta is needed: main's existing host-local behavior is unchanged, and the new remote requirements explicitly forbid transferring selections or changing materialization entries.
+  
+  ## Verification evidence and limits
+  
+  On the clean-main replacement, full bash scripts/preflight.sh passed: formatting, strict Clippy, locked all-target tests (including all 15 delivery integration tests), doctests, shell/workflow checks, repository-tool tests, documentation OKF validation, all 11 main specs, and release safeguards. Strict active change validation passed.
+  
+  Fresh actual debug CLI over two isolated native TCP OpenSSH services on macOS proved write-free initial preview, skill-only registered-Git-repository push, executable mode 0751, fresh follower pull without a preceding push, follower edit replacement without source upload, ignored malformed follower Library/User Scope config, final no-op, bounded deletion preserving an unrelated sibling, and export cleanup. The receiver's remote PATH contained rsync and shell utilities but no Skillator/Git. Unreadable local discovery separately returned 3 with no export. Both services were stopped and all keys/trust/configuration/homes/exports/wrappers removed.
+  
+  Standards review's pending archive/receipt finding is addressed by archiving these already synchronized deltas and committing the generated receipt. Optional report/direction vocabulary, predicate, and cleanup refactoring suggestions do not establish behavioral defects and are intentionally not added to this publication-only cutover. No snapshot-isolation or adversarial receiver-race protection is claimed. CI cross-platform results are not claimed here.
+  
+  ## Current PR review refinements
+  
+  Reviewer: openai-codex/gpt-6.1-sol (parent assistant, inline). Reviewed committed implementation, current archive, and main specs at 2f12255c3d2c8bedda622922091d930d4b8a5666. This extends the historical clean-main review above; it is not an independent-provider approval.
+  
+  The archive is newly introduced by this PR, not an existing main-branch historical archive. Its design/proposal now match the actual fallback on every hard-link refusal, data-only copying, source directory/link metadata preservation, pre-transfer export validation, and directory-only cleanup. Main-branch historical archives remain unchanged. fs_safety now also contains the private no-follow utimensat seam; its documented unsafe scope and lifetime explanation match the focused link timestamp regression.
+  
+  All three archived deltas were compared with main: all 8 library-rsync, 6 cli-contract, and 2 library-management requirement bodies and scenarios are present, ignoring blank-line formatting. The library-rsync delivery prerequisite requirement now explicitly includes receiver POSIX filesystem utilities including find and leader cmp/rm/find/chmod. Its existing no-Skillator/Git scenario retains the intended lightweight receiver; new missing-housekeeping-utility and read-only-directory-cleanup scenarios reflect exercised user-visible behavior. Other requirements/scenarios and the two other capability deltas remain unchanged. No new capability, removal, rename, or absent specification is introduced.
+  
+  OpenSpec’s active-change rule interface was loaded through a temporary copy of this current archive. It resolved this repository as planningHome, returned all three existing delta paths, and supplied no additional specs rules. The copy was removed before commit. Paired main/archive edits were verified for every delta requirement.
+  
+  Verification: full bash scripts/preflight.sh passed with GNU rsync (87 unit tests, 25 delivery integration tests, remaining suites, strict Clippy, formatting, docs OKF, all 11 main specs, release safeguards). Actual CLI/rsync smoke reproduced read-only cleanup leakage and missing-cmp leakage before fixes, then proved push/pull/preview cleanup with exact 0555 receiver modes, unchanged source bytes/modes/modification times, partial-error export removal, and rejection of each missing cmp/rm/find/chmod before temporary export creation. Earlier current-PR native TCP SSH proof covers GNU/openrsync convergence, private 0700 modes, same-filesystem EPERM copy fallback, normalized HOME, and inode/export boundaries. All throwaway fixtures/services were removed. Current-head remote CI after this commit is not claimed in this receipt.
 no_spec_deltas: false
-archive_tree: ba125c982db58654326f75f434172ec455af145a
+archive_tree: 177505de527977214dadb7924d28245181007f7c
 specs:
-  openspec/specs/cli-contract/spec.md: c0ed9f29e4b68d04244f2045b3726f278bf9226f
-  openspec/specs/library-management/spec.md: 755faf2b42dbdde4593e36515a1b6f8bb9284c6e
-  openspec/specs/library-rsync/spec.md: 71b10fe10246dbfc3e92a3a1d0367485fa700307
+  openspec/specs/cli-contract/spec.md: cdc68081269d318ff7605002d13d310f15af3227
+  openspec/specs/library-management/spec.md: f3ccb13c46963f2dda668a2f3af9da640dfe5027
+  openspec/specs/library-rsync/spec.md: e850a6595c139d1f450df47abc454a2115320d73

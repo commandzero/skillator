@@ -13,7 +13,7 @@ use crate::app::{AppPaths, ReportDiagnostic, ReportOutcome};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::io::Write;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use transport::Direction;
@@ -231,18 +231,39 @@ impl Execution<'_> {
 }
 
 /// Prepare current leader skills for one follower-initiated pull.
-/// The invoking follower owns cleanup of the returned private temporary directory.
-pub(crate) fn prepare_export(paths: &AppPaths) -> Result<PathBuf> {
+/// The invoking follower owns cleanup after successful path publication.
+pub(crate) fn prepare_export(paths: &AppPaths, output: &mut impl Write) -> Result<()> {
     let config = config::Config::load(paths.home())?;
     if config.leader().is_some() {
         return Err(Error::input(
             "only a configured leader can prepare a skill export",
         ));
     }
-    let export = export::prepare(paths)?;
-    let path = export.path().canonicalize().map_err(Error::input_display)?;
-    let _ = export.keep();
-    Ok(path)
+    let export = export::prepare(paths)?.keep();
+    let result = (|| {
+        let path = export.canonicalize().map_err(Error::input_display)?;
+        writeln!(output, "{}", path.display())
+            .and_then(|()| output.flush())
+            .map_err(|error| Error {
+                code: 5,
+                message: error.to_string(),
+            })
+    })();
+    match result {
+        Ok(()) => Ok(()),
+        Err(mut error) => {
+            if let Err(cleanup_error) = export::cleanup(&export) {
+                use std::fmt::Write as _;
+                write!(
+                    error.message,
+                    "; could not remove temporary export {}: {cleanup_error}",
+                    export.display()
+                )
+                .expect("formatting into a String cannot fail");
+            }
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn run(paths: &AppPaths, options: Options) -> Result<Report> {
@@ -255,14 +276,14 @@ pub(crate) fn run(paths: &AppPaths, options: Options) -> Result<Report> {
                 "--hosts selects followers on a leader; it cannot be used on a follower",
             ));
         }
-        transport::check_rsync(&execution)?;
+        transport::check_rsync(leader.destination.contains('['), &execution)?;
         pull(
             paths,
             &leader.destination,
             options.check,
             &mut report,
             &execution,
-        );
+        )?;
     } else {
         let followers = config.select(options.hosts.as_deref())?;
         push(paths, followers, options.check, &mut report, &execution)?;
@@ -310,7 +331,12 @@ fn push(
     execution: &Execution<'_>,
 ) -> Result<()> {
     execution.ensure_running()?;
-    transport::check_rsync(execution)?;
+    transport::check_rsync(
+        followers
+            .iter()
+            .any(|(_, follower)| follower.destination.contains('[')),
+        execution,
+    )?;
     execution.ensure_running()?;
     let export = export::prepare(paths)?;
     for (alias, follower) in followers {
@@ -338,7 +364,7 @@ fn push(
         }
     }
     let export = export.keep();
-    if let Err(error) = std::fs::remove_dir_all(&export) {
+    if let Err(error) = export::cleanup(&export) {
         if !execution.quiet() {
             eprintln!(
                 "leader: could not remove temporary export {}: {error}",
@@ -346,7 +372,7 @@ fn push(
             );
         }
         report.problem(
-            None,
+            Some("leader"),
             "leader_export_cleanup_failed",
             if execution.quiet() {
                 format!(
@@ -368,19 +394,13 @@ fn pull(
     check: bool,
     report: &mut Report,
     execution: &Execution<'_>,
-) {
-    let replica = match transport::local_replica(paths.home(), false) {
-        Ok(replica) => replica,
-        Err(error) => {
-            report.transfer("leader", "pull", check, Err(error), execution);
-            return;
-        }
-    };
+) -> Result<()> {
+    let replica = transport::local_replica(paths.home(), false)?;
     let export = match transport::remote_export(destination, execution) {
         Ok(export) => export,
         Err(error) => {
             report.transfer("leader", "pull", check, Err(error), execution);
-            return;
+            return Ok(());
         }
     };
     let result = (|| {
@@ -405,17 +425,19 @@ fn pull(
             export.display()
         );
         report.problem(
-            None,
+            Some("leader"),
             "leader_export_cleanup_failed",
             "Could not remove the temporary leader export; see stderr for cleanup details.",
         );
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn tui_rejects_changed_saved_destination_before_export_or_network() {

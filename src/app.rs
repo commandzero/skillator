@@ -32,7 +32,13 @@ impl AppPaths {
     pub fn new(home: PathBuf) -> Self {
         Self {
             home,
-            environment: std::env::vars().collect(),
+            // Location expressions are UTF-8; unrepresentable variables are unavailable.
+            // Keep OS paths in their native form for the workflow's own validation.
+            environment: std::env::vars_os()
+                .filter_map(|(key, value)| {
+                    Some((key.into_string().ok()?, value.into_string().ok()?))
+                })
+                .collect(),
         }
     }
 

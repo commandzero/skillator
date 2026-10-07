@@ -1,4 +1,4 @@
-use super::{Error, Result};
+use super::{Error, Result, transport::valid_destination};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -80,7 +80,6 @@ impl Config {
     pub(super) fn render(&self) -> Result<String> {
         serde_saphyr::to_string(self).map_err(Error::input_display)
     }
-
     pub fn load(home: &Path) -> Result<Self> {
         let directory = home.join(".skillator");
         let path = directory.join("config.yaml");
@@ -184,16 +183,7 @@ impl Config {
 }
 
 pub(super) fn validate_destination(destination: &str, alias: &str) -> Result<()> {
-    // SSH destinations are aliases or user@host, not command options or shell expressions.
-    if destination.is_empty()
-        || destination.starts_with('-')
-        || destination
-            .chars()
-            .any(|c| !c.is_ascii_alphanumeric() && !"@._-:[]".contains(c))
-        || destination.matches('@').count() > 1
-        || destination.starts_with('@')
-        || destination.ends_with('@')
-    {
+    if !valid_destination(destination) {
         return Err(Error::input(format!(
             "invalid SSH destination for host {alias}"
         )));
@@ -226,7 +216,6 @@ pub(super) fn validate_hostname(hostname: &str) -> Result<()> {
     }
     Ok(())
 }
-
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -334,6 +323,57 @@ mod tests {
                 .as_deref(),
             Some("worker-07.example.net")
         );
+    }
+
+    #[test]
+    fn destinations_reject_rsync_host_path_confusion_for_both_roles() {
+        for destination in [
+            "local:prod",
+            "user@local:prod",
+            "::1",
+            "host::module",
+            "host:22",
+            "host:/path",
+            "[::1]:22",
+            "[not-ipv6]",
+            "[::1",
+            "::1]",
+            "user@[::1",
+            "user@[::1]extra",
+            "@host",
+            "user@",
+            "user@@host",
+            "-host",
+            "-user@host",
+            "user@-host",
+        ] {
+            for config in [
+                format!("version: 1\nhosts:\n  peer:\n    destination: '{destination}'\n"),
+                format!("version: 1\nleader:\n  destination: '{destination}'\n"),
+            ] {
+                assert!(
+                    Config::parse(&config).is_err(),
+                    "accepted {destination} in {config}"
+                );
+            }
+        }
+        for destination in [
+            "prod",
+            "ssh_alias-1",
+            "user@host.example",
+            "[::1]",
+            "user@[2001:db8::1]",
+        ] {
+            for config in [
+                format!("version: 1\nhosts:\n  peer:\n    destination: '{destination}'\n"),
+                format!("version: 1\nleader:\n  destination: '{destination}'\n"),
+            ] {
+                assert!(
+                    Config::parse(&config).is_ok(),
+                    "rejected {destination} in {config}"
+                );
+            }
+        }
     }
 
     #[test]

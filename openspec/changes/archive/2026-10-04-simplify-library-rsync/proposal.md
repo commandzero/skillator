@@ -12,7 +12,7 @@ The abandoned implementation in PR #32 reconciles independently managed librarie
 - Use standard rsync to update the replica and remove stale content within that replica. Reject incomplete local discovery before mirroring so an unavailable source cannot look like an intentional deletion.
 - Abandon the unpublished conflict/missing policies, remote observations and planning, synchronization baselines, participant IDs, cohort inference, enrollment, remote library-registration merging, custom remote Skillator protocol, and rsync server wrappers.
 - Do not introduce exact-commit Git bootstrap or recorded Git branch provenance. Receivers get skill files, not Git checkouts. Git acquisition and `library update` remain separate main-host operations.
-- Keep user selections and materializations outside this command. A pushed-to follower needs only SSH/shell/rsync; a follower initiating a pull runs Skillator locally and uses the leader's Skillator to prepare a fresh export. No receiving Git installation or library management is required.
+- Keep user selections and materializations outside this command. A pushed-to follower needs SSH, a POSIX shell, rsync, and ordinary POSIX filesystem utilities including `find`; a follower initiating a pull runs Skillator locally and uses the leader's Skillator to prepare a fresh export. No receiving Skillator or Git installation or library management is required.
 - Supersede the overlapping review catalogue with one small leader discovery/export step, one SSH/rsync adapter supporting push and pull, and one aggregate report. Pull preparation is a small export-only helper, not a remote reconciliation protocol.
 
 ## Capabilities

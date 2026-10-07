@@ -6,7 +6,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ### Added
 
-- Deliver only discovered skill directories—not whole registered repositories—to owned follower replicas: push from the authoritative leader or pull fresh content, respecting file and subtree exclusions with prerequisite and inode-boundary checks before writes, convergent read-only previews, and host-local selections (#38).
+- Deliver only discovered skill directories—not whole registered repositories—to owned follower replicas: push authoritative leader content or pull fresh snapshots, with write-free previews, early local-input validation, pre-write SSH and filesystem capability checks, source permissions and content exclusions preserved, retryable ownership-marker creation, cleanup or retained-export diagnostics, and host-local selections (#38).
 - Filter agent-directory presets or enter custom paths with `Ctrl+T`; verify and stage Library followers over SSH, then browse their delivered replicas read-only (#39).
 - Sync a selected follower from its Library tab, with optional initialization after registration and confirmation before overwriting or deleting owned replica content (#39).
 - Update Library repositories with fast-forward-only pulls using `skillator library update`, with a preview before making changes (#31).
@@ -28,6 +28,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 - Deleting a Skill Directory keeps selection and editing within its User or Repo scope (#39).
 - Confirmed Target changes discard pending Library edits; canceling the Target picker preserves them (#39).
 - Follower tabs can read safely contained relative `SKILL.md` links without rewriting replica content (#39).
+- Follower tabs inspect configured bracketed IPv6 destinations, including SSH usernames, using the same endpoint as delivery (#39).
 - Removing a user skill before user configuration exists returns an unchanged result.
 - Reject target-registry paths containing redundant separators, `.` or `..` components.
 

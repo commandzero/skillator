@@ -1,6 +1,7 @@
 use super::{
     EXPORT_PREFIX, Error, Execution, MARKER_CONTENT, MARKER_NAME, REPLICA_RELATIVE, Result,
 };
+use std::borrow::Cow;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -40,9 +41,21 @@ fn ssh(destination: &str, script: &str, execution: &Execution<'_>) -> Result<Vec
         Command::new("ssh")
             .args(SSH_OPTIONS)
             .arg("--")
-            .arg(destination)
+            .arg(ssh_destination(destination).as_ref())
             .arg(script),
     )
+}
+
+pub(super) fn ssh_destination(destination: &str) -> Cow<'_, str> {
+    // rsync strips IPv6 brackets before invoking ssh; preflight must connect
+    // to the same literal host, not try to resolve "[::1]" as a hostname.
+    match destination.split_once('[') {
+        Some(("", bracketed)) => Cow::Borrowed(bracketed.trim_end_matches(']')),
+        Some((prefix, bracketed)) => {
+            Cow::Owned(format!("{prefix}{}", bracketed.trim_end_matches(']')))
+        }
+        None => Cow::Borrowed(destination),
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -64,33 +77,51 @@ fn checked_absolute(path: &Path) -> bool {
                 .all(|part| !part.is_empty() && part != b"." && part != b".."))
 }
 
-pub(super) fn check_rsync(execution: &Execution<'_>) -> Result<()> {
+pub(super) fn check_rsync(ipv6: bool, execution: &Execution<'_>) -> Result<()> {
     execution.capture(
         Command::new("rsync")
             .args(RSYNC_OPTIONS.split_ascii_whitespace())
             .args(RSYNC_PROBE_OPTIONS.split_ascii_whitespace())
             .stdout(Stdio::null()),
     )
-    .map(|_| ())
+
     .map_err(|error| {
         Error::input(format!(
             "rsync is unavailable or lacks required transfer options; install/update it and add it to PATH: {error}"
         ))
-    })
+    })?;
+    if ipv6 {
+        // System openrsync accepts --ipv6 but splits bracketed hosts at the first colon.
+        // Require advertised IPv6 support, in addition to the shared option probe.
+        let capabilities = execution
+            .capture(Command::new("rsync").arg("--version"))
+            .map_err(Error::input_display)?;
+        if !capabilities
+            .split(|byte| *byte == b',' || *byte == b'\n')
+            .any(|capability| capability.trim_ascii() == b"IPv6")
+        {
+            return Err(Error::input(
+                "local rsync does not advertise IPv6 support; install GNU rsync for bracketed IPv6 destinations",
+            ));
+        }
+    }
+    Ok(())
 }
 
-pub(super) fn remote_replica(
-    destination: &str,
-    create: bool,
-    execution: &Execution<'_>,
-) -> Result<Replica> {
-    // A missing destination is not created during preview; rsync dry-run is only
-    // necessary when there is an existing, marked destination to compare.
+fn replica_script(expected_root: Option<&Path>) -> Result<String> {
+    let creating = expected_root.is_some();
     let marker_content = shell_quote(MARKER_CONTENT);
-    let script = format!(
+    let expected_root = expected_root
+        .map(|path| path_text(path).map(shell_quote))
+        .transpose()?;
+    let linked_files = r"\( -type f -o -type l \) -links +1 -print";
+    Ok(format!(
         "set -eu\n\
          command -v rsync >/dev/null 2>&1 || {{ echo 'rsync is not installed on receiver; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
-         command -v find >/dev/null 2>&1 || {{ echo 'find is not installed on receiver; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         for utility in {}; do\n\
+           command -v \"$utility\" >/dev/null 2>&1 || {{ echo \"$utility is not installed on receiver; install it and add it to the SSH shell PATH\" >&2; exit 1; }}\n\
+         done\n\
+         find /dev/null {linked_files} >/dev/null || {{ echo 'receiver find lacks required hard-link predicates; install a compatible POSIX find' >&2; exit 1; }}\n\
          rsync {RSYNC_OPTIONS} {RSYNC_PROBE_OPTIONS} >/dev/null || {{ echo 'receiver rsync lacks required transfer options; update rsync' >&2; exit 1; }}\n\
          case ${{HOME:-}} in /*) ;; *) echo 'receiver HOME is not absolute' >&2; exit 1;; esac\n\
          case $HOME in *[[:cntrl:]]*) echo 'receiver HOME contains control characters' >&2; exit 1;; esac\n\
@@ -99,6 +130,7 @@ pub(super) fn remote_replica(
          case $home in *[[:cntrl:]]*) echo 'receiver HOME contains control characters' >&2; exit 1;; esac\n\
          home=${{home%/}}\n\
          root=${{home%/}}/{REPLICA_RELATIVE}\n\
+         if [ {creation} = yes ] && [ \"$root\" != {expected_root} ]; then echo 'receiver HOME or replica root changed since inspection' >&2; exit 1; fi\n\
          part=${{home%/}}\n\
          fresh=no\n\
          for name in .skillator library replica; do\n\
@@ -115,22 +147,55 @@ pub(super) fn remote_replica(
            fi\n\
          done\n\
          marker=$root/{MARKER_NAME}\n\
-         if [ -e \"$marker\" ] || [ -L \"$marker\" ]; then\n\
-           if [ -L \"$marker\" ] || [ ! -f \"$marker\" ] || ! printf %s {marker_content} | cmp - \"$marker\" >/dev/null 2>&1; then\n\
+         rollback_root() {{\n\
+           if [ \"$1\" = marker ]; then\n\
+             rm -- \"$marker\" || echo \"cannot remove partial replica marker at $marker\" >&2\n\
+           fi\n\
+           rmdir -- \"$root\" || echo \"newly created replica root retained at $root; remove it after inspection before retrying\" >&2\n\
+           exit 1\n\
+         }}\n\
+         if [ \"$fresh\" = yes ]; then\n\
+           if [ -e \"$marker\" ] || [ -L \"$marker\" ]; then\n\
+             echo 'replica ownership marker appeared during creation; refusing to replace it' >&2\n\
+             rollback_root no-marker\n\
+           fi\n\
+         elif [ -e \"$marker\" ] || [ -L \"$marker\" ]; then\n\
+           if [ -L \"$marker\" ] || [ ! -f \"$marker\" ] || ! printf %s {} | cmp - \"$marker\" >/dev/null 2>&1; then\n\
              echo 'replica ownership marker is invalid; move the unmanaged replica aside' >&2; exit 1\n\
            fi\n\
-         elif [ \"$fresh\" = yes ]; then\n\
-           printf %s {marker_content} > \"$marker\"\n\
          else\n\
            echo 'replica is unmarked; move the unmanaged replica aside' >&2; exit 1\n\
          fi\n\
-         linked=$(find \"$root\" -type f -links +1 -print) || {{ echo 'cannot inspect replica for hard links' >&2; exit 1; }}\n\
+         if [ {} = yes ]; then\n\
+           if [ \"$fresh\" != yes ]; then echo 'replica root changed since inspection; refusing creation' >&2; exit 1; fi\n\
+           if ! (set -C; : > \"$marker\"); then\n\
+             echo \"cannot create replica ownership marker at $marker\" >&2\n\
+             rollback_root no-marker\n\
+           fi\n\
+           if ! printf %s {} > \"$marker\"; then\n\
+             echo \"cannot write replica ownership marker at $marker\" >&2\n\
+             rollback_root marker\n\
+           fi\n\
+         fi\n\
+         linked=$(find \"$root\" {linked_files}) || {{ echo 'cannot inspect replica for hard links' >&2; exit 1; }}\n\
          if [ -n \"$linked\" ]; then echo 'replica contains a multiply linked file; move the unmanaged replica aside' >&2; exit 1; fi\n\
-         if [ \"$fresh\" = yes ]; then printf 'created\\n%s\\n' \"$root\"; else printf 'existing\\n%s\\n' \"$root\"; fi\n",
-        if create { "yes" } else { "no" },
-    );
-    // The receiver only creates the marker when it created the replica root.
-    let output = ssh(destination, &script, execution)?;
+         if [ {} = no ]; then printf 'existing\\n%s\\n' \"$root\"; fi\n",
+        if creating {
+            "find cmp mkdir rm rmdir"
+        } else {
+            "find cmp mkdir"
+        },
+        if creating { "yes" } else { "no" },
+        marker_content,
+        if creating { "yes" } else { "no" },
+        marker_content,
+        if creating { "yes" } else { "no" },
+        expected_root = expected_root.as_deref().unwrap_or("''"),
+        creation = if creating { "yes" } else { "no" },
+    ))
+}
+
+fn inspected_replica(output: Vec<u8>) -> Result<Replica> {
     let text = String::from_utf8(output).map_err(Error::input_display)?;
     let (status, raw) = text
         .strip_suffix('\n')
@@ -141,20 +206,36 @@ pub(super) fn remote_replica(
         return Err(Error::input("receiver returned an invalid replica path"));
     }
     match status {
-        "existing" | "created" => Ok(Replica {
+        "existing" | "absent" => Ok(Replica {
             path,
-            exists: true,
-            created: status == "created",
-        }),
-        "absent" if !create => Ok(Replica {
-            path,
-            exists: false,
+            exists: status == "existing",
             created: false,
         }),
         _ => Err(Error::input("receiver returned an invalid replica state")),
     }
 }
 
+pub(super) fn remote_replica(
+    destination: &str,
+    create: bool,
+    execution: &Execution<'_>,
+) -> Result<Replica> {
+    // Validate the complete read-only inspection response before creating anything.
+    let mut replica = inspected_replica(ssh(destination, &replica_script(None)?, execution)?)?;
+    if create && !replica.exists {
+        // The creation script checks its physical root against the inspected
+        // path before any writes. It emits no response requiring validation.
+        execution.ensure_running()?;
+        ssh(
+            destination,
+            &replica_script(Some(&replica.path))?,
+            execution,
+        )?;
+        replica.exists = true;
+        replica.created = true;
+    }
+    Ok(replica)
+}
 fn reject_linked_files(directory: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
@@ -162,7 +243,7 @@ fn reject_linked_files(directory: &Path) -> Result<()> {
         let entry = entry.map_err(Error::input_display)?;
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(Error::input_display)?;
-        if metadata.is_file() && metadata.nlink() > 1 {
+        if (metadata.is_file() || metadata.is_symlink()) && metadata.nlink() > 1 {
             return Err(Error::input(format!(
                 "replica contains a multiply linked file at {}; move the unmanaged replica aside",
                 path.display()
@@ -175,14 +256,47 @@ fn reject_linked_files(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+fn rollback_local_marker(root: &Path, marker: &Path, owned_marker: bool, failure: Error) -> Error {
+    use std::fmt::Write as _;
+
+    let mut message = failure.to_string();
+    if owned_marker && let Err(error) = fs::remove_file(marker) {
+        write!(
+            message,
+            "; cannot remove partial replica marker at {}: {error}",
+            marker.display()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    if let Err(error) = fs::remove_dir(root) {
+        write!(
+            message,
+            "; newly created replica root retained at {}: {error}",
+            root.display()
+        )
+        .expect("writing to a String cannot fail");
+    }
+    Error::input(message)
+}
+
 pub(super) fn local_replica(home: &Path, create: bool) -> Result<Replica> {
-    if !checked_absolute(home) || !home.is_dir() {
-        return Err(Error::input(
-            "local HOME must be an existing absolute directory",
-        ));
+    let invalid_home = || Error::input("local HOME must be an existing absolute directory");
+    if !home.is_absolute()
+        || home.to_str().is_none()
+        || home
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .any(u8::is_ascii_control)
+    {
+        return Err(invalid_home());
+    }
+    let home = fs::canonicalize(home).map_err(|_| invalid_home())?;
+    if !checked_absolute(&home) || home.to_str().is_none() || !home.is_dir() {
+        return Err(invalid_home());
     }
     let root = home.join(REPLICA_RELATIVE);
-    let mut part = home.to_path_buf();
+    let mut part = home;
     let mut created_root = false;
     for name in [".skillator", "library", "replica"] {
         part.push(name);
@@ -213,14 +327,28 @@ pub(super) fn local_replica(home: &Path, create: bool) -> Result<Replica> {
     let marker = root.join(MARKER_NAME);
     match fs::symlink_metadata(&marker) {
         Ok(meta) => {
-            if !meta.is_file()
-                || meta.file_type().is_symlink()
-                || fs::read(&marker).map_err(Error::input_display)? != MARKER_CONTENT.as_bytes()
-            {
-                return Err(Error::input(format!(
+            let valid = if !meta.is_file() || meta.file_type().is_symlink() {
+                false
+            } else {
+                fs::read(&marker).map_err(|error| {
+                    let failure = Error::input_display(error);
+                    if created_root {
+                        rollback_local_marker(&root, &marker, false, failure)
+                    } else {
+                        failure
+                    }
+                })? == MARKER_CONTENT.as_bytes()
+            };
+            if !valid {
+                let failure = Error::input(format!(
                     "replica ownership marker is invalid at {}; move the unmanaged replica aside",
                     root.display()
-                )));
+                ));
+                return Err(if created_root {
+                    rollback_local_marker(&root, &marker, false, failure)
+                } else {
+                    failure
+                });
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && created_root => {
@@ -228,15 +356,32 @@ pub(super) fn local_replica(home: &Path, create: bool) -> Result<Replica> {
                 .write(true)
                 .create_new(true)
                 .open(&marker)
-                .map_err(Error::input_display)?;
-            file.write_all(MARKER_CONTENT.as_bytes())
-                .map_err(Error::input_display)?;
+                .map_err(|error| {
+                    rollback_local_marker(&root, &marker, false, Error::input_display(error))
+                })?;
+            if let Err(error) = file.write_all(MARKER_CONTENT.as_bytes()) {
+                drop(file);
+                return Err(rollback_local_marker(
+                    &root,
+                    &marker,
+                    true,
+                    Error::input_display(error),
+                ));
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(Error::input(format!(
                 "replica is unmarked at {}; move the unmanaged replica aside",
                 root.display()
             )));
+        }
+        Err(error) if created_root => {
+            return Err(rollback_local_marker(
+                &root,
+                &marker,
+                false,
+                Error::input_display(error),
+            ));
         }
         Err(error) => return Err(Error::input_display(error)),
     }
@@ -284,6 +429,10 @@ pub(super) fn remote_export(destination: &str, execution: &Execution<'_>) -> Res
          command -v rsync >/dev/null 2>&1 || {{ echo 'rsync is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
          rsync {RSYNC_OPTIONS} {RSYNC_PROBE_OPTIONS} >/dev/null || {{ echo 'leader rsync lacks required transfer options; update rsync' >&2; exit 1; }}\n\
          command -v skillator >/dev/null 2>&1 || {{ echo 'Skillator is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         command -v cmp >/dev/null 2>&1 || {{ echo 'cmp is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         command -v rm >/dev/null 2>&1 || {{ echo 'rm is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         command -v find >/dev/null 2>&1 || {{ echo 'find is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
+         command -v chmod >/dev/null 2>&1 || {{ echo 'chmod is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
          skillator library rsync --prepare-export\n",
     );
     let output = ssh(destination, &script, execution)?;
@@ -300,8 +449,16 @@ pub(super) fn remote_export(destination: &str, execution: &Execution<'_>) -> Res
         ));
     }
     // Validate the same physical parent, directory and marker used for cleanup
-    // before handing the leader's path to rsync.
-    ssh(destination, &validated_export_script(&path)?, execution)?;
+    // before handing the leader's path to rsync. A failed validation cannot
+    // safely authorize cleanup, so expose the retained path for manual recovery.
+    validated_export_script(&path)
+        .and_then(|script| ssh(destination, &script, execution).map(|_| ()))
+        .map_err(|error| {
+            Error::input(format!(
+                "leader export may remain at {} after physical validation failed: {error}; refusing cleanup",
+                path.display()
+            ))
+        })?;
     Ok(path)
 }
 
@@ -314,7 +471,9 @@ pub(super) fn cleanup_export(
         return Err(Error::input("invalid leader export path; refusing cleanup"));
     }
     let mut script = validated_export_script(path)?;
-    script.push_str("rm -r -- \"$dir\"\n");
+    script.push_str(
+        "find \"$dir\" -type d ! -perm -0700 -exec chmod u+rwx {} \\;\nrm -r -- \"$dir\"\n",
+    );
     ssh(destination, &script, execution).map(|_| ())
 }
 
@@ -353,15 +512,29 @@ pub(super) fn rsync(
     Ok(!execution.capture(&mut command)?.is_empty())
 }
 
-fn valid_destination(destination: &str) -> bool {
-    !destination.is_empty()
-        && !destination.starts_with('-')
-        && destination
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "@._-:[]".contains(c))
-        && destination.matches('@').count() <= 1
-        && !destination.starts_with('@')
-        && !destination.ends_with('@')
+pub(super) fn valid_destination(destination: &str) -> bool {
+    let (user, host) = destination
+        .split_once('@')
+        .map_or((None, destination), |(user, host)| (Some(user), host));
+    if user.is_some_and(|user| !ordinary_name(user)) {
+        return false;
+    }
+    if let Some(address) = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+    {
+        address.parse::<std::net::Ipv6Addr>().is_ok()
+    } else {
+        ordinary_name(host)
+    }
+}
+
+fn ordinary_name(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
 #[cfg(test)]
@@ -369,6 +542,140 @@ mod tests {
     use super::super::process;
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn rsync_and_ssh_destination_forms_keep_the_same_host() {
+        for (rsync_host, ssh_host) in [
+            ("alias_1", "alias_1"),
+            ("user@host.example", "user@host.example"),
+            ("[::1]", "::1"),
+            ("user@[2001:db8::1]", "user@2001:db8::1"),
+        ] {
+            assert!(valid_destination(rsync_host));
+            assert_eq!(ssh_destination(rsync_host), ssh_host);
+        }
+        for destination in [
+            "local:prod",
+            "user@local:prod",
+            "host::module",
+            "::1",
+            "host:22",
+            "host:/path",
+            "[::1]:22",
+            "[invalid]",
+            "user@[::1]suffix",
+            "user@host[::1]",
+            "user@-host",
+            "-user@host",
+            "@host",
+            "user@",
+            "user@@host",
+        ] {
+            assert!(!valid_destination(destination), "accepted {destination}");
+        }
+    }
+
+    #[test]
+    fn receiver_inspection_requires_one_utf8_fixed_root_and_valid_state() {
+        let root = b"/home/a/.skillator/library/replica";
+        for response in [
+            b"absent\n/home/a/.skillator/library/replica\nextra\n".as_slice(),
+            b"created\n/home/a/.skillator/library/replica\n",
+            b"absent\n/home/a/.skillator/library/replica",
+            b"absent\n/home/a/../a/.skillator/library/replica\n",
+            b"absent\n/home/a/other\n",
+            b"absent\nrelative/.skillator/library/replica\n",
+            b"absent\n/home/a/.skillator/library/replica\n\xff",
+        ] {
+            assert!(inspected_replica(response.to_vec()).is_err());
+        }
+        let mut response = b"absent\n".to_vec();
+        response.extend_from_slice(root);
+        response.push(b'\n');
+        let replica = inspected_replica(response).unwrap();
+        assert!(!replica.exists);
+        assert!(!replica.created);
+        assert_eq!(
+            replica.path,
+            Path::new("/home/a/.skillator/library/replica")
+        );
+    }
+
+    #[test]
+    fn receiver_creation_requires_the_previously_inspected_physical_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let changed_home = temp.path().join("changed");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(&changed_home).unwrap();
+        let run = |home: &Path, expected: Option<&Path>| {
+            process::capture(
+                Command::new("sh")
+                    .arg("-c")
+                    .arg(replica_script(expected).unwrap())
+                    .env("HOME", home),
+            )
+        };
+
+        let inspection = inspected_replica(run(&home, None).unwrap()).unwrap();
+        assert!(!inspection.exists);
+        assert!(!home.join(".skillator").exists());
+        assert!(run(&changed_home, Some(&inspection.path)).is_err());
+        assert!(!changed_home.join(".skillator").exists());
+        assert!(run(&home, Some(&changed_home.join(REPLICA_RELATIVE))).is_err());
+        assert!(!home.join(".skillator").exists());
+
+        run(&home, Some(&inspection.path)).unwrap();
+        assert_eq!(
+            fs::read(inspection.path.join(MARKER_NAME)).unwrap(),
+            MARKER_CONTENT.as_bytes()
+        );
+        assert!(inspected_replica(run(&home, None).unwrap()).unwrap().exists);
+        assert!(run(&home, Some(&inspection.path)).is_err());
+    }
+
+    #[test]
+    fn local_marker_rollback_removes_only_its_own_partial_marker_and_empty_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("replica");
+        let marker = root.join(MARKER_NAME);
+        let failure = || Error::input("marker write failed");
+        fs::create_dir(&root).unwrap();
+        fs::write(&marker, "partial").unwrap();
+        let error = rollback_local_marker(&root, &marker, true, failure());
+        assert!(error.to_string().contains("marker write failed"));
+        assert!(!root.exists());
+
+        fs::create_dir(&root).unwrap();
+        fs::write(&marker, "foreign marker").unwrap();
+        let error = rollback_local_marker(&root, &marker, false, failure());
+        assert!(error.to_string().contains("marker write failed"));
+        assert!(error.to_string().contains("root retained"));
+        assert_eq!(fs::read(&marker).unwrap(), b"foreign marker");
+        fs::remove_file(&marker).unwrap();
+        fs::write(root.join("unrelated"), "keep").unwrap();
+        let error = rollback_local_marker(&root, &marker, false, failure());
+        assert!(error.to_string().contains("root retained"));
+        assert_eq!(fs::read(root.join("unrelated")).unwrap(), b"keep");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_replica_rejects_non_utf8_original_and_physical_home_before_writes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let physical = parent.path().join(OsStr::from_bytes(b"home-\xff"));
+        fs::create_dir(&physical).unwrap();
+        let utf8_alias = parent.path().join("home-alias");
+        symlink(&physical, &utf8_alias).unwrap();
+        for (home, original_is_utf8) in [(&physical, false), (&utf8_alias, true)] {
+            assert_eq!(home.to_str().is_some(), original_is_utf8);
+            assert!(local_replica(home, true).is_err());
+            assert!(!physical.join(".skillator").exists());
+        }
+    }
 
     #[test]
     fn local_replica_checks_ownership_before_writes() {
