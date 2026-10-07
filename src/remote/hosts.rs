@@ -226,8 +226,8 @@ marker=$root/{MARKER_NAME}
 if [ -L "$marker" ] || [ ! -f "$marker" ] || ! printf '%s' '{MARKER_CONTENT}' | cmp - "$marker" >/dev/null 2>&1; then
   echo 'replica ownership marker is invalid; move the unmanaged replica aside' >&2; exit 1
 fi
-linked=$(find "$root" -type f -links +1 -print) || {{ echo 'cannot inspect replica hard links' >&2; exit 1; }}
-if [ -n "$linked" ]; then echo 'replica contains a multiply linked file' >&2; exit 1; fi
+linked=$(find "$root" \( -type f -o -type l \) -links +1 -print) || {{ echo 'cannot inspect replica hard links' >&2; exit 1; }}
+if [ -n "$linked" ]; then echo 'replica contains a multiply linked file or symbolic link' >&2; exit 1; fi
 printf '%s\000' "$root"
 find "$root" -name SKILL.md ! -type d -exec sh -c '
   set -eu
@@ -802,6 +802,86 @@ mod tests {
         assert_eq!(inventory.skills[1].document, invalid);
         assert!(inventory.skills[1].diagnostic.is_some());
         assert_eq!(replica_contents(&root), before);
+    }
+
+    #[test]
+    fn inspection_rejects_hard_linked_symlink_inodes_before_emitting_inventory() {
+        use std::os::unix::fs::MetadataExt;
+
+        for directory_link in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let root = owned_replica(home.path());
+            let skill = root.join("local/library/_skills/demo");
+            fs::create_dir_all(skill.join("documents")).unwrap();
+            let text = "---\nname: demo\ndescription: Internal link\n---\nLinked body\n";
+            fs::write(skill.join("documents/instructions.md"), text).unwrap();
+            let linked = if directory_link {
+                symlink("documents", skill.join("docs")).unwrap();
+                symlink("docs/instructions.md", skill.join("SKILL.md")).unwrap();
+                skill.join("docs")
+            } else {
+                symlink("documents/instructions.md", skill.join("SKILL.md")).unwrap();
+                skill.join("SKILL.md")
+            };
+            let outside = home.path().join("outside-replica-link");
+            // Match the delivery tests: -P links the symlink inode, not its target.
+            assert!(
+                Command::new("ln")
+                    .arg("-P")
+                    .arg(&linked)
+                    .arg(&outside)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let before_metadata = fs::symlink_metadata(&linked).unwrap();
+            let outside_metadata = fs::symlink_metadata(&outside).unwrap();
+            assert!(before_metadata.is_symlink());
+            assert!(outside_metadata.is_symlink());
+            assert_eq!(before_metadata.ino(), outside_metadata.ino());
+            assert_eq!(before_metadata.nlink(), 2);
+            assert_eq!(
+                fs::symlink_metadata(skill.join("documents/instructions.md"))
+                    .unwrap()
+                    .nlink(),
+                1
+            );
+            let before = replica_contents(&root);
+            let outside_target = fs::read_link(&outside).unwrap();
+
+            let output = execute_inspection(home.path());
+            assert!(!output.status.success());
+            assert!(
+                output.stdout.is_empty(),
+                "inventory emitted before rejection"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("multiply linked"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(replica_contents(&root), before);
+            assert_eq!(fs::read_link(&outside).unwrap(), outside_target);
+            for path in [&linked, &outside] {
+                let after = fs::symlink_metadata(path).unwrap();
+                assert_eq!(after.ino(), before_metadata.ino());
+                assert_eq!(after.nlink(), before_metadata.nlink());
+                assert_eq!(after.mtime(), before_metadata.mtime());
+                assert_eq!(after.mtime_nsec(), before_metadata.mtime_nsec());
+                assert_eq!(after.ctime(), before_metadata.ctime());
+                assert_eq!(after.ctime_nsec(), before_metadata.ctime_nsec());
+            }
+
+            // Removing only the external alias restores an ordinary internal link.
+            fs::remove_file(&outside).unwrap();
+            let inventory = inspected_inventory(home.path());
+            assert_eq!(inventory.skills.len(), 1);
+            assert_eq!(inventory.skills[0].skill_path, "demo");
+            assert_eq!(inventory.skills[0].document, text);
+            assert!(inventory.skills[0].diagnostic.is_none());
+            assert_eq!(fs::symlink_metadata(&linked).unwrap().nlink(), 1);
+            assert_eq!(replica_contents(&root), before);
+        }
     }
 
     #[test]

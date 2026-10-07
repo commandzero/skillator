@@ -641,111 +641,16 @@ pub(super) fn run_target_once(
                     Ok(None)
                 }
                 Effect::ApplyDirectoryEdit { edit, value } => {
-                    if model.scope == Scope::Repo && !git_available {
-                        model.overlay = Overlay::Notice(
-                            "Repo unavailable: choose a Git worktree with t.".to_owned(),
-                        );
-                        return Ok(None);
-                    }
-                    let scope = active_target_scope(model);
-                    let candidate = match if edit {
-                        parse_directory_editor(&value)
-                    } else {
-                        parse_chooser_directory(&value, &state.tabs, scope)
-                    } {
-                        Ok(candidate) => candidate,
-                        Err(message) => {
-                            model.overlay = Overlay::Notice(message);
-                            return Ok(None);
-                        }
-                    };
-                    let root = if scope == TargetTabScope::User {
-                        paths.home()
-                    } else {
-                        state.repository.target.root()
-                    };
-                    if let Err(message) =
-                        validate_directory_containment(root, candidate.path().as_str())
-                    {
-                        model.overlay = Overlay::Notice(message);
-                        return Ok(None);
-                    }
-                    if edit && state.tabs.is_empty() {
-                        model.overlay = Overlay::Notice("No skill folder is selected.".to_owned());
-                        return Ok(None);
-                    }
-                    if edit {
-                        let index = model.directory_index.min(state.tabs.len() - 1);
-                        if candidate.path() != state.tabs[index].directory.path()
-                            && model.rows.iter().any(|row| {
-                                row.kind == RowKind::Skill
-                                    && (row.check == Some(CheckState::Checked)
-                                        || row.initial_check == Some(CheckState::Checked))
-                            })
-                        {
-                            model.overlay = Overlay::Notice(
-                                "Disable all skills and save before changing this directory path."
-                                    .to_owned(),
-                            );
-                            return Ok(None);
-                        }
-                    }
-                    store_active_target_tab(model, &mut state.tabs);
-                    let mut proposed = state
-                        .tabs
-                        .iter()
-                        .filter(|tab| tab.scope == scope)
-                        .map(|tab| tab.directory.clone())
-                        .collect::<Vec<_>>();
-                    if edit {
-                        let current_key = state.tabs[model.directory_index].directory.key();
-                        let index = proposed
-                            .iter()
-                            .position(|directory| directory.key() == current_key)
-                            .expect("active directory belongs to its scope");
-                        proposed[index] = candidate.clone();
-                    } else {
-                        proposed.push(candidate.clone());
-                    }
-                    if let Err(issues) = RepositoryConfig::new(proposed, Vec::new()) {
-                        model.overlay = Overlay::Notice(
-                            issues
-                                .into_iter()
-                                .map(|issue| format!("{}: {}", issue.path, issue.message))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        );
-                        return Ok(None);
-                    }
-                    if edit {
-                        state.tabs[model.directory_index].directory = candidate;
-                    } else {
-                        let rows = match scope {
-                            TargetTabScope::User => user::rows_for_new_directory(
-                                &candidate,
-                                &state.user,
-                                library,
-                                &library_session.config,
-                            ),
-                            TargetTabScope::Repository => repo::rows_for_new_directory(
-                                &candidate,
-                                &state.repository,
-                                &state.user.config,
-                                library,
-                                &library_session.config,
-                            ),
-                        };
-                        state.tabs.push(TargetTab {
-                            scope,
-                            rows,
-                            directory: candidate,
-                        });
-                        model.directory_index = state.tabs.len() - 1;
-                    }
-                    dirty_scopes.insert(scope);
-                    sync_target_tab_model(model, &state.tabs, dirty_scopes);
-                    activate_target_tab(model, &state.tabs, dirty_scopes, model.directory_index);
-                    model.unavailable = None;
+                    apply_directory_edit(
+                        model,
+                        paths,
+                        state,
+                        library,
+                        &library_session.config,
+                        dirty_scopes,
+                        edit,
+                        &value,
+                    );
                     Ok(None)
                 }
                 Effect::DeleteDirectory => {
@@ -989,6 +894,125 @@ pub(super) fn store_active_target_tab(model: &Model, tabs: &mut [TargetTab]) {
     {
         tab.rows = model.rows.clone();
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_directory_edit(
+    model: &mut Model,
+    paths: &AppPaths,
+    state: &mut LoadedTargetState,
+    library: &LibrarySnapshot,
+    library_config: &LibraryConfig,
+    dirty_scopes: &mut BTreeSet<TargetTabScope>,
+    edit: bool,
+    value: &str,
+) {
+    if model.scope == Scope::Repo && state.repository.target.git_repository().is_none() {
+        model.overlay =
+            Overlay::Notice("Repo unavailable: choose a Git worktree with t.".to_owned());
+        return;
+    }
+    let scope = active_target_scope(model);
+    if edit
+        && !state
+            .tabs
+            .get(model.directory_index)
+            .is_some_and(|tab| tab.scope == scope)
+    {
+        model.overlay = Overlay::Notice(
+            model
+                .unavailable
+                .clone()
+                .unwrap_or_else(|| "No skill folder is selected.".to_owned()),
+        );
+        return;
+    }
+    let candidate = match if edit {
+        parse_directory_editor(value)
+    } else {
+        parse_chooser_directory(value, &state.tabs, scope)
+    } {
+        Ok(candidate) => candidate,
+        Err(message) => {
+            model.overlay = Overlay::Notice(message);
+            return;
+        }
+    };
+    let root = if scope == TargetTabScope::User {
+        paths.home()
+    } else {
+        state.repository.target.root()
+    };
+    if let Err(message) = validate_directory_containment(root, candidate.path().as_str()) {
+        model.overlay = Overlay::Notice(message);
+        return;
+    }
+    if edit
+        && candidate.path() != state.tabs[model.directory_index].directory.path()
+        && model.rows.iter().any(|row| {
+            row.kind == RowKind::Skill
+                && (row.check == Some(CheckState::Checked)
+                    || row.initial_check == Some(CheckState::Checked))
+        })
+    {
+        model.overlay = Overlay::Notice(
+            "Disable all skills and save before changing this directory path.".to_owned(),
+        );
+        return;
+    }
+    store_active_target_tab(model, &mut state.tabs);
+    let mut proposed = state
+        .tabs
+        .iter()
+        .filter(|tab| tab.scope == scope)
+        .map(|tab| tab.directory.clone())
+        .collect::<Vec<_>>();
+    if edit {
+        let current_key = state.tabs[model.directory_index].directory.key();
+        let index = proposed
+            .iter()
+            .position(|directory| directory.key() == current_key)
+            .expect("active directory belongs to its scope");
+        proposed[index] = candidate.clone();
+    } else {
+        proposed.push(candidate.clone());
+    }
+    if let Err(issues) = RepositoryConfig::new(proposed, Vec::new()) {
+        model.overlay = Overlay::Notice(
+            issues
+                .into_iter()
+                .map(|issue| format!("{}: {}", issue.path, issue.message))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        return;
+    }
+    if edit {
+        state.tabs[model.directory_index].directory = candidate;
+    } else {
+        let rows = match scope {
+            TargetTabScope::User => {
+                user::rows_for_new_directory(&candidate, &state.user, library, library_config)
+            }
+            TargetTabScope::Repository => repo::rows_for_new_directory(
+                &candidate,
+                &state.repository,
+                &state.user.config,
+                library,
+                library_config,
+            ),
+        };
+        state.tabs.push(TargetTab {
+            scope,
+            rows,
+            directory: candidate,
+        });
+        model.directory_index = state.tabs.len() - 1;
+    }
+    dirty_scopes.insert(scope);
+    sync_target_tab_model(model, &state.tabs, dirty_scopes);
+    activate_target_tab(model, &state.tabs, dirty_scopes, model.directory_index);
+    model.unavailable = None;
 }
 
 pub(super) fn delete_target_directory(
@@ -1563,4 +1587,209 @@ pub(super) fn repository_config_from_rows(
                 .join("; "),
         }
     })
+}
+
+#[cfg(test)]
+mod directory_edit_tests {
+    use super::*;
+    use crate::tui::input::action_for_key;
+    use crate::tui::model::Action;
+    use crate::tui::reducer::reduce;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn empty_user_fixture() -> (tempfile::TempDir, AppPaths, TargetData) {
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(home.path().to_owned());
+        let repository = home.path().join("project");
+        std::fs::create_dir_all(repository.join(".agents")).unwrap();
+        std::fs::create_dir_all(home.path().join(".agents")).unwrap();
+        std::fs::create_dir_all(home.path().join(".skillator")).unwrap();
+        std::fs::write(
+            paths.user_config(),
+            "version: 1\nskill_directories: []\nenablements: []\n",
+        )
+        .unwrap();
+        std::fs::write(paths.library_config(), "version: 1\nlocations: []\n").unwrap();
+        std::fs::write(
+            repository.join(".agents/skillator.yaml"),
+            "version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements: []\n",
+        )
+        .unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .arg(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let data = load_target_data(&paths, &repository).unwrap();
+        (home, paths, data)
+    }
+
+    fn consume_edit(
+        model: &mut Model,
+        paths: &AppPaths,
+        data: &mut TargetData,
+        dirty: &mut BTreeSet<TargetTabScope>,
+        effect: Effect,
+    ) {
+        let Effect::ApplyDirectoryEdit { edit, value } = effect else {
+            panic!("expected directory edit effect");
+        };
+        apply_directory_edit(
+            model,
+            paths,
+            &mut data.state,
+            &data.library,
+            &data.library_session.config,
+            dirty,
+            edit,
+            &value,
+        );
+    }
+
+    #[test]
+    fn empty_user_edit_key_shows_setup_notice_without_editing_repository() {
+        let (_home, paths, mut data) = empty_user_fixture();
+        let mut model = initial_target_model(&data.state.tabs);
+        let dirty = BTreeSet::new();
+        let repository_directory = data.state.tabs[0].directory.clone();
+        let repository_rows = data.state.tabs[0].rows.clone();
+        assert_eq!(model.scope, Scope::Repo);
+        let effects = reduce(&mut model, Action::PreviousScope);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::SwitchToScope {
+                destination: Scope::User,
+                ..
+            }]
+        ));
+        activate_directory_scope(
+            &mut model,
+            &data.state.tabs,
+            &dirty,
+            Scope::User,
+            true,
+            None,
+        );
+        let notice = model.unavailable.clone().unwrap();
+        assert!(notice.contains("Ctrl+T"));
+        let edit = action_for_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)).unwrap();
+        assert!(reduce(&mut model, edit).is_empty());
+        assert_eq!(model.overlay, Overlay::Notice(notice));
+        assert!(reduce(&mut model, Action::Confirm).is_empty());
+        assert_eq!(data.state.tabs.len(), 1);
+        assert_eq!(data.state.tabs[0].directory, repository_directory);
+        assert_eq!(data.state.tabs[0].rows, repository_rows);
+        assert!(!model.dirty);
+        assert!(dirty.is_empty());
+        // Even a delayed/stale editor confirmation must not reach a foreign tab.
+        let mut dirty = dirty;
+        consume_edit(
+            &mut model,
+            &paths,
+            &mut data,
+            &mut dirty,
+            Effect::ApplyDirectoryEdit {
+                edit: true,
+                value: "agents".to_owned(),
+            },
+        );
+        assert!(matches!(&model.overlay, Overlay::Notice(message) if message.contains("Ctrl+T")));
+        assert_eq!(data.state.tabs[0].directory, repository_directory);
+        assert_eq!(data.state.tabs[0].rows, repository_rows);
+        assert!(dirty.is_empty());
+    }
+
+    #[test]
+    fn empty_user_apply_edit_preserves_configs_and_repository_state() {
+        let (_home, paths, mut data) = empty_user_fixture();
+        let user_bytes = std::fs::read(paths.user_config()).unwrap();
+        let repository_path = data
+            .state
+            .repository
+            .target
+            .root()
+            .join(".agents/skillator.yaml");
+        let repository_bytes = std::fs::read(&repository_path).unwrap();
+        let mut model = initial_target_model(&data.state.tabs);
+        let mut dirty = BTreeSet::new();
+        activate_directory_scope(
+            &mut model,
+            &data.state.tabs,
+            &dirty,
+            Scope::User,
+            true,
+            None,
+        );
+        let repository_directory = data.state.tabs[0].directory.clone();
+        let repository_rows = data.state.tabs[0].rows.clone();
+        for value in ["agents", "../invalid"] {
+            consume_edit(
+                &mut model,
+                &paths,
+                &mut data,
+                &mut dirty,
+                Effect::ApplyDirectoryEdit {
+                    edit: true,
+                    value: value.to_owned(),
+                },
+            );
+            assert!(
+                matches!(&model.overlay, Overlay::Notice(message) if message.contains("Ctrl+T"))
+            );
+        }
+        assert_eq!(data.state.tabs.len(), 1);
+        assert_eq!(data.state.tabs[0].directory, repository_directory);
+        assert_eq!(data.state.tabs[0].rows, repository_rows);
+        assert_eq!(std::fs::read(paths.user_config()).unwrap(), user_bytes);
+        assert_eq!(std::fs::read(repository_path).unwrap(), repository_bytes);
+        assert!(dirty.is_empty());
+        assert!(!model.dirty);
+    }
+
+    #[test]
+    fn valid_repository_edit_and_empty_user_add_remain_scoped() {
+        let (_home, paths, mut data) = empty_user_fixture();
+        let mut model = initial_target_model(&data.state.tabs);
+        let mut dirty = BTreeSet::new();
+        reduce(&mut model, Action::EditDirectory);
+        assert!(matches!(
+            model.overlay,
+            Overlay::DirectoryEditor { edit: true, .. }
+        ));
+        model.overlay = Overlay::DirectoryEditor {
+            edit: true,
+            input: "agents,.agents/skills,Renamed".to_owned(),
+        };
+        let effect = reduce(&mut model, Action::Confirm).pop().unwrap();
+        consume_edit(&mut model, &paths, &mut data, &mut dirty, effect);
+        assert_eq!(data.state.tabs[0].directory.label(), Some("Renamed"));
+        assert_eq!(dirty, BTreeSet::from([TargetTabScope::Repository]));
+        let repository_directory = data.state.tabs[0].directory.clone();
+        let repository_rows = data.state.tabs[0].rows.clone();
+        activate_directory_scope(
+            &mut model,
+            &data.state.tabs,
+            &dirty,
+            Scope::User,
+            true,
+            None,
+        );
+        reduce(&mut model, Action::AddDirectory);
+        assert!(matches!(model.overlay, Overlay::DirectoryChooser { .. }));
+        let effect = reduce(&mut model, Action::Confirm).pop().unwrap();
+        consume_edit(&mut model, &paths, &mut data, &mut dirty, effect);
+        assert_eq!(data.state.tabs.len(), 2);
+        assert_eq!(data.state.tabs[0].directory, repository_directory);
+        assert_eq!(data.state.tabs[0].rows, repository_rows);
+        assert_eq!(data.state.tabs[1].scope, TargetTabScope::User);
+        assert_eq!(model.directory_index, 1);
+        assert!(model.unavailable.is_none());
+        assert_eq!(
+            dirty,
+            BTreeSet::from([TargetTabScope::User, TargetTabScope::Repository])
+        );
+    }
 }

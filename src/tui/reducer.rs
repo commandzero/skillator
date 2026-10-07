@@ -508,6 +508,23 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
                 if let Some(input) = input {
                     model.overlay = Overlay::LocationEditor { edit: true, input };
                 }
+            } else if !model
+                .directory_scopes
+                .get(model.directory_index)
+                .is_some_and(|scope| {
+                    matches!(
+                        (model.scope, scope),
+                        (Scope::User, TargetTabScope::User)
+                            | (Scope::Repo, TargetTabScope::Repository)
+                    )
+                })
+            {
+                model.overlay = Overlay::Notice(
+                    model
+                        .unavailable
+                        .clone()
+                        .unwrap_or_else(|| "No skill folder is selected.".to_owned()),
+                );
             } else {
                 model.overlay = Overlay::DirectoryEditor {
                     edit: true,
