@@ -227,6 +227,55 @@ fn expected_entry_collisions_and_agent_compatibility_overlap_are_reported() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn bounded_recovery_containers_are_visible_without_adopting_their_payloads() {
+    let fixture = Fixture::new("linked");
+    let root = fixture
+        .target
+        .canonicalize()
+        .unwrap()
+        .join(".agents/skills");
+    let backup = root.join(".skillator-backup-1-1");
+    std::fs::create_dir_all(&backup).unwrap();
+    let long_name = format!("{}x", "é".repeat(127));
+    std::fs::write(backup.join(&long_name), b"recoverable user content").unwrap();
+    let ambiguous = root.join(".skillator-backup-1-2");
+    std::fs::create_dir(&ambiguous).unwrap();
+    std::fs::write(ambiguous.join("release-checklist"), b"first").unwrap();
+    std::fs::write(ambiguous.join("other"), b"second").unwrap();
+    let outside = fixture.home.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("release-checklist"), b"outside content").unwrap();
+    let unsafe_container = root.join(".skillator-backup-1-3");
+    std::os::unix::fs::symlink(&outside, &unsafe_container).unwrap();
+
+    let observed = fixture.observe();
+    let directory = &observed.directories()[0];
+    assert_eq!(directory.recovery_artifacts().len(), 3);
+    for artifact in [&backup, &ambiguous, &unsafe_container] {
+        assert!(directory.recovery_artifacts().contains(artifact));
+        assert!(!directory.unmanaged_entries().contains(artifact));
+        assert!(!directory.duplicate_entries().contains(artifact));
+    }
+    assert_eq!(
+        observed.enablements().next().unwrap().state(),
+        &MaterializationState::Missing
+    );
+    assert_eq!(directory.comparison(), Comparison::Drifted);
+    assert_eq!(
+        std::fs::read(backup.join(&long_name)).unwrap(),
+        b"recoverable user content"
+    );
+    assert_eq!(std::fs::read_link(&unsafe_container).unwrap(), outside);
+    assert_eq!(
+        std::fs::read(outside.join("release-checklist")).unwrap(),
+        b"outside content"
+    );
+    assert!(!root.join("release-checklist").exists());
+    assert!(!root.join(&long_name).exists());
+}
+
 struct Fixture {
     home: support::TestHome,
     target: std::path::PathBuf,

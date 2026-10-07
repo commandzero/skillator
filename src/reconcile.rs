@@ -47,6 +47,7 @@ enum Operation {
     },
     Materialize {
         source: PathBuf,
+        metadata_name: String,
         source_expected: EntryFingerprint,
         kind: MaterializationKind,
         expected: EntryFingerprint,
@@ -57,8 +58,15 @@ enum Operation {
     Recover {
         artifact: PathBuf,
         artifact_expected: EntryFingerprint,
+        container: Option<BackupArtifact>,
         destination: PathBuf,
         destination_expected: EntryFingerprint,
+    },
+    DiscardArtifact {
+        expected: EntryFingerprint,
+    },
+    RemoveEmptyArtifact {
+        identity: ContainerIdentity,
     },
     None,
 }
@@ -308,6 +316,11 @@ pub fn plan(
             } else {
                 Operation::Materialize {
                     source: source.expect("checked above").to_owned(),
+                    metadata_name: resolved
+                        .expect("checked above")
+                        .name()
+                        .expect("valid skill has a name")
+                        .to_owned(),
                     source_expected: resolved.expect("checked above").fingerprint().clone(),
                     kind: observation.enablement().materialization(),
                     expected: observation.fingerprint().clone(),
@@ -622,15 +635,53 @@ fn plan_recovery(plan: &mut Plan, target: &Target, config: &RepositoryConfig) {
         };
         let mut stages: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> =
             std::collections::BTreeMap::new();
-        let mut backups: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> =
-            std::collections::BTreeMap::new();
+        let mut backups: std::collections::BTreeMap<
+            PathBuf,
+            Vec<(PathBuf, Option<BackupArtifact>)>,
+        > = std::collections::BTreeMap::new();
         for entry in entries.flatten() {
             let path = entry.path();
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            if let Some(destination) = artifact_destination(&root, &name, "backup") {
-                backups.entry(destination).or_default().push(path);
+            // New stages are anonymous siblings. Only backups retain a destination
+            // basename; anonymous stages stay read-only for manual recovery.
+            if bounded_artifact_name(&name, "backup") {
+                let Ok(identity) = ContainerIdentity::read(&path) else {
+                    continue;
+                };
+                let Ok(payload) = identity.contents(&path) else {
+                    continue;
+                };
+                let Some(payload) = payload else {
+                    if git_path_unprotected(target, &path)
+                        && let Some(item) = plan
+                            .items
+                            .iter_mut()
+                            .find(|item| item.action == Action::Recover && item.path == path)
+                    {
+                        item.safety = Safety::Safe;
+                        item.reason =
+                            "Remove an empty backup folder left by an interrupted save".to_owned();
+                        item.operation = Operation::RemoveEmptyArtifact { identity };
+                    }
+                    continue;
+                };
+                let Some(basename) = payload.file_name() else {
+                    continue;
+                };
+                let destination = root.join(basename);
+                let container = BackupArtifact {
+                    container: path.clone(),
+                    payload,
+                    identity,
+                };
+                backups
+                    .entry(destination)
+                    .or_default()
+                    .push((path, Some(container)));
+            } else if let Some(destination) = artifact_destination(&root, &name, "backup") {
+                backups.entry(destination).or_default().push((path, None));
             } else if let Some(destination) = artifact_destination(&root, &name, "stage") {
                 stages.entry(destination).or_default().push(path);
             }
@@ -644,30 +695,68 @@ fn plan_recovery(plan: &mut Plan, target: &Target, config: &RepositoryConfig) {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
             let safe = if backup.len() == 1
                 && destination_absent
-                && git_path_unprotected(target, &backup[0])
+                && git_path_unprotected(target, &backup[0].0)
                 && git_path_unprotected(target, &destination)
             {
-                if let Some(item) = plan
+                let (path, container) = &backup[0];
+                let payload = container
+                    .as_ref()
+                    .map_or(path, |container| &container.payload);
+                if container.as_ref().is_some_and(|container| {
+                    container
+                        .identity
+                        .contents(&container.container)
+                        .ok()
+                        .flatten()
+                        .as_ref()
+                        != Some(payload)
+                }) {
+                    continue;
+                }
+                let expected = fingerprint(payload);
+                if matches!(
+                    expected,
+                    EntryFingerprint::Missing
+                        | EntryFingerprint::Other
+                        | EntryFingerprint::Uninspectable
+                ) || container
+                    .as_ref()
+                    .is_some_and(|container| !container.matches(&expected))
+                {
+                    false
+                } else if let Some(item) = plan
                     .items
                     .iter_mut()
-                    .find(|item| item.action == Action::Recover && item.path == backup[0])
+                    .find(|item| item.action == Action::Recover && item.path == *path)
                 {
                     item.safety = Safety::Safe;
                     item.reason = "Restore the backup from the interrupted save".to_owned();
                     item.operation = Operation::Recover {
-                        artifact: backup[0].clone(),
-                        artifact_expected: fingerprint(&backup[0]),
+                        artifact: payload.clone(),
+                        artifact_expected: expected,
+                        container: container.clone(),
                         destination: destination.clone(),
                         destination_expected: EntryFingerprint::Missing,
                     };
+                    true
+                } else {
+                    false
                 }
-                true
             } else {
                 backup.is_empty()
             };
             if safe {
                 for stage in staged {
                     if !git_path_unprotected(target, stage) {
+                        continue;
+                    }
+                    let expected = fingerprint(stage);
+                    if matches!(
+                        expected,
+                        EntryFingerprint::Missing
+                            | EntryFingerprint::Other
+                            | EntryFingerprint::Uninspectable
+                    ) {
                         continue;
                     }
                     if let Some(item) = plan
@@ -678,9 +767,7 @@ fn plan_recovery(plan: &mut Plan, target: &Target, config: &RepositoryConfig) {
                         item.safety = Safety::Safe;
                         item.reason =
                             "Remove temporary files left by an interrupted save".to_owned();
-                        item.operation = Operation::Remove {
-                            expected: fingerprint(stage),
-                        };
+                        item.operation = Operation::DiscardArtifact { expected };
                     }
                 }
             }
@@ -713,18 +800,25 @@ fn target_path_facts(target: &Target, path: &Path) -> Result<PathFacts, String> 
     }
 }
 
+// Persisted pre-container artifacts remain recovery data; new artifacts never
+// encode a destination basename in their filesystem component.
 fn artifact_destination(root: &Path, name: &str, kind: &str) -> Option<PathBuf> {
     let suffix = name.strip_prefix(&format!(".skillator-{kind}-"))?;
     let mut parts = suffix.splitn(3, '-');
     parts.next()?.parse::<u32>().ok()?;
     parts.next()?.parse::<u64>().ok()?;
-    let encoded = parts.next()?;
+    let encoded = parts.next()?.as_bytes();
     if encoded.is_empty() || encoded.len() % 2 != 0 {
         return None;
     }
-    let bytes = (0..encoded.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).ok())
+    let bytes = encoded
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(pair, 16).ok()
+        })
         .collect::<Option<Vec<_>>>()?;
     #[cfg(unix)]
     let name = {
@@ -733,8 +827,21 @@ fn artifact_destination(root: &Path, name: &str, kind: &str) -> Option<PathBuf> 
     };
     #[cfg(not(unix))]
     let name = std::ffi::OsString::from(String::from_utf8(bytes).ok()?);
-    let destination = root.join(name);
-    (destination.parent() == Some(root)).then_some(destination)
+    let destination = root.join(&name);
+    (destination.parent() == Some(root) && destination.file_name() == Some(name.as_os_str()))
+        .then_some(destination)
+}
+
+fn bounded_artifact_name(name: &str, kind: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(&format!(".skillator-{kind}-")) else {
+        return false;
+    };
+    let mut parts = suffix.split('-');
+    parts.next().is_some_and(|part| {
+        part.bytes().all(|byte| byte.is_ascii_digit()) && part.parse::<u32>().is_ok()
+    }) && parts.next().is_some_and(|part| {
+        part.bytes().all(|byte| byte.is_ascii_digit()) && part.parse::<u64>().is_ok()
+    }) && parts.next().is_none()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -925,18 +1032,22 @@ fn apply_operation_with(
             if faults.fail_staging(&item.path) {
                 return Err(ApplyFailure::Failed("injected staging failure".to_owned()));
             }
-            let stage = unique_artifact(parent, "stage", &item.path);
+            let stage = unique_artifact(parent, "stage");
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&stage)
                 .map_err(failed)?;
-            file.write_all(bytes).map_err(failed)?;
-            file.sync_all().map_err(failed)?;
+            if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+                drop(file);
+                let _ = remove_any(&stage);
+                return Err(failed(error));
+            }
             publish_with_faults(&stage, &item.path, expected, faults)
         }
         Operation::Materialize {
             source,
+            metadata_name,
             source_expected,
             kind,
             expected,
@@ -949,8 +1060,9 @@ fn apply_operation_with(
                 return Err(ApplyFailure::Changed);
             }
             let source = canonical_source;
-            let expected_name = item.path.file_name().and_then(|name| name.to_str());
-            if crate::library::validated_skill_name_at(&source).as_deref() != expected_name {
+            if crate::library::validated_skill_name_at(&source).as_deref()
+                != Some(metadata_name.as_str())
+            {
                 return Err(ApplyFailure::Changed);
             }
             if *kind == MaterializationKind::Copied
@@ -966,7 +1078,7 @@ fn apply_operation_with(
             if faults.fail_staging(&item.path) {
                 return Err(ApplyFailure::Failed("injected staging failure".to_owned()));
             }
-            let stage = unique_artifact(parent, "stage", &item.path);
+            let stage = unique_artifact(parent, "stage");
             match kind {
                 MaterializationKind::Linked => {
                     #[cfg(unix)]
@@ -975,7 +1087,11 @@ fn apply_operation_with(
                     return Err(ApplyFailure::Failed(
                         "symbolic links require a Unix-compatible platform".to_owned(),
                     ));
-                    if fs::read_link(&stage).map_err(failed)? != source {
+                    if fs::read_link(&stage).map_err(|error| {
+                        let _ = remove_any(&stage);
+                        failed(error)
+                    })? != source
+                    {
                         let _ = remove_any(&stage);
                         return Err(ApplyFailure::Failed(
                             "The new link could not be verified".to_owned(),
@@ -984,7 +1100,11 @@ fn apply_operation_with(
                 }
                 MaterializationKind::Copied => {
                     copy_tree(&source, &stage).map_err(|error| {
-                        let _ = remove_any(&stage);
+                        if matches!(&error, crate::materialization::CopyError::Io { path, .. }
+                            if path != &stage && path.starts_with(&stage) && !path.starts_with(&source))
+                        {
+                            let _ = remove_any(&stage);
+                        }
                         ApplyFailure::Failed(error.to_string())
                     })?;
                     let source_tree = TreeSnapshot::read(&source, true).map_err(|error| {
@@ -1015,38 +1135,47 @@ fn apply_operation_with(
                 .path
                 .parent()
                 .ok_or_else(|| ApplyFailure::Failed("destination has no parent".to_owned()))?;
-            let backup = unique_artifact(parent, "backup", &item.path);
-            rename_noreplace(&item.path, &backup).map_err(failed)?;
-            if &fingerprint(&backup) != expected {
-                return if rename_noreplace(&backup, &item.path).is_ok() {
+            let backup = BackupArtifact::create(parent, &item.path)?;
+            backup.capture(&item.path)?;
+            if !backup.matches(expected) {
+                return if backup.restore(&item.path).is_ok() {
+                    backup.cleanup_empty()?;
                     Err(ApplyFailure::Changed)
                 } else {
                     Err(ApplyFailure::RecoveryRequired(format!(
                         "The file changed before removal; a backup was kept at {}",
-                        backup.display()
+                        backup.payload.display()
                     )))
                 };
             }
-            remove_any(&backup).map_err(|error| {
-                if rename_noreplace(&backup, &item.path).is_ok() {
-                    ApplyFailure::RolledBack(format!("Removal failed; the original content was restored: {error}"))
+            if let Err(error) = backup.remove_payload() {
+                return if backup.restore(&item.path).is_ok() {
+                    backup.cleanup_empty()?;
+                    Err(ApplyFailure::RolledBack(format!(
+                        "Removal failed; the original content was restored: {error}"
+                    )))
                 } else {
-                    ApplyFailure::RecoveryRequired(format!(
+                    Err(ApplyFailure::RecoveryRequired(format!(
                         "Removal failed and the original content could not be restored; recover it from {}: {error}",
-                        backup.display()
-                    ))
-                }
-            })
+                        backup.payload.display()
+                    )))
+                };
+            }
+            backup.cleanup_empty()
         }
         Operation::Recover {
             artifact,
             artifact_expected,
+            container,
             destination,
             destination_expected,
         } => {
-            if &fingerprint(artifact) != artifact_expected
-                || &fingerprint(destination) != destination_expected
-            {
+            ensure_contained_physical_parent(destination, target_root)?;
+            let artifact_matches = container.as_ref().map_or_else(
+                || &fingerprint(artifact) == artifact_expected,
+                |container| container.matches(artifact_expected),
+            );
+            if !artifact_matches || &fingerprint(destination) != destination_expected {
                 return Err(ApplyFailure::Changed);
             }
             rename_noreplace(artifact, destination).map_err(|error| {
@@ -1055,8 +1184,21 @@ fn apply_operation_with(
                 } else {
                     failed(error)
                 }
-            })
+            })?;
+            if let Some(container) = container {
+                container.cleanup_empty()?;
+            }
+            Ok(())
         }
+        Operation::DiscardArtifact { expected } => {
+            if &fingerprint(&item.path) != expected {
+                return Err(ApplyFailure::Changed);
+            }
+            remove_any(&item.path).map_err(failed)
+        }
+        Operation::RemoveEmptyArtifact { identity } => identity
+            .remove_empty(&item.path)
+            .map_err(|_| ApplyFailure::Changed),
         Operation::None => Ok(()),
     }
 }
@@ -1119,16 +1261,21 @@ fn publish_with_faults(
     let parent = destination
         .parent()
         .ok_or_else(|| ApplyFailure::Failed("destination has no parent".to_owned()))?;
-    let backup = unique_artifact(parent, "backup", destination);
-    rename_noreplace(destination, &backup).map_err(failed)?;
-    if &fingerprint(&backup) != expected {
-        return if rename_noreplace(&backup, destination).is_ok() {
+    let backup = BackupArtifact::create(parent, destination).inspect_err(|_| {
+        let _ = remove_any(stage);
+    })?;
+    backup.capture(destination).inspect_err(|_| {
+        let _ = remove_any(stage);
+    })?;
+    if !backup.matches(expected) {
+        return if backup.restore(destination).is_ok() {
             let _ = remove_any(stage);
+            backup.cleanup_empty()?;
             Err(ApplyFailure::Changed)
         } else {
             Err(ApplyFailure::RecoveryRequired(format!(
                 "destination changed after planning; preserved {}",
-                backup.display()
+                backup.payload.display()
             )))
         };
     }
@@ -1138,32 +1285,33 @@ fn publish_with_faults(
         rename_noreplace(stage, destination)
     };
     if let Err(error) = installation {
-        let restored =
-            !faults.fail_rollback(destination) && rename_noreplace(&backup, destination).is_ok();
+        let restored = !faults.fail_rollback(destination) && backup.restore(destination).is_ok();
         return if restored {
             let _ = remove_any(stage);
+            backup.cleanup_empty()?;
             Err(ApplyFailure::RolledBack(format!(
                 "Saving failed; the original content was restored: {error}"
             )))
         } else {
             Err(ApplyFailure::RecoveryRequired(format!(
                 "Saving failed and the original content could not be restored; recover it from {}: {error}",
-                backup.display()
+                backup.payload.display()
             )))
         };
     }
     if faults.fail_backup_deletion(destination) {
         return Err(ApplyFailure::RecoveryRequired(format!(
             "new content is installed but backup remains at {}: injected backup deletion failure",
-            backup.display()
+            backup.payload.display()
         )));
     }
-    remove_any(&backup).map_err(|error| {
+    backup.remove_payload().map_err(|error| {
         ApplyFailure::RecoveryRequired(format!(
             "new content is installed but backup remains at {}: {error}",
-            backup.display()
+            backup.payload.display()
         ))
-    })
+    })?;
+    backup.cleanup_empty()
 }
 
 #[cfg(test)]
@@ -1220,6 +1368,7 @@ mod tests {
 
         std::assert_matches!(result, Err(ApplyFailure::Changed));
         assert_eq!(fs::read(&destination).unwrap(), b"external");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -1239,6 +1388,7 @@ mod tests {
 
         std::assert_matches!(result, Err(ApplyFailure::Changed));
         assert_eq!(fs::read(&destination).unwrap(), b"external");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -1296,6 +1446,20 @@ mod tests {
         }
     }
 
+    fn retained_original_content(root: &Path) -> bool {
+        fs::read_dir(root).unwrap().any(|entry| {
+            let path = entry.unwrap().path();
+            if !fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            {
+                return false;
+            }
+            fs::read_dir(path)
+                .unwrap()
+                .any(|payload| fs::read(payload.unwrap().path()).is_ok_and(|bytes| bytes == b"old"))
+        })
+    }
+
     #[test]
     fn fault_injection_preserves_content_and_isolates_operations() {
         let root = tempfile::tempdir().unwrap();
@@ -1313,12 +1477,13 @@ mod tests {
         assert_eq!(fs::read_to_string(&first.path).unwrap(), "old");
         apply_operation_with(&second, &Faults::default(), root.path()).unwrap();
         assert_eq!(fs::read_to_string(&second.path).unwrap(), "new");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
     }
 
     #[test]
     fn publication_failure_rolls_back_or_retains_recovery_artifact() {
         let root = tempfile::tempdir().unwrap();
-        let rolled_back = replacement(root.path(), "rolled-back");
+        let rolled_back = replacement(root.path(), &"r".repeat(255));
         let result = apply_operation_with(
             &rolled_back,
             &Faults {
@@ -1329,8 +1494,9 @@ mod tests {
         );
         std::assert_matches!(result, Err(ApplyFailure::RolledBack(_)));
         assert_eq!(fs::read_to_string(&rolled_back.path).unwrap(), "old");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
 
-        let recovery = replacement(root.path(), "recovery");
+        let recovery = replacement(root.path(), &"z".repeat(255));
         let result = apply_operation_with(
             &recovery,
             &Faults {
@@ -1342,19 +1508,13 @@ mod tests {
         );
         std::assert_matches!(result, Err(ApplyFailure::RecoveryRequired(_)));
         assert!(!recovery.path.exists());
-        assert!(fs::read_dir(root.path()).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".skillator-backup-")
-        }));
+        assert!(retained_original_content(root.path()));
     }
 
     #[test]
     fn backup_deletion_failure_keeps_new_content_and_backup() {
         let root = tempfile::tempdir().unwrap();
-        let item = replacement(root.path(), "destination");
+        let item = replacement(root.path(), &"d".repeat(255));
         let result = apply_operation_with(
             &item,
             &Faults {
@@ -1365,31 +1525,151 @@ mod tests {
         );
         std::assert_matches!(result, Err(ApplyFailure::RecoveryRequired(_)));
         assert_eq!(fs::read_to_string(&item.path).unwrap(), "new");
-        assert!(fs::read_dir(root.path()).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".skillator-backup-")
-        }));
+        assert!(retained_original_content(root.path()));
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
     }
 }
 
-fn unique_artifact(parent: &Path, kind: &str, destination: &Path) -> PathBuf {
+fn unique_artifact(parent: &Path, kind: &str) -> PathBuf {
     let sequence = OPERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("entry");
-    let encoded: String = name
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
     parent.join(format!(
-        ".skillator-{kind}-{}-{sequence}-{encoded}",
+        ".skillator-{kind}-{}-{sequence}",
         std::process::id()
     ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContainerIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl ContainerIdentity {
+    fn read(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(std::io::Error::other(
+                "backup container is not a physical directory",
+            ));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn contents(self, path: &Path) -> std::io::Result<Option<PathBuf>> {
+        if Self::read(path)? != self {
+            return Err(std::io::Error::other("backup container changed"));
+        }
+        let mut entries = fs::read_dir(path)?;
+        let payload = entries.next().transpose()?.map(|entry| entry.path());
+        if entries.next().transpose()?.is_some() || Self::read(path)? != self {
+            return Err(std::io::Error::other(
+                "backup container changed or has multiple entries",
+            ));
+        }
+        Ok(payload)
+    }
+
+    fn remove_empty(self, path: &Path) -> std::io::Result<()> {
+        if self.contents(path)?.is_some() {
+            return Err(std::io::Error::other("backup container is not empty"));
+        }
+        fs::remove_dir(path)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BackupArtifact {
+    container: PathBuf,
+    payload: PathBuf,
+    identity: ContainerIdentity,
+}
+
+impl BackupArtifact {
+    fn create(parent: &Path, destination: &Path) -> Result<Self, ApplyFailure> {
+        use std::os::unix::fs::DirBuilderExt;
+        let basename = destination
+            .file_name()
+            .ok_or_else(|| ApplyFailure::Failed("destination has no basename".to_owned()))?;
+        loop {
+            let container = unique_artifact(parent, "backup");
+            match fs::DirBuilder::new().mode(0o700).create(&container) {
+                Ok(()) => {
+                    let identity = ContainerIdentity::read(&container).map_err(failed)?;
+                    return Ok(Self {
+                        payload: container.join(basename),
+                        container,
+                        identity,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(failed(error)),
+            }
+        }
+    }
+
+    fn matches(&self, expected: &EntryFingerprint) -> bool {
+        self.identity
+            .contents(&self.container)
+            .ok()
+            .flatten()
+            .as_ref()
+            == Some(&self.payload)
+            && &fingerprint(&self.payload) == expected
+            && self
+                .identity
+                .contents(&self.container)
+                .ok()
+                .flatten()
+                .as_ref()
+                == Some(&self.payload)
+    }
+
+    fn remove_empty(&self) -> std::io::Result<()> {
+        self.identity.remove_empty(&self.container)
+    }
+
+    fn cleanup_empty(&self) -> Result<(), ApplyFailure> {
+        self.remove_empty().map_err(|error| {
+            ApplyFailure::RecoveryRequired(format!(
+                "An empty backup folder could not be removed at {}: {error}",
+                self.container.display()
+            ))
+        })
+    }
+
+    fn capture(&self, source: &Path) -> Result<(), ApplyFailure> {
+        if self
+            .identity
+            .contents(&self.container)
+            .map_err(failed)?
+            .is_some()
+        {
+            return Err(ApplyFailure::Changed);
+        }
+        if let Err(error) = rename_noreplace(source, &self.payload) {
+            self.cleanup_empty()?;
+            return Err(failed(error));
+        }
+        Ok(())
+    }
+
+    fn remove_payload(&self) -> std::io::Result<()> {
+        if self.identity.contents(&self.container)?.as_ref() != Some(&self.payload) {
+            return Err(std::io::Error::other("backup container changed"));
+        }
+        remove_any(&self.payload)
+    }
+
+    fn restore(&self, destination: &Path) -> std::io::Result<()> {
+        if self.identity.contents(&self.container)?.as_ref() != Some(&self.payload) {
+            return Err(std::io::Error::other("backup container changed"));
+        }
+        rename_noreplace(&self.payload, destination)
+    }
 }
 
 fn remove_any(path: &Path) -> Result<(), std::io::Error> {

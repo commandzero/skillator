@@ -356,7 +356,7 @@ pub fn run() -> ExitCode {
             if !interactive_terminal() {
                 return diagnostic(3, "skillator library requires an interactive terminal");
             }
-            match crate::tui::run_library(&paths) {
+            match crate::tui::library::run(&paths) {
                 Ok(status) => ExitCode::from(status),
                 Err(error) => diagnostic(error.exit_status(), &error.to_string()),
             }

@@ -32,14 +32,28 @@ See [release support and installation checks](docs/release.md) for the exact mat
 
 ## Get started
 
-1. Run `skillator` inside a Git repository.
-2. Add the folders containing your skills to the Library. The default is `~/.skillator/library`.
-3. Press `Ctrl+L` to open the Skills view, then `Space` to select skills.
-4. Press `s` to review and save, or `Ctrl+S` to save and exit when no confirmation is needed.
+1. Run `skillator` inside a Git repository to start on Repo, or from your home directory to start on User—even if home is a Git worktree.
+2. Open Library with `Ctrl+L` from Repo or `Ctrl+H` from User, then add folders containing your skills. First-run Library setup appears only when you open Library, not automatically at root startup.
+3. Use `Ctrl+H` / `Ctrl+L` to cycle Library, User, and Repo left/right, then `Space` to select skills.
+4. Press `s` to review and save, or `Ctrl+S` to save and exit when no confirmation is needed. On a remote Library host, both keys instead request a confirmed sync of that follower; Local keeps its save controls.
 
 Skills are linked by default, so library edits take effect immediately. Press `m` to switch to a separate copy. Skillator reports when a copy differs from the library.
 
-Use the `User` tab for skills available across projects. Add another skill tab for folders such as `.claude/skills`.
+User installs skills across projects; Repo installs them for the current Git checkout. Library manages available skills. The first line selects a scope; `Tab` / `Shift+Tab` selects its directories or Library hosts. The bottom line identifies the active scope and path.
+
+Scope switches reuse the session's loaded Library/User/Repo views and refresh inventory and destination state in the background. First entry to User/Repo from explicit Library shows a loading view while observation runs. Completed refreshes wait while either destination scope has staged edits or an overlay is open, preserving checks, modes, directory choice, filters and collapsed groups. Save still validates live configuration and filesystem state.
+
+A cold Library launch shows its folders while discovery runs. Press `r` on Local to request a Library refresh.
+
+Press Enter on a skill to read its details and complete `SKILL.md`. A frontmatter name that differs from its source directory, or uses a human-readable naming style, produces an advisory warning there—not `[!]`, disabled usage, or a sync refusal. Skillator does not rewrite the document to normalize its name.
+
+Unreadable or malformed documents, missing required metadata, unsafe names, and actual source or destination conflicts remain blocking errors. Safe metadata names must fit a portable filesystem component: at most 255 UTF-8 bytes, with no path separators, control characters, or dot/parent components.
+
+Interrupted saves report exact recovery paths. New Target backups use a bounded private container with the original destination basename as its sole payload; old encoded recovery artifacts remain recognizable. Unpaired interrupted stages and ambiguous or unsafe backups require manual recovery and are never guessed away.
+
+Press `Ctrl+T` in User or Repo to filter Generic/Codex (`.agents/skills`) and Claude (`.claude/skills`) presets. Use arrow keys and Enter to stage a directory, or enter a custom relative path when no preset matches. User paths are relative to your home; Repo paths are relative to the checkout. Directories and enablements are written only when you save.
+
+In Library, `Ctrl+T` stages a follower after verifying its hostname through SSH. Configure credentials and trusted keys in `~/.ssh/config` first. The SSH alias remains the destination even when its reported hostname differs. Save explicitly to persist the host; after a successful new-host save, choose whether to initialize it. Declining keeps the registration without creating a replica. In a saved follower tab, `s` or `Ctrl+S` confirms a leader-to-that-follower sync without saving Local edits or exiting; successful delivery refreshes read-only inspection. Confirmation warns that content may be overwritten and stale files deleted only inside the owned `~/.skillator/library/replica`. An interrupted rsync can leave a partial owned replica; retry after fixing the cause. See [Library delivery and follower tabs](docs/library-rsync.md).
 
 ## Command line
 
@@ -149,11 +163,12 @@ git rm --cached -- .agents/skillator.yaml
 | `h` / `l` | Collapse or expand a group |
 | `Space` | Toggle a skill or group |
 | `m` | Change how a skill is installed or tracked |
-| `Tab` / `Shift+Tab` | Switch skill folders or the User tab |
-| `Ctrl+L` | Switch between Skills and Library |
+| `Ctrl+H` / `Ctrl+L` | Cycle Library, User, and Repo scopes left / right |
+| `Tab` / `Shift+Tab` | Cycle directories or Library hosts within the active scope |
+| `Ctrl+T` | Stage an agent directory, or verify and stage a Library follower |
 | `/` | Filter skills; `/pending` shows unsaved changes |
-| `s` | Review and save |
-| `Ctrl+S` | Save and exit when no confirmation is needed |
+| `s` | Review and save in Local/User/Repo; confirm sync of the selected saved follower in a remote Library tab |
+| `Ctrl+S` | Save and exit in Local/User/Repo when safe (ask about initializing newly saved followers first); confirm sync without exit in a remote Library tab |
 | `u` | Discard unsaved changes |
 | `?` | Show all shortcuts |
 | `q` | Quit |

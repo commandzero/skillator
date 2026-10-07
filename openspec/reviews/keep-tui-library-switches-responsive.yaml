@@ -1,0 +1,24 @@
+change: keep-tui-library-switches-responsive
+reviewer: openai-codex/gpt-6.1-sol
+reviewed_at: 2026-10-06T06:25:16Z
+notes: |
+  # OpenSpec semantic review: keep-tui-library-switches-responsive
+  
+  Reviewer: openai-codex/gpt-6.1-sol
+  Reviewed committed implementation/spec/archive head: `09406cd589a540316aeb1f899147809c3c2f220b`.
+  
+  ## Findings
+  
+  The added requirement preserves immediate cached/cold Library rendering, single-flight background discovery, browsing identity and staged-edit protection, obsolete-result rejection, follower cancellation/restart, and fresh save validation. All seven scenarios match the committed main TUI spec.
+  
+  - `openspec/specs/tui-workflows/spec.md`: **Library scope switching remains responsive** — exact statement and 7 scenario matches; no delta content omitted.
+  
+  No removed or renamed requirements or capabilities are declared. Every delta capability has its main spec; no intentional spec absence or no-delta exception is needed. Existing main-spec content outside the selected requirements was preserved during archival; all deltas were already synchronized before the archive command. All proposals, designs, tasks, delta specs and schema metadata are committed.
+  
+  ## Verification boundary
+  
+  Strict validation passed for all five active changes and 12 main specs before archival. Native archived-task validation passed for all 13 archives after archival, and post-archive policy preflight passed. The implementation previously passed full preflight (335 tests) and native macOS PTY/SSH/rsync smoke; no implementation files changed during archival or commit preparation. This receipt records semantic delta-to-main correspondence, not an independent human review or Linux/WSL verification.
+no_spec_deltas: false
+archive_tree: 5659ce282c09a370e0c096876eb3240368bb1374
+specs:
+  openspec/specs/tui-workflows/spec.md: 7d595af9e5d724865a1e124f974c032c8a6c2e34

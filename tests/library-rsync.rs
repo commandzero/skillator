@@ -134,7 +134,6 @@ impl Fixture {
             .code(3)
             .stdout("");
     }
-
     fn configure_follower(&self) {
         fs::create_dir_all(self.follower.join(".skillator")).unwrap();
         fs::write(

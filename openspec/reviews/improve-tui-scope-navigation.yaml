@@ -1,0 +1,27 @@
+change: improve-tui-scope-navigation
+reviewer: openai-codex/gpt-6.1-sol
+reviewed_at: 2026-10-07T03:56:55Z
+notes: |
+  # Refreshed OpenSpec semantic review: improve-tui-scope-navigation
+  
+  Reviewer: openai-codex/gpt-6.1-sol
+  Reviewed implementation/spec/archive head: `a78ff15346e87f45a5beb7ee4c54799a0cf929a6`.
+  
+  ## Delta correspondence and intentional supersession
+  
+  All eight TUI and five library-hosts requirements remain present with their scenario names and scope: discoverable top-level scopes, scope-specific directory tabs, staged/isolated edits, validated directory chooser, browsing retention, status paths, shared explicit follower registry, verified SSH registration, stdout/diagnostic separation, local-state preservation and host-specific read-only replica inventory. No capability or requirement was removed or renamed.
+  
+  Five TUI requirement bodies intentionally follow later archived changes, not obsolete controls: fix-tui-scope-controls makes Library gray (245), uses Ctrl+H/Ctrl+L left/right cycling, selects Repo in Git and User at physical home/outside Git without requiring Library configuration, and reserves onboarding for explicit Library entry. The chooser first-Library scenario is accordingly qualified by explicit Library opening. The staged-Target Ctrl+L scenario specifies Repo because cycling from Repo enters Library. The other three TUI requirements and all five library-hosts requirements retain their archived statements/scenarios. Historical bone Library borders, Ctrl-arrows, the Library toggle and automatic root onboarding were not restored. The separate add-tui-follower-sync contract governs saved-follower s/Ctrl+S and initialization behavior while preserving the original read-only inspection/host-registration boundaries.
+  
+  The current main cli-contract and library-management onboarding references were reconciled with that newer startup contract; historical archives were not edited. Responsive Library/Target refresh and naming advisories remain governed by their later archived deltas. Directory deletion now chooses an adjacent same-scope tab, retains staged dirty state and restores that tab's browse identity. Target background loading scans saved Library configuration and current disk content rather than trusting the declaration fingerprint as an inventory fingerprint. Accepting a Target picker evicts staged Library/config/host views and derived snapshots; canceling it retains edits.
+  
+  ## Implementation and exercised evidence
+  
+  Full preflight passed with 347 tests, formatting, Clippy, OKF, 12 main specs and release safeguards. Native macOS arm64 PTY reproduction/confirmation exercised deletion of the last User directory while Repo tabs exist, editing the remaining User directory, adding a skill after warming inventory, refresh/Undo, canceled versus accepted Target changes, restored checked visibility with unchanged Library bytes, and subsequent navigation without a dirty-scope prompt. Missing-Library startup selected Repo in Git and User in home-as-Git; explicit Library alone showed I AM SKILLATOR! without creating files. A real disposable trusted-key SSH/rsync smoke displayed linked-document metadata and body in the read-only follower inspector. Strict main-spec validation and archived-task validation passed (12 specs, 13 archives).
+  
+  Artifacts and tasks remain complete; current source is split into the scope coordinator, User/Repo/Library modules and shared lifecycle/model/input/reducer/render modules. This receipt is semantic review of current correspondence and supersession, not a human review or Linux/WSL execution claim.
+no_spec_deltas: false
+archive_tree: 1781815ec9ab1ee28136269dd526a7cdb69f24b9
+specs:
+  openspec/specs/library-hosts/spec.md: 0d1bb7bb0e3cca1a14a48fe1fa1d0301bfec0e43
+  openspec/specs/tui-workflows/spec.md: 7d595af9e5d724865a1e124f974c032c8a6c2e34

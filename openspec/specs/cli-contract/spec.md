@@ -11,7 +11,7 @@ Skillator SHALL expose top-level `init`, `library`, `target`, `targets`, `user`,
 #### Scenario: Default root invocation
 
 - **WHEN** the user runs `skillator` in a Git worktree with interactive input and output
-- **THEN** Skillator opens the normal Library workspace with its first-run welcome when Library Configuration is absent, otherwise launches the Target TUI for the current worktree root
+- **THEN** Skillator launches the Target TUI in Repo for the current worktree root without requiring Library Configuration; startup in the physical home directory selects User even when home is a Git worktree, and Library onboarding appears only when Library is explicitly opened
 
 #### Scenario: Bare Library invocation
 - **WHEN** the user runs `skillator library` with interactive input and output
