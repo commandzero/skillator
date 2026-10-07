@@ -1673,7 +1673,7 @@ fn target_refresh_fixture() -> (tempfile::TempDir, AppPaths, TargetUi, Model) {
         .unwrap();
     assert!(git.status.success());
     let directory = directory.canonicalize().unwrap();
-    let data = load_target_data(&paths, &directory, None).unwrap();
+    let data = load_target_data(&paths, &directory).unwrap();
     let mut model = initial_target_model(&data.state.tabs);
     let ui = TargetUi {
         directory,
@@ -1700,7 +1700,6 @@ fn request_target_refresh(paths: &AppPaths, ui: &mut TargetUi) {
         paths,
         TargetRequest {
             directory: ui.directory.clone(),
-            library_snapshot: None,
         },
     );
     finish_target_scans(paths, &mut ui.refresh);
@@ -1837,7 +1836,6 @@ fn target_refresh_rejects_invalidated_and_replaced_target_results() {
         &paths,
         TargetRequest {
             directory: ui.directory.clone(),
-            library_snapshot: None,
         },
     );
     ui.refresh.invalidate();
@@ -1861,14 +1859,12 @@ fn target_refresh_rejects_invalidated_and_replaced_target_results() {
         &paths,
         TargetRequest {
             directory: ui.directory.clone(),
-            library_snapshot: None,
         },
     );
     ui.refresh.request(
         &paths,
         TargetRequest {
             directory: other.clone(),
-            library_snapshot: None,
         },
     );
     let obsolete = ui
@@ -1898,4 +1894,239 @@ fn target_refresh_rejects_invalidated_and_replaced_target_results() {
             .any(|tab| tab.scope == TargetTabScope::Repository
                 && tab.directory.key().as_str() == "other")
     );
+}
+
+#[test]
+fn deleting_user_directories_stays_in_scope_and_restores_neighbor_browse() {
+    for deleted_key in ["bravo", "charlie"] {
+        let (_home, paths, mut ui, mut model) = target_refresh_fixture();
+        let tabs = &mut ui.loaded.as_mut().unwrap().state.tabs;
+        let survivor_key = if deleted_key == "bravo" {
+            "charlie"
+        } else {
+            "bravo"
+        };
+        let survivor = tabs
+            .iter()
+            .position(|tab| {
+                tab.scope == TargetTabScope::User && tab.directory.key().as_str() == survivor_key
+            })
+            .unwrap();
+        activate_target_tab(&mut model, tabs, &ui.dirty_scopes, survivor);
+        model.selected = model
+            .rows
+            .iter()
+            .position(|row| row.skill_path.as_deref() == Some("alpha"))
+            .unwrap();
+        let selected = model.selected;
+        model.filter = "alpha".to_owned();
+        model
+            .collapsed
+            .insert(model.selected_row().unwrap().group.clone().unwrap());
+        let collapsed = model.collapsed.clone();
+        stash_target_browse(&mut model, tabs, survivor);
+        let deleted = tabs
+            .iter()
+            .position(|tab| {
+                tab.scope == TargetTabScope::User && tab.directory.key().as_str() == deleted_key
+            })
+            .unwrap();
+        activate_target_tab(&mut model, tabs, &ui.dirty_scopes, deleted);
+        let repository = scope_config(tabs, TargetTabScope::Repository).unwrap();
+        delete_target_directory(&mut model, tabs, &mut ui.dirty_scopes);
+        assert_eq!(model.scope, Scope::User);
+        assert_eq!(tabs[model.directory_index].scope, TargetTabScope::User);
+        assert_eq!(
+            tabs[model.directory_index].directory.key().as_str(),
+            survivor_key
+        );
+        assert_eq!(model.selected, selected);
+        assert_eq!(model.filter, "alpha");
+        assert_eq!(model.collapsed, collapsed);
+        assert!(model.dirty);
+        assert_eq!(ui.dirty_scopes, BTreeSet::from([TargetTabScope::User]));
+        assert_eq!(
+            scope_config(tabs, TargetTabScope::Repository).unwrap(),
+            repository
+        );
+        assert!(
+            !model
+                .browse
+                .contains_key(&(TargetTabScope::User, deleted_key.to_owned()))
+        );
+        let remaining = tabs.len();
+        delete_target_directory(&mut model, tabs, &mut ui.dirty_scopes);
+        assert_eq!(tabs.len(), remaining);
+        assert!(
+            matches!(&model.overlay, Overlay::Notice(message) if message.contains("at least one"))
+        );
+        model.overlay = Overlay::None;
+        ui.activate(&mut model, Scope::Repo, &paths);
+        assert!(!model.dirty);
+        ui.activate(&mut model, Scope::User, &paths);
+        assert!(model.dirty);
+        assert_eq!(model.filter, "alpha");
+    }
+}
+
+#[test]
+fn background_target_replacement_rescans_added_removed_and_changed_library_skills() {
+    let (home, paths, mut ui, mut model) = target_refresh_fixture();
+    let fingerprint = ui
+        .loaded
+        .as_ref()
+        .unwrap()
+        .library_session
+        .fingerprint
+        .clone();
+    let library = home.path().join("library");
+    write_refresh_skill(&library, "beta");
+    ui.activate(&mut model, Scope::Repo, &paths);
+    model.scope = Scope::Library;
+    ui.activate(&mut model, Scope::User, &paths);
+    assert!(
+        !model
+            .rows
+            .iter()
+            .any(|row| row.skill_path.as_deref() == Some("beta"))
+    );
+    request_target_refresh(&paths, &mut ui);
+    assert!(ui.apply(&mut model, &paths));
+    assert_eq!(
+        ui.loaded.as_ref().unwrap().library_session.fingerprint,
+        fingerprint
+    );
+    assert!(
+        model
+            .rows
+            .iter()
+            .any(|row| row.skill_path.as_deref() == Some("beta"))
+    );
+
+    std::fs::remove_dir_all(library.join("alpha")).unwrap();
+    std::fs::write(
+        library.join("beta/SKILL.md"),
+        "---\nname: renamed-beta\ndescription: Changed beta description\n---\n",
+    )
+    .unwrap();
+    request_target_refresh(&paths, &mut ui);
+    assert!(ui.apply(&mut model, &paths));
+    assert_eq!(
+        ui.loaded.as_ref().unwrap().library_session.fingerprint,
+        fingerprint
+    );
+    assert!(
+        !model
+            .rows
+            .iter()
+            .any(|row| row.skill_path.as_deref() == Some("alpha"))
+    );
+    let beta = model
+        .rows
+        .iter()
+        .find(|row| row.skill_path.as_deref() == Some("beta"))
+        .unwrap();
+    assert_eq!(beta.name, "renamed-beta");
+    for tab in &ui.loaded.as_ref().unwrap().state.tabs {
+        assert!(
+            !tab.rows
+                .iter()
+                .any(|row| row.skill_path.as_deref() == Some("alpha"))
+        );
+        assert!(tab.rows.iter().any(|row| {
+            row.skill_path.as_deref() == Some("beta") && row.name == "renamed-beta"
+        }));
+    }
+}
+
+#[test]
+fn deleting_repository_directories_preserves_user_edits_and_one_repository_directory() {
+    for deleted_key in ["delta", "echo"] {
+        let (_home, paths, mut ui, mut model) = target_refresh_fixture();
+        std::fs::create_dir_all(ui.directory.join(".agents")).unwrap();
+        std::fs::write(
+            ui.directory.join(".agents/skillator.yaml"),
+            "version: 1\ndelta:\n  path: \".delta/skills\"\n  skills: {}\necho:\n  path: \".echo/skills\"\n  skills: {}\n",
+        ).unwrap();
+        request_target_refresh(&paths, &mut ui);
+        assert!(ui.apply(&mut model, &paths));
+        model.selected = model
+            .rows
+            .iter()
+            .position(|row| row.skill_path.as_deref() == Some("alpha"))
+            .unwrap();
+        reduce(&mut model, Action::Toggle);
+        store_active_target_tab(&model, &mut ui.loaded.as_mut().unwrap().state.tabs);
+        ui.dirty_scopes.insert(TargetTabScope::User);
+        let user = scope_config(
+            &ui.loaded.as_ref().unwrap().state.tabs,
+            TargetTabScope::User,
+        )
+        .unwrap();
+        ui.activate(&mut model, Scope::Repo, &paths);
+        let tabs = &mut ui.loaded.as_mut().unwrap().state.tabs;
+        let deleted = tabs
+            .iter()
+            .position(|tab| {
+                tab.scope == TargetTabScope::Repository
+                    && tab.directory.key().as_str() == deleted_key
+            })
+            .unwrap();
+        activate_target_tab(&mut model, tabs, &ui.dirty_scopes, deleted);
+        delete_target_directory(&mut model, tabs, &mut ui.dirty_scopes);
+        assert_eq!(model.scope, Scope::Repo);
+        assert_eq!(
+            tabs[model.directory_index].scope,
+            TargetTabScope::Repository
+        );
+        assert_ne!(
+            tabs[model.directory_index].directory.key().as_str(),
+            deleted_key
+        );
+        assert!(model.dirty);
+        assert_eq!(
+            ui.dirty_scopes,
+            BTreeSet::from([TargetTabScope::User, TargetTabScope::Repository,])
+        );
+        assert_eq!(scope_config(tabs, TargetTabScope::User).unwrap(), user);
+        let remaining = tabs.len();
+        delete_target_directory(&mut model, tabs, &mut ui.dirty_scopes);
+        assert_eq!(tabs.len(), remaining);
+        assert!(
+            matches!(&model.overlay, Overlay::Notice(message) if message.contains("at least one"))
+        );
+        model.overlay = Overlay::None;
+        ui.activate(&mut model, Scope::User, &paths);
+        assert!(model.dirty);
+        assert!(model.rows.iter().any(|row| {
+            row.skill_path.as_deref() == Some("alpha") && row.check == Some(CheckState::Checked)
+        }));
+    }
+}
+
+#[test]
+fn deleting_a_directory_with_staged_or_saved_enablements_is_blocked() {
+    for saved in [false, true] {
+        let (_home, _paths, mut ui, mut model) = target_refresh_fixture();
+        model.selected = model
+            .rows
+            .iter()
+            .position(|row| row.skill_path.as_deref() == Some("alpha"))
+            .unwrap();
+        if saved {
+            model.rows[model.selected].initial_check = Some(CheckState::Checked);
+        } else {
+            reduce(&mut model, Action::Toggle);
+        }
+        let tabs = &mut ui.loaded.as_mut().unwrap().state.tabs;
+        let remaining = tabs.len();
+        let index = model.directory_index;
+        delete_target_directory(&mut model, tabs, &mut ui.dirty_scopes);
+        assert_eq!(tabs.len(), remaining);
+        assert_eq!(model.directory_index, index);
+        assert!(ui.dirty_scopes.is_empty());
+        assert!(
+            matches!(&model.overlay, Overlay::Notice(message) if message.contains("Disable all skills"))
+        );
+    }
 }

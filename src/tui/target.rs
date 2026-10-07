@@ -11,7 +11,7 @@ use crate::app::{
     AppPaths, LibraryWorkflow, PreparedTargetSave, PreparedUserScopeSave, ReportStatus,
     TargetSession, TargetWorkflow, UserScopeSession, UserScopeWorkflow, WorkflowError,
 };
-use crate::config::{Fingerprint, LibraryConfig, RepositoryConfig, SkillDirectoryConfig};
+use crate::config::{LibraryConfig, RepositoryConfig, SkillDirectoryConfig};
 use crate::domain::{
     Enablement, MaterializationKind, RepositoryRelativePath, SkillDirectoryKey, SkillKey,
     SkillPath, SourceKey,
@@ -61,7 +61,6 @@ pub(super) struct TargetUi {
 
 pub(super) struct TargetRequest {
     pub(super) directory: PathBuf,
-    pub(super) library_snapshot: Option<(Fingerprint, Arc<LibrarySnapshot>)>,
 }
 
 pub(super) struct TargetReply {
@@ -110,7 +109,7 @@ impl TargetRefresh {
             receiver,
         });
         std::thread::spawn(move || {
-            let result = load_target_data(&paths, &request.directory, request.library_snapshot);
+            let result = load_target_data(&paths, &request.directory);
             let _ = sender.send(TargetReply { generation, result });
         });
     }
@@ -230,15 +229,9 @@ impl TargetUi {
 pub(super) fn load_target_data(
     paths: &AppPaths,
     directory: &Path,
-    cached_library: Option<(Fingerprint, Arc<LibrarySnapshot>)>,
 ) -> Result<TargetData, WorkflowError> {
     let (library_session, library_error) = library::load_library_for_tui(paths)?;
-    let library = cached_library
-        .filter(|(fingerprint, _)| {
-            library_error.is_none() && *fingerprint == library_session.fingerprint
-        })
-        .map(|(_, snapshot)| snapshot)
-        .unwrap_or_else(|| Arc::new(LibraryWorkflow::snapshot(paths, &library_session.config)));
+    let library = Arc::new(LibraryWorkflow::snapshot(paths, &library_session.config));
     let (state, user_error, repository_error) = reload_target_for_tui(
         paths,
         directory,
@@ -374,7 +367,7 @@ pub(super) fn run_target_once(
             model = Model::new(Workspace::Target, Vec::new());
         }
         if onboard {
-            let data = load_target_data(paths, &directory, browsing.library_snapshot.clone())?;
+            let data = load_target_data(paths, &directory)?;
             let git_available = data.state.repository.target.git_repository().is_some();
             let at_home = paths.home().canonicalize().ok().as_ref() == Some(&directory);
             let scope = if at_home || !git_available {
@@ -397,7 +390,6 @@ pub(super) fn run_target_once(
                 paths,
                 TargetRequest {
                     directory: directory.clone(),
-                    library_snapshot: browsing.library_snapshot.clone(),
                 },
             );
         }
@@ -757,32 +749,7 @@ pub(super) fn run_target_once(
                     Ok(None)
                 }
                 Effect::DeleteDirectory => {
-                    store_active_target_tab(model, &mut state.tabs);
-                    let scope = active_target_scope(model);
-                    if state.tabs.iter().filter(|tab| tab.scope == scope).count() > 1 {
-                        let index = model.directory_index.min(state.tabs.len() - 1);
-                        let rows = &state.tabs[index].rows;
-                        if rows.iter().any(|row| {
-                            row.kind == RowKind::Skill
-                                && (row.check == Some(CheckState::Checked)
-                                    || row.initial_check == Some(CheckState::Checked))
-                        }) {
-                            model.overlay = Overlay::Notice(
-                        "Disable all skills in this folder and save before removing the folder from the configuration."
-                            .to_owned(),
-                    );
-                            return Ok(None);
-                        }
-                        state.tabs.remove(index);
-                        dirty_scopes.insert(scope);
-                        let target = index.min(state.tabs.len() - 1);
-                        sync_target_tab_model(model, &state.tabs, dirty_scopes);
-                        activate_target_tab(model, &state.tabs, dirty_scopes, target);
-                    } else {
-                        model.overlay = Overlay::Notice(
-                    "Keep at least one skill folder for your user account and one for this repository.".to_owned(),
-                );
-                    }
+                    delete_target_directory(model, &mut state.tabs, dirty_scopes);
                     Ok(None)
                 }
                 Effect::ChangeTargetTo(value) => {
@@ -1022,6 +989,54 @@ pub(super) fn store_active_target_tab(model: &Model, tabs: &mut [TargetTab]) {
     {
         tab.rows = model.rows.clone();
     }
+}
+
+pub(super) fn delete_target_directory(
+    model: &mut Model,
+    tabs: &mut Vec<TargetTab>,
+    dirty_scopes: &mut BTreeSet<TargetTabScope>,
+) {
+    store_active_target_tab(model, tabs);
+    let scope = active_target_scope(model);
+    if tabs.iter().filter(|tab| tab.scope == scope).count() <= 1 {
+        model.overlay = Overlay::Notice(
+            "Keep at least one skill folder for your user account and one for this repository."
+                .to_owned(),
+        );
+        return;
+    }
+    let index = model.directory_index.min(tabs.len() - 1);
+    if tabs[index].rows.iter().any(|row| {
+        row.kind == RowKind::Skill
+            && (row.check == Some(CheckState::Checked)
+                || row.initial_check == Some(CheckState::Checked))
+    }) {
+        model.overlay = Overlay::Notice(
+            "Disable all skills in this folder and save before removing the folder from the configuration."
+                .to_owned(),
+        );
+        return;
+    }
+    let removed = tabs.remove(index);
+    model
+        .browse
+        .remove(&(scope, removed.directory.key().as_str().to_owned()));
+    dirty_scopes.insert(scope);
+    let target = tabs
+        .iter()
+        .enumerate()
+        .find(|(position, tab)| *position >= index && tab.scope == scope)
+        .or_else(|| {
+            tabs.iter()
+                .enumerate()
+                .rev()
+                .find(|(_, tab)| tab.scope == scope)
+        })
+        .map(|(position, _)| position)
+        .expect("deletion preserves a directory in the active scope");
+    model.directory_index = target;
+    sync_target_tab_model(model, tabs, dirty_scopes);
+    activate_target_tab(model, tabs, dirty_scopes, target);
 }
 
 fn active_target_scope(model: &Model) -> TargetTabScope {

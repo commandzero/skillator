@@ -24,7 +24,10 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 - Skills with safe human-readable or divergent names remain usable and syncable; skill details show naming warnings instead of inventory errors.
 - Root TUI startup selects Repo inside Git and User in the home directory, including home-as-Git, without requiring Library setup first.
 - Library scope switches reuse loaded inventory and refresh in the background instead of waiting for a full scan, without overwriting staged edits.
-- Leaving Library for User or Repo renders cached views immediately and refreshes destination state in the background, preserving browsing and staged edits.
+- Leaving Library for User or Repo renders cached views immediately and refreshes saved configuration and current on-disk inventory in the background, preserving browsing and staged edits.
+- Deleting a Skill Directory keeps selection and editing within its User or Repo scope.
+- Confirmed Target changes discard pending Library edits; canceling the Target picker preserves them.
+- Follower tabs can read safely contained relative `SKILL.md` links without rewriting replica content.
 - Removing a user skill before user configuration exists returns an unchanged result.
 - Reject target-registry paths containing redundant separators, `.` or `..` components.
 

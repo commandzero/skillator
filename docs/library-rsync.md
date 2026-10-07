@@ -3,7 +3,7 @@ type: Playbook
 title: Deliver leader skills to follower libraries
 description: Configure leader pushes and fresh follower pulls with SSH and ordinary rsync.
 status: draft
-generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-05T05:18:44Z }
+generated: { by: openai-codex/gpt-6.1-sol, at: 2026-10-07T03:48:45Z }
 ---
 
 # Deliver leader skills to follower libraries
@@ -93,6 +93,7 @@ Delivery runs in the background so navigation remains responsive; repeated sync 
 
 TUI hostname probes have a 15-second overall deadline and 4 KiB stdout/stderr limits. Replica inspection has a 30-second deadline, a 4 MiB inventory-output limit, a 4 KiB stderr limit, and a 256 KiB limit per skill document. Escape cancels a pending probe; switching away cancels inspection and ignores stale replies. These bounds apply to TUI SSH operations, not rsync delivery.
 
+Follower inspection also requires `readlink -n` on the receiver's noninteractive PATH (supported by BSD/macOS and GNU/Linux implementations). A `SKILL.md` relative symlink is readable when its entire chain stays inside that skill's directory; directory links resolve from their physical parent, and at most 40 link hops are followed. Absolute, escaping, broken, cyclic, multiply linked and non-regular documents are rejected. Inspection preserves the registered `SKILL.md` identity and never rewrites links or replica content.
 
 ## Inventory and replica layout
 

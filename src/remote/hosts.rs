@@ -207,7 +207,7 @@ pub(crate) struct ReplicaInventory {
 }
 
 // Only the known PR38 replica is read. The script uses POSIX shell, find, cmp,
-// wc and cat; it never invokes Skillator, Git, rsync, or remote writes.
+// wc, cat and readlink -n; it never invokes Skillator, Git, rsync, or remote writes.
 fn inspection_script() -> String {
     format!(
         r#"set -eu
@@ -227,17 +227,63 @@ if [ -L "$marker" ] || [ ! -f "$marker" ] || ! printf '%s' '{MARKER_CONTENT}' | 
 fi
 linked=$(find "$root" -type f -links +1 -print) || {{ echo 'cannot inspect replica hard links' >&2; exit 1; }}
 if [ -n "$linked" ]; then echo 'replica contains a multiply linked file' >&2; exit 1; fi
-linked=$(find "$root" -type l -name SKILL.md -print) || {{ echo 'cannot inspect replica links' >&2; exit 1; }}
-if [ -n "$linked" ]; then echo 'replica contains a linked SKILL.md; inspection cannot safely read it' >&2; exit 1; fi
 printf '%s\000' "$root"
-find "$root" -type f -name SKILL.md -exec sh -c '
+find "$root" -name SKILL.md ! -type d -exec sh -c '
+  set -eu
   root=$1; shift
+  fail() {{ echo "$1: $relative" >&2; exit 1; }}
   for file do
     relative=${{file#"$root"/}}
-    size=$(wc -c < "$file") || exit 1
+    skill=$(CDPATH= cd -P "${{file%/*}}" && printf "%s." "$PWD") || fail "cannot inspect skill directory"
+    skill=${{skill%.}}
+    current=$skill
+    pending=SKILL.md
+    hops=0
+    while [ -n "$pending" ]; do
+      case $pending in
+        */*) component=${{pending%%/*}}; pending=${{pending#*/}}; more=yes;;
+        *) component=$pending; pending=; more=no;;
+      esac
+      case $component in
+        ""|.) ;;
+        ..)
+          [ "$current" != "$skill" ] || fail "SKILL.md escapes its skill directory"
+          current=$(CDPATH= cd -P "$current/.." && printf "%s." "$PWD") || fail "cannot resolve SKILL.md parent"
+          current=${{current%.}}
+          ;;
+        *)
+          document=$current/$component
+          if [ -L "$document" ]; then
+            [ "$hops" -lt 40 ] || fail "SKILL.md has too many symbolic links"
+            # -n avoids BSD/GNU delimiter differences; the sentinel preserves target newlines.
+            target=$(readlink -n "$document" && printf ".") || fail "cannot read SKILL.md symbolic link"
+            target=${{target%.}}
+            case $target in
+              /*) fail "SKILL.md contains an absolute symbolic link";;
+              "") fail "SKILL.md contains an empty symbolic link";;
+            esac
+            hops=$((hops + 1))
+            if [ "$more" = yes ]; then pending=$target/$pending; else pending=$target; fi
+          elif [ "$more" = yes ]; then
+            [ -d "$document" ] || fail "SKILL.md parent is not a directory"
+            current=$(CDPATH= cd -P "$document" && printf "%s." "$PWD") || fail "cannot resolve SKILL.md directory"
+            current=${{current%.}}
+          else
+            current=$document
+          fi
+          ;;
+      esac
+      case $current in
+        "$skill"|"$skill"/*) ;;
+        *) fail "SKILL.md escapes its skill directory";;
+      esac
+    done
+    document=$current
+    [ -f "$document" ] || fail "SKILL.md is not a regular file"
+    size=$(wc -c < "$document") || exit 1
     if [ "$size" -gt 262144 ]; then echo "SKILL.md exceeds the inspection size limit: $relative" >&2; exit 1; fi
     printf "%s\000%s\000" "$relative" "$size"
-    cat "$file" || exit 1
+    cat "$document" || exit 1
   done
 ' sh "$root" {{}} +
 "#,
@@ -371,6 +417,78 @@ fn metadata(bytes: &[u8], path: &str) -> (String, Option<String>, Vec<String>) {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    fn owned_replica(home: &Path) -> PathBuf {
+        let root = home.join(REPLICA_RELATIVE);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(MARKER_NAME), MARKER_CONTENT).unwrap();
+        root
+    }
+
+    fn execute_inspection(home: &Path) -> std::process::Output {
+        Command::new("sh")
+            .args(["-c", &inspection_script()])
+            .env("HOME", home)
+            .output()
+            .unwrap()
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum ReplicaEntry {
+        Directory,
+        File(Vec<u8>),
+        Symlink(PathBuf),
+        Other,
+    }
+
+    fn replica_contents(root: &Path) -> std::collections::BTreeMap<PathBuf, ReplicaEntry> {
+        fn collect(
+            root: &Path,
+            directory: &Path,
+            entries: &mut std::collections::BTreeMap<PathBuf, ReplicaEntry>,
+        ) {
+            for entry in fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                let content = if metadata.file_type().is_symlink() {
+                    ReplicaEntry::Symlink(fs::read_link(&path).unwrap())
+                } else if metadata.is_dir() {
+                    collect(root, &path, entries);
+                    ReplicaEntry::Directory
+                } else if metadata.is_file() {
+                    ReplicaEntry::File(fs::read(&path).unwrap())
+                } else {
+                    ReplicaEntry::Other
+                };
+                entries.insert(path.strip_prefix(root).unwrap().to_owned(), content);
+            }
+        }
+        let mut entries = std::collections::BTreeMap::new();
+        collect(root, root, &mut entries);
+        entries
+    }
+
+    fn inspected_inventory(home: &Path) -> ReplicaInventory {
+        let output = execute_inspection(home);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        decode_inventory(&output.stdout, None).unwrap()
+    }
+
+    fn assert_inspection_rejected(home: &Path, root: &Path, diagnostic: &str) {
+        let before = replica_contents(root);
+        let output = execute_inspection(home);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(replica_contents(root), before);
+    }
 
     fn configuration(home: &Path) -> PathBuf {
         let directory = home.join(".skillator");
@@ -626,6 +744,263 @@ mod tests {
         assert!(!execute().status.success());
         fs::remove_file(root.join(MARKER_NAME)).unwrap();
         assert!(!execute().status.success());
+    }
+
+    #[test]
+    fn inspection_reads_internal_document_links_at_their_registered_paths() {
+        let home = tempfile::tempdir().unwrap();
+        let root = owned_replica(home.path());
+        let skills = root.join("local/library/_skills");
+        let demo = skills.join("demo");
+        fs::create_dir_all(&demo).unwrap();
+        let text = "---\nname: demo\ndescription: Linked documentation\n---\nLinked body\n";
+        fs::write(demo.join("instructions.md"), text).unwrap();
+        symlink("instructions.md", demo.join("SKILL.md")).unwrap();
+        let root_text = "---\nname: root-skill\ndescription: Source root\n---\nRoot body\n";
+        fs::write(skills.join("root.md"), root_text).unwrap();
+        symlink("./root.md", skills.join("SKILL.md")).unwrap();
+        let before = replica_contents(&root);
+
+        let inventory = inspected_inventory(home.path());
+        assert_eq!(
+            inventory.path,
+            root.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(inventory.skills.len(), 2);
+        assert_eq!(inventory.skills[0].source_key, "local/library");
+        assert_eq!(inventory.skills[0].skill_path, ".");
+        assert_eq!(inventory.skills[0].description, "Source root");
+        assert_eq!(inventory.skills[0].document, root_text);
+        assert!(inventory.skills[0].diagnostic.is_none());
+        assert!(inventory.skills[0].warnings.is_empty());
+        assert_eq!(inventory.skills[1].skill_path, "demo");
+        assert_eq!(inventory.skills[1].description, "Linked documentation");
+        assert_eq!(inventory.skills[1].document, text);
+        assert!(inventory.skills[1].diagnostic.is_none());
+        assert!(inventory.skills[1].warnings.is_empty());
+        assert_eq!(replica_contents(&root), before);
+
+        let mismatched = "---\nname: another-name\ndescription: Still readable\n---\n";
+        fs::write(demo.join("instructions.md"), mismatched).unwrap();
+        let before = replica_contents(&root);
+        let inventory = inspected_inventory(home.path());
+        assert_eq!(inventory.skills[1].document, mismatched);
+        assert!(inventory.skills[1].diagnostic.is_none());
+        assert!(
+            inventory.skills[1]
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("directory"))
+        );
+        assert_eq!(replica_contents(&root), before);
+
+        let invalid = "---\nname: ../unsafe\ndescription: Read-only diagnostic\n---\n";
+        fs::write(demo.join("instructions.md"), invalid).unwrap();
+        let before = replica_contents(&root);
+        let inventory = inspected_inventory(home.path());
+        assert_eq!(inventory.skills[1].document, invalid);
+        assert!(inventory.skills[1].diagnostic.is_some());
+        assert_eq!(replica_contents(&root), before);
+    }
+
+    #[test]
+    fn inspection_resolves_nested_link_chains_from_physical_parent_directories() {
+        let home = tempfile::tempdir().unwrap();
+        let root = owned_replica(home.path());
+        let skill = root.join("owner/repository/_skills/group/nested");
+        let docs = skill.join("docs");
+        fs::create_dir_all(docs.join("deep")).unwrap();
+        let text = "---\nname: nested\ndescription: Nested chain\n---\nActual nested body\n";
+        fs::write(docs.join("instructions.md\n"), text).unwrap();
+        symlink("aliases/first.md", skill.join("SKILL.md")).unwrap();
+        symlink("docs/deep", skill.join("aliases")).unwrap();
+        symlink("../second.md", docs.join("deep/first.md")).unwrap();
+        symlink("./instructions.md\n", docs.join("second.md")).unwrap();
+        let before = replica_contents(&root);
+
+        let inventory = inspected_inventory(home.path());
+        assert_eq!(inventory.skills.len(), 1);
+        assert_eq!(inventory.skills[0].source_key, "owner/repository");
+        assert_eq!(inventory.skills[0].skill_path, "group/nested");
+        assert_eq!(inventory.skills[0].description, "Nested chain");
+        assert_eq!(inventory.skills[0].document, text);
+        assert!(inventory.skills[0].diagnostic.is_none());
+        assert!(inventory.skills[0].warnings.is_empty());
+        assert_eq!(replica_contents(&root), before);
+    }
+
+    #[test]
+    fn inspection_rejects_unsafe_document_links_without_changing_the_replica() {
+        for case in [
+            "escaping",
+            "escaping-and-returning",
+            "chained-escaping",
+            "absolute-internal",
+            "absolute-external",
+            "chained-absolute",
+            "cyclic",
+            "broken",
+            "chained-broken",
+            "broken-parent",
+            "directory",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let root = owned_replica(home.path());
+            let skill = root.join("local/library/_skills/demo");
+            let sibling = root.join("local/library/_skills/demo-sibling");
+            fs::create_dir_all(&skill).unwrap();
+            fs::create_dir_all(&sibling).unwrap();
+            let text = "---\nname: demo\ndescription: Boundary fixture\n---\n";
+            fs::write(skill.join("instructions.md"), text).unwrap();
+            fs::write(sibling.join("instructions.md"), text).unwrap();
+            let outside = home.path().join("external.md");
+            fs::write(&outside, "Untouched external document").unwrap();
+            let (target, diagnostic) = match case {
+                "escaping" => (
+                    PathBuf::from("../demo-sibling/instructions.md"),
+                    "escapes its skill directory",
+                ),
+                "escaping-and-returning" => (
+                    PathBuf::from("../demo/instructions.md"),
+                    "escapes its skill directory",
+                ),
+                "chained-escaping" => {
+                    symlink("../demo-sibling/instructions.md", skill.join("next.md")).unwrap();
+                    (PathBuf::from("next.md"), "escapes its skill directory")
+                }
+                "absolute-internal" => (skill.join("instructions.md"), "absolute symbolic link"),
+                "absolute-external" => (outside.clone(), "absolute symbolic link"),
+                "chained-absolute" => {
+                    symlink(skill.join("instructions.md"), skill.join("next.md")).unwrap();
+                    (PathBuf::from("next.md"), "absolute symbolic link")
+                }
+                "cyclic" => {
+                    symlink("SKILL.md", skill.join("next.md")).unwrap();
+                    (PathBuf::from("next.md"), "too many symbolic links")
+                }
+                "broken" => (PathBuf::from("missing.md"), "not a regular file"),
+                "chained-broken" => {
+                    symlink("missing.md", skill.join("next.md")).unwrap();
+                    (PathBuf::from("next.md"), "not a regular file")
+                }
+                "broken-parent" => (PathBuf::from("missing/instructions.md"), "not a directory"),
+                "directory" => {
+                    fs::create_dir(skill.join("docs")).unwrap();
+                    (PathBuf::from("docs"), "not a regular file")
+                }
+                _ => unreachable!(),
+            };
+            symlink(target, skill.join("SKILL.md")).unwrap();
+            assert_inspection_rejected(home.path(), &root, diagnostic);
+            assert_eq!(
+                fs::read_to_string(&outside).unwrap(),
+                "Untouched external document",
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn inspection_rejects_unsafe_directory_links_in_document_paths() {
+        for case in ["escaping", "absolute", "cyclic", "broken"] {
+            let home = tempfile::tempdir().unwrap();
+            let root = owned_replica(home.path());
+            let skill = root.join("local/library/_skills/demo");
+            let sibling = root.join("local/library/_skills/demo-sibling");
+            fs::create_dir_all(skill.join("nested")).unwrap();
+            fs::create_dir_all(&sibling).unwrap();
+            fs::write(skill.join("nested/instructions.md"), "Internal document").unwrap();
+            fs::write(sibling.join("instructions.md"), "Sibling document").unwrap();
+            let (target, diagnostic) = match case {
+                "escaping" => (
+                    PathBuf::from("../demo-sibling"),
+                    "escapes its skill directory",
+                ),
+                "absolute" => (skill.join("nested"), "absolute symbolic link"),
+                "cyclic" => (PathBuf::from("docs"), "too many symbolic links"),
+                "broken" => (PathBuf::from("missing"), "not a directory"),
+                _ => unreachable!(),
+            };
+            symlink(target, skill.join("docs")).unwrap();
+            symlink("docs/instructions.md", skill.join("SKILL.md")).unwrap();
+            assert_inspection_rejected(home.path(), &root, diagnostic);
+        }
+    }
+
+    #[test]
+    fn inspection_ignores_supporting_directories_named_skill_md() {
+        let home = tempfile::tempdir().unwrap();
+        let root = owned_replica(home.path());
+        let skill = root.join("local/library/_skills/demo");
+        fs::create_dir_all(skill.join("docs/SKILL.md")).unwrap();
+        let text = "---\nname: demo\ndescription: Supporting directory\n---\nReal body\n";
+        fs::write(skill.join("SKILL.md"), text).unwrap();
+        fs::write(skill.join("docs/SKILL.md/asset.png"), b"Supporting asset").unwrap();
+        let before = replica_contents(&root);
+
+        let inventory = inspected_inventory(home.path());
+        assert_eq!(inventory.skills.len(), 1);
+        assert_eq!(inventory.skills[0].source_key, "local/library");
+        assert_eq!(inventory.skills[0].skill_path, "demo");
+        assert_eq!(inventory.skills[0].document, text);
+        assert_eq!(replica_contents(&root), before);
+    }
+
+    #[test]
+    fn inspection_rejects_unsupported_document_types() {
+        // Keep the Unix socket pathname below the receiver platform limit.
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let root = owned_replica(home.path());
+        let skill = root.join("local/library/_skills/demo");
+        fs::create_dir_all(&skill).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(skill.join("SKILL.md")).unwrap();
+        assert_inspection_rejected(home.path(), &root, "not a regular file");
+    }
+
+    #[test]
+    fn inspection_bounds_link_hops_and_preserves_document_limits() {
+        for links in [40, 41] {
+            let home = tempfile::tempdir().unwrap();
+            let root = owned_replica(home.path());
+            let skill = root.join("local/library/_skills/demo");
+            fs::create_dir_all(&skill).unwrap();
+            let text = "---\nname: demo\ndescription: Bounded chain\n---\n";
+            fs::write(skill.join("instructions.md"), text).unwrap();
+            for index in 0..links {
+                let name = if index == 0 {
+                    "SKILL.md".to_owned()
+                } else {
+                    format!("link-{index}.md")
+                };
+                let target = if index + 1 == links {
+                    "instructions.md".to_owned()
+                } else {
+                    format!("link-{}.md", index + 1)
+                };
+                symlink(target, skill.join(name)).unwrap();
+            }
+            if links == 40 {
+                let before = replica_contents(&root);
+                let inventory = inspected_inventory(home.path());
+                assert_eq!(inventory.skills.len(), 1);
+                assert_eq!(inventory.skills[0].skill_path, "demo");
+                assert_eq!(inventory.skills[0].document, text);
+                assert_eq!(replica_contents(&root), before);
+            } else {
+                assert_inspection_rejected(home.path(), &root, "too many symbolic links");
+            }
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let root = owned_replica(home.path());
+        let skill = root.join("local/library/_skills/demo");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("instructions.md"), vec![b'x'; 262145]).unwrap();
+        symlink("instructions.md", skill.join("SKILL.md")).unwrap();
+        assert_inspection_rejected(home.path(), &root, "size limit");
+        fs::write(skill.join("instructions.md"), "Small linked document").unwrap();
+        fs::hard_link(skill.join("instructions.md"), skill.join("second.md")).unwrap();
+        assert_inspection_rejected(home.path(), &root, "multiply linked file");
     }
 
     #[test]

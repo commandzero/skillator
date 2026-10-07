@@ -1310,28 +1310,48 @@ pub(super) fn run_library_once(
             .get(exited_model.host_index)
             .cloned();
     }
-    if let Some(snapshot) = refresh.borrow().snapshot.as_ref() {
-        browsing.library_snapshot = Some((session.fingerprint.clone(), snapshot.clone()));
-    }
     exited_model.overlay = Overlay::None;
-    browsing.library = Some(LibraryView {
-        session,
-        working_config,
-        error: library_error,
-        model: exited_model,
-        hosts,
-        refresh,
-    });
+    Ok(finish_library_navigation(
+        browsing,
+        LibraryView {
+            session,
+            working_config,
+            error: library_error,
+            model: exited_model,
+            hosts,
+            refresh,
+        },
+        exit,
+        return_target,
+    ))
+}
+
+fn finish_library_navigation(
+    browsing: &mut SessionNavigation,
+    view: LibraryView,
+    exit: InteractionExit,
+    return_target: Option<&Path>,
+) -> Navigation {
+    if matches!(exit, InteractionExit::Target(_)) {
+        view.refresh.borrow_mut().invalidate();
+        browsing.library = None;
+        browsing.library_snapshot = None;
+    } else {
+        if let Some(snapshot) = view.refresh.borrow().snapshot.as_ref() {
+            browsing.library_snapshot = Some((view.session.fingerprint.clone(), snapshot.clone()));
+        }
+        browsing.library = Some(view);
+    }
     match exit {
-        InteractionExit::Target(path) => Ok(Navigation::Target(path, Scope::Repo)),
-        InteractionExit::Scope(destination) => Ok(Navigation::Target(
+        InteractionExit::Target(path) => Navigation::Target(path, Scope::Repo),
+        InteractionExit::Scope(destination) => Navigation::Target(
             return_target.unwrap_or_else(|| Path::new(".")).to_owned(),
             destination,
-        )),
-        InteractionExit::Exit(status) => Ok(Navigation::Exit(status)),
-        InteractionExit::Reload => Ok(Navigation::Library {
+        ),
+        InteractionExit::Exit(status) => Navigation::Exit(status),
+        InteractionExit::Reload => Navigation::Library {
             return_target: return_target.map(Path::to_owned),
-        }),
+        },
     }
 }
 
@@ -1579,4 +1599,109 @@ fn library_acquisitions_from_rows(rows: &[Row]) -> Vec<LibraryAcquisition> {
 
 fn library_fast_save_is_safe(original: &LibraryConfig, staged: &LibraryConfig) -> bool {
     original == staged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmed_target_change_discards_library_edits_and_derived_inventory() {
+        for change_target in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let paths = AppPaths::with_environment(home.path().to_owned(), BTreeMap::new());
+            let skill = home.path().join("catalog/alpha");
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(
+                skill.join("SKILL.md"),
+                "---\nname: alpha\ndescription: Fixture\n---\n",
+            )
+            .unwrap();
+            std::fs::create_dir_all(paths.library_config().parent().unwrap()).unwrap();
+            let saved = b"version: 1\nlocations:\n  - path: ~/catalog\n";
+            std::fs::write(paths.library_config(), saved).unwrap();
+            let session = LibraryWorkflow::load(&paths).unwrap();
+            let snapshot = Arc::new(LibraryWorkflow::snapshot(&paths, &session.config));
+            let mut model = initial_library_model(&session, Some(&snapshot));
+            let row = model
+                .rows
+                .iter_mut()
+                .find(|row| row.name == "alpha")
+                .unwrap();
+            row.check = Some(CheckState::Unchecked);
+            refresh_library_visibility(row);
+            model.dirty = true;
+            let working_config = library_config_from_rows(&session.config, &model.rows).unwrap();
+            let hosts = Rc::new(RefCell::new(HostUi::new(paths.home(), &model.rows)));
+            hosts
+                .borrow_mut()
+                .registry
+                .as_mut()
+                .unwrap()
+                .stage("discarded-host", "verified-host")
+                .unwrap();
+            let refresh = Rc::new(RefCell::new(LibraryRefresh {
+                snapshot: Some(Arc::new(LibraryWorkflow::snapshot(&paths, &working_config))),
+                ..LibraryRefresh::default()
+            }));
+            let mut browsing = SessionNavigation::default();
+            finish_library_navigation(
+                &mut browsing,
+                LibraryView {
+                    session,
+                    working_config,
+                    error: None,
+                    model,
+                    hosts,
+                    refresh,
+                },
+                if change_target {
+                    InteractionExit::Target(home.path().join("next-repo"))
+                } else {
+                    InteractionExit::Scope(Scope::User)
+                },
+                None,
+            );
+            if change_target {
+                assert!(browsing.library.is_none());
+                assert!(browsing.library_snapshot.is_none());
+                let session = LibraryWorkflow::load(&paths).unwrap();
+                let snapshot = LibraryWorkflow::snapshot(&paths, &session.config);
+                let restored = initial_library_model(&session, Some(&snapshot));
+                assert_eq!(
+                    restored
+                        .rows
+                        .iter()
+                        .find(|row| row.name == "alpha")
+                        .unwrap()
+                        .check,
+                    Some(CheckState::Checked)
+                );
+                assert!(
+                    HostRegistry::load(paths.home())
+                        .unwrap()
+                        .followers()
+                        .next()
+                        .is_none()
+                );
+            } else {
+                let retained = browsing.library.as_ref().unwrap();
+                assert!(retained.model.dirty);
+                assert_eq!(
+                    retained
+                        .model
+                        .rows
+                        .iter()
+                        .find(|row| row.name == "alpha")
+                        .unwrap()
+                        .check,
+                    Some(CheckState::Unchecked)
+                );
+                assert!(retained.hosts.borrow().registry.as_ref().unwrap().dirty());
+                assert!(browsing.library_snapshot.is_some());
+            }
+            assert_eq!(std::fs::read(paths.library_config()).unwrap(), saved);
+            assert!(!home.path().join(".skillator/config.yaml").exists());
+        }
+    }
 }
