@@ -186,6 +186,17 @@ fn replace_local_rows(model: &mut Model, hosts: &mut HostUi, rows: Vec<Row>) {
             .min(rows.len().saturating_sub(1));
         model.rows = rows.clone();
         model.unavailable = hosts.registry_error.clone();
+    } else if let Some(browse) = model
+        .host_labels
+        .first()
+        .and_then(|alias| hosts.browse.get_mut(alias))
+    {
+        browse.selected = hosts
+            .local_rows
+            .get(browse.selected)
+            .and_then(|selected| rows.iter().position(|row| same_row_identity(row, selected)))
+            .unwrap_or(browse.selected)
+            .min(rows.len().saturating_sub(1));
     }
     hosts.local_rows = rows;
 }
@@ -1604,6 +1615,63 @@ fn library_fast_save_is_safe(original: &LibraryConfig, staged: &LibraryConfig) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inactive_local_refresh_preserves_selected_skill_when_returning_from_a_follower() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::with_environment(home.path().to_owned(), BTreeMap::new());
+        let catalog = home.path().join("catalog");
+        let alpha = catalog.join("alpha");
+        std::fs::create_dir_all(&alpha).unwrap();
+        std::fs::write(
+            alpha.join("SKILL.md"),
+            "---\nname: alpha\ndescription: Selection fixture skill\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(paths.library_config().parent().unwrap()).unwrap();
+        std::fs::write(
+            paths.library_config(),
+            "version: 1\nlocations:\n  - path: ~/catalog\n",
+        )
+        .unwrap();
+        let session = LibraryWorkflow::load(&paths).unwrap();
+        let original = LibraryWorkflow::snapshot(&paths, &session.config);
+        let mut model = initial_library_model(&session, Some(&original));
+        model.selected = model
+            .rows
+            .iter()
+            .position(|row| row.name == "alpha")
+            .unwrap();
+        model.filter = "skill".to_owned();
+        let mut hosts = HostUi::new(paths.home(), &model.rows);
+        hosts.stash_browse(&model, 0);
+        model.host_labels.push("follower".to_owned());
+        model.host_index = 1;
+        model.rows.clear();
+        model.selected = 0;
+
+        let earlier = catalog.join("aardvark");
+        std::fs::create_dir(&earlier).unwrap();
+        std::fs::write(
+            earlier.join("SKILL.md"),
+            "---\nname: aardvark\ndescription: Selection fixture skill\n---\n",
+        )
+        .unwrap();
+        let snapshot = Arc::new(LibraryWorkflow::snapshot(&paths, &session.config));
+        let mut refresh = LibraryRefresh {
+            ready: Some(LibraryDiscovery {
+                generation: 0,
+                rows: library_rows(&session.config, &snapshot),
+                snapshot,
+            }),
+            ..LibraryRefresh::default()
+        };
+        assert!(refresh.apply(&mut model, &mut hosts));
+        hosts.select_host(&mut model, 0, None);
+        assert_eq!(model.selected_row().unwrap().name, "alpha");
+        assert_eq!(model.filter, "skill");
+        assert!(model.rows.iter().any(|row| row.name == "aardvark"));
+    }
 
     #[test]
     fn confirmed_target_change_discards_library_edits_and_derived_inventory() {

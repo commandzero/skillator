@@ -29,6 +29,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 - Confirmed Target changes discard pending Library edits; canceling the Target picker preserves them (#39).
 - Follower tabs can read safely contained relative `SKILL.md` links without rewriting replica content (#39).
 - Follower tabs inspect configured bracketed IPv6 destinations, including SSH usernames, using the same endpoint as delivery (#39).
+- Returning from a follower retains the selected Local skill after a background inventory refresh inserts earlier rows (#39).
 - Removing a user skill before user configuration exists returns an unchanged result.
 - Reject target-registry paths containing redundant separators, `.` or `..` components.
 
