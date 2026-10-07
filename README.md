@@ -47,7 +47,9 @@ A cold Library launch shows its folders while discovery runs. Press `r` on Local
 
 Press Enter on a skill to read its details and complete `SKILL.md`. A frontmatter name that differs from its source directory, or uses a human-readable naming style, produces an advisory warning there—not `[!]`, disabled usage, or a sync refusal. Skillator does not rewrite the document to normalize its name.
 
-Unreadable or malformed documents, missing required metadata, unsafe names, and actual source or destination conflicts remain blocking errors.
+Unreadable or malformed documents, missing required metadata, unsafe names, and actual source or destination conflicts remain blocking errors. Safe metadata names must fit a portable filesystem component: at most 255 UTF-8 bytes, with no path separators, control characters, or dot/parent components.
+
+Interrupted saves report exact recovery paths. New Target backups use a bounded private container with the original destination basename as its sole payload; old encoded recovery artifacts remain recognizable. Unpaired interrupted stages and ambiguous or unsafe backups require manual recovery and are never guessed away.
 
 Press `Ctrl+T` in User or Repo to filter Generic/Codex (`.agents/skills`) and Claude (`.claude/skills`) presets. Use arrow keys and Enter to stage a directory, or enter a custom relative path when no preset matches. User paths are relative to your home; Repo paths are relative to the checkout. Directories and enablements are written only when you save.
 

@@ -140,6 +140,111 @@ fn root_skill_uses_its_safe_metadata_name_as_destination() {
 
 #[cfg(unix)]
 #[test]
+fn maximum_byte_root_metadata_name_materializes_converts_and_disables() {
+    let name = format!("{}x", "é".repeat(127));
+    assert_eq!(name.len(), 255);
+    for materialization in ["linked", "copied"] {
+        let fixture = Fixture::with_identity(materialization, ".", &name);
+        exercise_materialization_lifecycle(fixture, &name, materialization);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn maximum_byte_registered_identity_materializes_converts_and_disables() {
+    let name = "r".repeat(255);
+    for materialization in ["linked", "copied"] {
+        let fixture = Fixture::with_identity(materialization, &name, "Short metadata name");
+        exercise_materialization_lifecycle(fixture, &name, materialization);
+    }
+}
+
+#[cfg(unix)]
+fn exercise_materialization_lifecycle(
+    mut fixture: Fixture,
+    name: &str,
+    initial_materialization: &str,
+) {
+    let destination = fixture.target.root().join(".agents/skills").join(name);
+    let original = std::fs::read(fixture.skill.join("SKILL.md")).unwrap();
+    let source = fixture.skill.canonicalize().unwrap();
+    let alternate = if initial_materialization == "linked" {
+        "copied"
+    } else {
+        "linked"
+    };
+    for materialization in [initial_materialization, alternate, initial_materialization] {
+        fixture.repository = fixture.repository_for(materialization);
+        let result = execute(
+            prepare_check(&fixture.target, &fixture.repository, &fixture.library).unwrap(),
+            Authorization::SafeOnly,
+            &fixture.target,
+            &fixture.repository,
+            &fixture.library,
+        );
+        assert!(
+            result.outcomes().iter().any(|outcome| {
+                outcome.path == destination && outcome.outcome == Outcome::Applied
+            }),
+            "{materialization}: {result:#?}"
+        );
+        let metadata = std::fs::symlink_metadata(&destination).unwrap();
+        if materialization == "linked" {
+            assert!(metadata.file_type().is_symlink());
+            assert_eq!(std::fs::read_link(&destination).unwrap(), source);
+        } else {
+            assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+        }
+        assert_eq!(
+            std::fs::read(destination.join("SKILL.md")).unwrap(),
+            original
+        );
+        assert_eq!(
+            std::fs::read(fixture.skill.join("SKILL.md")).unwrap(),
+            original
+        );
+        let observed = observe(&fixture.target, &fixture.repository, &fixture.library);
+        assert_eq!(
+            observed.enablements().next().unwrap().comparison(),
+            skillator::target::Comparison::InSync
+        );
+        assert!(observed.directories()[0].recovery_artifacts().is_empty());
+        support::git(fixture.target.root(), &["add", "-f", ".agents/.gitignore"]);
+    }
+
+    let disabled = fixture.repository.with_enablements(Vec::new()).unwrap();
+    let result = execute(
+        prepare_transition(
+            &fixture.target,
+            &fixture.repository,
+            &disabled,
+            &fixture.library,
+        )
+        .unwrap(),
+        Authorization::SafeOnly,
+        &fixture.target,
+        &disabled,
+        &fixture.library,
+    );
+    assert!(
+        result.outcomes().iter().any(|outcome| {
+            outcome.path == destination
+                && outcome.action == Action::RemoveUnmanaged
+                && outcome.outcome == Outcome::Applied
+        }),
+        "{result:#?}"
+    );
+    assert!(std::fs::symlink_metadata(&destination).is_err());
+    assert_eq!(
+        std::fs::read(fixture.skill.join("SKILL.md")).unwrap(),
+        original
+    );
+    let observed = observe(&fixture.target, &disabled, &fixture.library);
+    assert!(observed.directories()[0].recovery_artifacts().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
 fn guarded_conflict_requires_all_guarded_authorization() {
     let fixture = Fixture::new("linked");
     let occupant = fixture
@@ -746,28 +851,318 @@ fn disabling_an_in_sync_materialization_plans_safe_removal() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn bounded_backup_restores_maximum_byte_payload_without_losing_content() {
+    let name = format!("{}x", "é".repeat(127));
+    for kind in ["file", "directory", "link"] {
+        let mut fixture = Fixture::new("linked");
+        fixture.repository = fixture.repository.with_enablements(Vec::new()).unwrap();
+        let root = fixture.target.root().join(".agents/skills");
+        let backup = root.join(".skillator-backup-1-1");
+        std::fs::create_dir_all(&backup).unwrap();
+        let payload = backup.join(&name);
+        match kind {
+            "file" => std::fs::write(&payload, b"original user bytes").unwrap(),
+            "directory" => {
+                std::fs::create_dir_all(payload.join("assets")).unwrap();
+                std::fs::write(payload.join("SKILL.md"), b"original user skill").unwrap();
+                std::fs::write(payload.join("assets/data"), b"\0\xfforiginal asset").unwrap();
+            }
+            "link" => {
+                std::os::unix::fs::symlink(fixture.skill.canonicalize().unwrap(), &payload).unwrap()
+            }
+            _ => unreachable!(),
+        }
+        let destination = root.join(&name);
+        let prepared =
+            prepare_apply(&fixture.target, &fixture.repository, &fixture.library).unwrap();
+        assert!(std::fs::symlink_metadata(&destination).is_err());
+        let observed = observe(&fixture.target, &fixture.repository, &fixture.library);
+        assert!(
+            observed.directories()[0]
+                .recovery_artifacts()
+                .contains(&backup)
+        );
+        let result = execute(
+            prepared,
+            Authorization::SafeOnly,
+            &fixture.target,
+            &fixture.repository,
+            &fixture.library,
+        );
+        assert!(
+            result.outcomes().iter().any(|outcome| {
+                outcome.action == Action::Recover && outcome.outcome == Outcome::Applied
+            }),
+            "{kind}: {result:#?}"
+        );
+        match kind {
+            "file" => assert_eq!(std::fs::read(&destination).unwrap(), b"original user bytes"),
+            "directory" => {
+                assert_eq!(
+                    std::fs::read(destination.join("SKILL.md")).unwrap(),
+                    b"original user skill"
+                );
+                assert_eq!(
+                    std::fs::read(destination.join("assets/data")).unwrap(),
+                    b"\0\xfforiginal asset"
+                );
+            }
+            "link" => assert_eq!(
+                std::fs::read_link(&destination).unwrap(),
+                fixture.skill.canonicalize().unwrap()
+            ),
+            _ => unreachable!(),
+        }
+        assert!(!backup.exists());
+        let observed = observe(&fixture.target, &fixture.repository, &fixture.library);
+        assert!(observed.directories()[0].recovery_artifacts().is_empty());
+    }
+}
+
+#[test]
+fn ambiguous_bounded_backups_are_preserved_even_with_force() {
+    let mut fixture = Fixture::new("linked");
+    fixture.repository = fixture.repository.with_enablements(Vec::new()).unwrap();
+    let root = fixture.target.root().join(".agents/skills");
+    let name = "r".repeat(255);
+    let first = root.join(".skillator-backup-1-1");
+    let second = root.join(".skillator-backup-1-2");
+    for (backup, content) in [(&first, "first original"), (&second, "second original")] {
+        std::fs::create_dir_all(backup).unwrap();
+        std::fs::write(backup.join(&name), content).unwrap();
+    }
+    let result = execute(
+        prepare_apply(&fixture.target, &fixture.repository, &fixture.library).unwrap(),
+        Authorization::AllGuarded,
+        &fixture.target,
+        &fixture.repository,
+        &fixture.library,
+    );
+    for backup in [&first, &second] {
+        assert!(
+            result.outcomes().iter().any(|outcome| {
+                outcome.path == *backup
+                    && outcome.action == Action::Recover
+                    && outcome.outcome == Outcome::Blocked
+            }),
+            "{result:#?}"
+        );
+    }
+    assert_eq!(std::fs::read(first.join(&name)).unwrap(), b"first original");
+    assert_eq!(
+        std::fs::read(second.join(&name)).unwrap(),
+        b"second original"
+    );
+    assert!(std::fs::symlink_metadata(root.join(&name)).is_err());
+}
+
+#[test]
+fn multiple_child_backup_container_is_not_adopted_or_deleted() {
+    let mut fixture = Fixture::new("linked");
+    fixture.repository = fixture.repository.with_enablements(Vec::new()).unwrap();
+    let root = fixture.target.root().join(".agents/skills");
+    let backup = root.join(".skillator-backup-1-1");
+    std::fs::create_dir_all(&backup).unwrap();
+    std::fs::write(backup.join("release-checklist"), b"original").unwrap();
+    std::fs::write(backup.join("unrelated"), b"user notes").unwrap();
+    let result = execute(
+        prepare_apply(&fixture.target, &fixture.repository, &fixture.library).unwrap(),
+        Authorization::AllGuarded,
+        &fixture.target,
+        &fixture.repository,
+        &fixture.library,
+    );
+    assert!(
+        result.outcomes().iter().any(|outcome| {
+            outcome.path == backup
+                && outcome.action == Action::Recover
+                && outcome.outcome == Outcome::Blocked
+        }),
+        "{result:#?}"
+    );
+    assert_eq!(
+        std::fs::read(backup.join("release-checklist")).unwrap(),
+        b"original"
+    );
+    assert_eq!(
+        std::fs::read(backup.join("unrelated")).unwrap(),
+        b"user notes"
+    );
+    assert!(std::fs::symlink_metadata(root.join("release-checklist")).is_err());
+    assert!(std::fs::symlink_metadata(root.join("unrelated")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_backup_container_never_adopts_or_mutates_outside_content() {
+    let mut fixture = Fixture::new("linked");
+    fixture.repository = fixture.repository.with_enablements(Vec::new()).unwrap();
+    let root = fixture.target.root().join(".agents/skills");
+    let outside = fixture._home.path().join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("release-checklist"), b"outside original").unwrap();
+    let backup = root.join(".skillator-backup-1-1");
+    std::os::unix::fs::symlink(&outside, &backup).unwrap();
+    let result = execute(
+        prepare_apply(&fixture.target, &fixture.repository, &fixture.library).unwrap(),
+        Authorization::AllGuarded,
+        &fixture.target,
+        &fixture.repository,
+        &fixture.library,
+    );
+    assert!(
+        result.outcomes().iter().any(|outcome| {
+            outcome.path == backup
+                && outcome.action == Action::Recover
+                && outcome.outcome == Outcome::Blocked
+        }),
+        "{result:#?}"
+    );
+    assert_eq!(std::fs::read_link(&backup).unwrap(), outside);
+    assert_eq!(
+        std::fs::read(outside.join("release-checklist")).unwrap(),
+        b"outside original"
+    );
+    assert!(std::fs::symlink_metadata(root.join("release-checklist")).is_err());
+}
+
+#[test]
+fn backup_container_changed_after_preparation_preserves_every_child() {
+    let mut fixture = Fixture::new("linked");
+    fixture.repository = fixture.repository.with_enablements(Vec::new()).unwrap();
+    let root = fixture.target.root().join(".agents/skills");
+    let backup = root.join(".skillator-backup-1-1");
+    std::fs::create_dir_all(&backup).unwrap();
+    std::fs::write(backup.join("release-checklist"), b"original").unwrap();
+    let prepared = prepare_apply(&fixture.target, &fixture.repository, &fixture.library).unwrap();
+    std::fs::write(backup.join("unrelated"), b"concurrent user notes").unwrap();
+    let result = execute(
+        prepared,
+        Authorization::AllGuarded,
+        &fixture.target,
+        &fixture.repository,
+        &fixture.library,
+    );
+    assert!(
+        result.outcomes().iter().any(|outcome| {
+            outcome.path == backup
+                && outcome.action == Action::Recover
+                && outcome.outcome != Outcome::Applied
+        }),
+        "{result:#?}"
+    );
+    assert_eq!(
+        std::fs::read(backup.join("release-checklist")).unwrap(),
+        b"original"
+    );
+    assert_eq!(
+        std::fs::read(backup.join("unrelated")).unwrap(),
+        b"concurrent user notes"
+    );
+    assert!(std::fs::symlink_metadata(root.join("release-checklist")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_container_replaced_by_symlink_after_preparation_is_not_traversed() {
+    let mut fixture = Fixture::new("linked");
+    fixture.repository = fixture.repository.with_enablements(Vec::new()).unwrap();
+    let root = fixture.target.root().join(".agents/skills");
+    let backup = root.join(".skillator-backup-1-1");
+    std::fs::create_dir_all(&backup).unwrap();
+    std::fs::write(backup.join("release-checklist"), b"original").unwrap();
+    let prepared = prepare_apply(&fixture.target, &fixture.repository, &fixture.library).unwrap();
+    let preserved = fixture._home.path().join("preserved");
+    std::fs::rename(&backup, &preserved).unwrap();
+    std::os::unix::fs::symlink(&preserved, &backup).unwrap();
+    let result = execute(
+        prepared,
+        Authorization::AllGuarded,
+        &fixture.target,
+        &fixture.repository,
+        &fixture.library,
+    );
+    assert!(
+        result.outcomes().iter().any(|outcome| {
+            outcome.path == backup
+                && outcome.action == Action::Recover
+                && outcome.outcome != Outcome::Applied
+        }),
+        "{result:#?}"
+    );
+    assert_eq!(std::fs::read_link(&backup).unwrap(), preserved);
+    assert_eq!(
+        std::fs::read(preserved.join("release-checklist")).unwrap(),
+        b"original"
+    );
+    assert!(std::fs::symlink_metadata(root.join("release-checklist")).is_err());
+}
+
+#[test]
+fn unidentified_bounded_stage_remains_manual_recovery_data() {
+    let mut fixture = Fixture::new("linked");
+    fixture.repository = fixture.repository.with_enablements(Vec::new()).unwrap();
+    let root = fixture.target.root().join(".agents/skills");
+    let stage = root.join(".skillator-stage-1-1");
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::write(stage.join("SKILL.md"), b"staged skill content").unwrap();
+    let result = execute(
+        prepare_apply(&fixture.target, &fixture.repository, &fixture.library).unwrap(),
+        Authorization::AllGuarded,
+        &fixture.target,
+        &fixture.repository,
+        &fixture.library,
+    );
+    assert!(
+        result.outcomes().iter().any(|outcome| {
+            outcome.path == stage
+                && outcome.action == Action::Recover
+                && outcome.outcome == Outcome::Blocked
+        }),
+        "{result:#?}"
+    );
+    assert_eq!(
+        std::fs::read(stage.join("SKILL.md")).unwrap(),
+        b"staged skill content"
+    );
+    assert!(std::fs::symlink_metadata(root.join("release-checklist")).is_err());
+}
+
 struct Fixture {
     _home: support::TestHome,
     target: Target,
     skill: std::path::PathBuf,
     repository: RepositoryConfig,
     library: LibrarySnapshot,
+    registered_path: String,
 }
 
 impl Fixture {
     fn new(materialization: &str) -> Self {
+        Self::with_identity(materialization, "release-checklist", "release-checklist")
+    }
+
+    fn with_identity(materialization: &str, registered_path: &str, metadata_name: &str) -> Self {
         let home = support::TestHome::new();
         let library_root = home.path().join("library");
-        let skill = library_root.join("release-checklist");
+        let skill = if registered_path == "." {
+            library_root.clone()
+        } else {
+            library_root.join(registered_path)
+        };
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(
             skill.join("SKILL.md"),
-            "---\nname: release-checklist\ndescription: Prepare a release\n---\n",
+            format!("---\nname: {metadata_name}\ndescription: Prepare a release\n---\n"),
         )
         .unwrap();
         let library_yaml = format!(
-            "version: 1\nlocations:\n  - path: {}\n    exclusions: []\n    allow_overlap: false\n    sources:\n      - key: local/library\n        path: .\n        skills:\n          - path: release-checklist\n",
-            serde_json::to_string(library_root.to_str().unwrap()).unwrap()
+            "version: 1\nlocations:\n  - path: {}\n    exclusions: []\n    allow_overlap: false\n    sources:\n      - key: local/library\n        path: .\n        skills:\n          - path: {}\n",
+            serde_json::to_string(library_root.to_str().unwrap()).unwrap(),
+            serde_json::to_string(registered_path).unwrap()
         );
         let LoadResult::Valid(config) = LibraryConfigCodec::parse(library_yaml.as_bytes()) else {
             panic!("valid Library")
@@ -779,7 +1174,8 @@ impl Fixture {
             &BTreeMap::new(),
         );
         let repository_yaml = format!(
-            "version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements:\n  - directory: agents\n    skill:\n      source: local/library\n      path: release-checklist\n    materialization: {materialization}\n"
+            "version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements:\n  - directory: agents\n    skill:\n      source: local/library\n      path: {}\n    materialization: {materialization}\n",
+            serde_json::to_string(registered_path).unwrap()
         );
         let LoadResult::Valid(repository) =
             RepositoryConfigCodec::parse(repository_yaml.as_bytes())
@@ -793,14 +1189,27 @@ impl Fixture {
             skill,
             repository: repository.value().clone(),
             library,
+            registered_path: registered_path.to_owned(),
         }
     }
 
+    fn repository_for(&self, materialization: &str) -> RepositoryConfig {
+        let yaml = format!(
+            "version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements:\n  - directory: agents\n    skill:\n      source: local/library\n      path: {}\n    materialization: {materialization}\n",
+            serde_json::to_string(&self.registered_path).unwrap()
+        );
+        let LoadResult::Valid(repository) = RepositoryConfigCodec::parse(yaml.as_bytes()) else {
+            panic!("valid Repository")
+        };
+        repository.value().clone()
+    }
+
     fn rescan(&mut self) {
-        let library_root = self.skill.parent().unwrap();
+        let library_root = self._home.path().join("library");
         let library_yaml = format!(
-            "version: 1\nlocations:\n  - path: {}\n    exclusions: []\n    allow_overlap: false\n    sources:\n      - key: local/library\n        path: .\n        skills:\n          - path: release-checklist\n",
-            serde_json::to_string(library_root.to_str().unwrap()).unwrap()
+            "version: 1\nlocations:\n  - path: {}\n    exclusions: []\n    allow_overlap: false\n    sources:\n      - key: local/library\n        path: .\n        skills:\n          - path: {}\n",
+            serde_json::to_string(library_root.to_str().unwrap()).unwrap(),
+            serde_json::to_string(&self.registered_path).unwrap()
         );
         let LoadResult::Valid(config) = LibraryConfigCodec::parse(library_yaml.as_bytes()) else {
             panic!("valid Library")

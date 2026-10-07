@@ -2,8 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -204,7 +205,11 @@ impl GitRepository {
         }
 
         let path_args = |command: &str| {
-            let mut args = vec![OsString::from(command), OsString::from("--")];
+            let mut args = vec![
+                OsString::from(command),
+                OsString::from("-z"),
+                OsString::from("--"),
+            ];
             args.extend(relatives.iter().map(|path| path.as_os_str().to_owned()));
             args
         };
@@ -218,6 +223,7 @@ impl GitRepository {
                 OsStr::new("diff"),
                 OsStr::new("--cached"),
                 OsStr::new("--name-only"),
+                OsStr::new("-z"),
             ]
             .into_iter()
             .chain([OsStr::new("--")])
@@ -228,7 +234,7 @@ impl GitRepository {
         let staged_paths = output_paths(&staged_output)?;
 
         let unmerged_output = self.command_os(
-            [OsStr::new("ls-files"), OsStr::new("-u")]
+            [OsStr::new("ls-files"), OsStr::new("-u"), OsStr::new("-z")]
                 .into_iter()
                 .chain([OsStr::new("--")])
                 .chain(relatives.iter().map(|path| path.as_os_str()))
@@ -237,17 +243,7 @@ impl GitRepository {
         require_success(&unmerged_output, "git ls-files -u")?;
         let unmerged_paths = output_paths_with_tab_suffix(&unmerged_output)?;
 
-        let ignored_output = self.command_os(
-            [
-                OsStr::new("check-ignore"),
-                OsStr::new("-v"),
-                OsStr::new("--no-index"),
-            ]
-            .into_iter()
-            .chain([OsStr::new("--")])
-            .chain(relatives.iter().map(|path| path.as_os_str()))
-            .collect::<Vec<_>>(),
-        )?;
+        let ignored_output = self.check_ignore(relatives)?;
         let ignored_paths = match ignored_output.status.code() {
             Some(0) => output_ignore_paths(&ignored_output)?,
             Some(1) => Vec::new(),
@@ -270,11 +266,11 @@ impl GitRepository {
                 let unmerged = unmerged_paths
                     .iter()
                     .any(|path| path_matches(relative, path));
-                let ignore_rule = ignored_paths
+                let matched_ignore = ignored_paths
                     .iter()
-                    .find(|(path, _)| path_matches(relative, path))
-                    .map(|(_, rule)| rule.clone());
-                let ignored = ignore_rule.as_deref().is_some_and(ignore_rule_is_active);
+                    .find(|(path, _, _)| path_matches(relative, path));
+                let ignore_rule = matched_ignore.map(|(_, rule, _)| rule.clone());
+                let ignored = matched_ignore.is_some_and(|(_, _, active)| *active);
                 (
                     relative.clone(),
                     PathFacts {
@@ -287,6 +283,37 @@ impl GitRepository {
                 )
             })
             .collect())
+    }
+
+    fn check_ignore(&self, relatives: &[PathBuf]) -> Result<Output, GitError> {
+        let mut child = git_command(&self.root)
+            .args(["check-ignore", "-v", "--no-index", "-z", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .expect("Git stdin was configured as piped");
+        std::thread::scope(|scope| {
+            // Drain output while streaming input; either pipe can exceed capacity.
+            let writer = scope.spawn(move || -> std::io::Result<()> {
+                for path in relatives {
+                    stdin.write_all(path.as_os_str().as_encoded_bytes())?;
+                    stdin.write_all(b"\0")?;
+                }
+                Ok(())
+            });
+            let output = child.wait_with_output()?;
+            let written = writer
+                .join()
+                .map_err(|_| std::io::Error::other("Git path input writer panicked"))?;
+            if matches!(output.status.code(), Some(0 | 1)) {
+                written?;
+            }
+            Ok(output)
+        })
     }
 
     fn command<const N: usize>(&self, args: [&str; N]) -> Result<Output, GitError> {
@@ -306,41 +333,35 @@ impl GitRepository {
 
 fn output_paths(output: &Output) -> Result<Vec<PathBuf>, GitError> {
     let text = stdout(output)?;
-    Ok(text.lines().map(PathBuf::from).collect())
+    Ok(text.split_terminator('\0').map(PathBuf::from).collect())
 }
 
 fn output_paths_with_tab_suffix(output: &Output) -> Result<Vec<PathBuf>, GitError> {
     let text = stdout(output)?;
     Ok(text
-        .lines()
+        .split_terminator('\0')
         .filter_map(|line| line.split_once('\t').map(|(_, path)| PathBuf::from(path)))
         .collect())
 }
 
-fn output_ignore_paths(output: &Output) -> Result<Vec<(PathBuf, String)>, GitError> {
+fn output_ignore_paths(output: &Output) -> Result<Vec<(PathBuf, String, bool)>, GitError> {
     let text = stdout(output)?;
-    Ok(text
-        .lines()
-        .filter_map(|line| {
-            line.rsplit_once('\t')
-                .map(|(_, path)| (PathBuf::from(path), line.to_owned()))
-        })
-        .collect())
+    let mut fields = text.split_terminator('\0');
+    let mut paths = Vec::new();
+    while let (Some(source), Some(line), Some(pattern), Some(path)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    {
+        paths.push((
+            PathBuf::from(path),
+            format!("{source}:{line}:{pattern}\t{path}"),
+            !pattern.starts_with('!'),
+        ));
+    }
+    Ok(paths)
 }
 
 fn path_matches(requested: &Path, reported: &Path) -> bool {
     requested == reported || reported.starts_with(requested)
-}
-
-fn ignore_rule_is_active(line: &str) -> bool {
-    let rule = line
-        .split_once('\t')
-        .map(|(rule, _)| rule)
-        .unwrap_or(line)
-        .rsplit_once(':')
-        .map(|(_, pattern)| pattern)
-        .unwrap_or(line);
-    !rule.starts_with('!')
 }
 
 fn git_at<I, S>(path: &Path, args: I) -> Result<Output, GitError>

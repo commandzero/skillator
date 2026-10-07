@@ -32,6 +32,8 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 - Returning from a follower retains the selected Local skill after a background inventory refresh inserts earlier rows (#39).
 - Editing an empty User or Repo scope shows its setup notice instead of opening a directory from another scope (#39).
 - Read-only follower inspection rejects hard-linked symbolic-link inodes before reading skill inventory (#39).
+- Acquisition and Target link/copy creation, conversion, removal and recovery support safe names up to 255 UTF-8 bytes without overflowing private artifact filenames; longer metadata names remain invalid before acquisition or materialization (#39).
+- Git tracking, staged-change, merge-conflict and ignore facts preserve Unicode and quoted filenames instead of misclassifying Git-escaped paths (#39).
 - Removing a user skill before user configuration exists returns an unchanged result.
 - Reject target-registry paths containing redundant separators, `.` or `..` components.
 

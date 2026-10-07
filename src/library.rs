@@ -660,7 +660,10 @@ pub(crate) fn inspect_skill_metadata(
     let mut warnings = Vec::new();
     let safe_name = safe_skill_name(&metadata.name);
     if !safe_name {
-        errors.push("SKILL.md name must be a nonempty, safe directory name".to_owned());
+        errors.push(
+            "SKILL.md name must be a nonempty, safe directory name of at most 255 UTF-8 bytes"
+                .to_owned(),
+        );
     } else if !valid_skill_name(&metadata.name) {
         warnings.push("SKILL.md name should be 1 to 64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen".to_owned());
     }
@@ -692,7 +695,8 @@ pub(crate) fn validated_skill_metadata_at(directory: &Path) -> Option<(String, S
 }
 
 fn safe_skill_name(name: &str) -> bool {
-    !name.trim().is_empty()
+    name.len() <= 255
+        && !name.trim().is_empty()
         && !matches!(name, "." | "..")
         && !name
             .chars()

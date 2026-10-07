@@ -129,6 +129,105 @@ fn importing_a_human_readable_name_preserves_the_original_skill_file() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn acquiring_a_maximum_length_name_preserves_content_in_all_modes() {
+    let name = "x".repeat(255);
+    for mode in [
+        LibraryAcquisitionMode::Copy,
+        LibraryAcquisitionMode::Link,
+        LibraryAcquisitionMode::Move,
+    ] {
+        let fixture = AcquisitionFixture::new();
+        let original =
+            format!("---\nname: {name}\ndescription: Long safe name\n---\nOriginal body\n");
+        std::fs::write(fixture.source_skill.join("SKILL.md"), &original).unwrap();
+        let session = LibraryWorkflow::load(&fixture.paths).unwrap();
+        LibraryWorkflow::save_with_acquisitions(
+            &fixture.paths,
+            &session,
+            &fixture.staged,
+            &[LibraryAcquisition::new(
+                fixture.source_skill.clone(),
+                name.clone(),
+                mode,
+                false,
+            )],
+            true,
+        )
+        .unwrap();
+        let destination = fixture.local_root.join(&name);
+        assert_eq!(
+            std::fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+            original
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("asset.txt")).unwrap(),
+            "asset"
+        );
+        assert_eq!(
+            fixture.source_skill.exists(),
+            mode != LibraryAcquisitionMode::Move
+        );
+        assert_eq!(
+            destination
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            mode == LibraryAcquisitionMode::Link
+        );
+    }
+}
+
+#[test]
+fn overlong_metadata_names_are_invalid_before_acquisition() {
+    for name in ["x".repeat(256), "é".repeat(128)] {
+        let fixture = AcquisitionFixture::new();
+        let original =
+            format!("---\nname: {name}\ndescription: Overlong name\n---\nOriginal body\n");
+        std::fs::write(fixture.source_skill.join("SKILL.md"), &original).unwrap();
+        let before = std::fs::read(fixture.paths.library_config()).unwrap();
+        let report = LibraryWorkflow::inventory(&fixture.paths, None).unwrap();
+        let skill = report
+            .sources
+            .iter()
+            .flat_map(|source| &source.skills)
+            .find(|skill| skill.path == "demo")
+            .unwrap();
+        assert!(!skill.valid);
+        let session = LibraryWorkflow::load(&fixture.paths).unwrap();
+        let error = LibraryWorkflow::save_with_acquisitions(
+            &fixture.paths,
+            &session,
+            &fixture.staged,
+            &[LibraryAcquisition::new(
+                fixture.source_skill.clone(),
+                name,
+                LibraryAcquisitionMode::Copy,
+                false,
+            )],
+            true,
+        )
+        .unwrap_err();
+        std::assert_matches!(error, WorkflowError::InvalidInput { .. });
+        assert_eq!(
+            std::fs::read_to_string(fixture.source_skill.join("SKILL.md")).unwrap(),
+            original
+        );
+        assert_eq!(
+            std::fs::read(fixture.paths.library_config()).unwrap(),
+            before
+        );
+        assert!(
+            std::fs::read_dir(&fixture.local_root)
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+}
+
 #[test]
 fn importing_an_unsafe_metadata_name_cannot_escape_the_library() {
     let fixture = AcquisitionFixture::new();
