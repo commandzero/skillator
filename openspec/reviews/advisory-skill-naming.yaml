@@ -1,26 +1,19 @@
 change: advisory-skill-naming
 reviewer: openai-codex/gpt-6.1-sol
-reviewed_at: 2026-10-06T06:25:18Z
+reviewed_at: 2026-10-07T03:56:55Z
 notes: |
-  # OpenSpec semantic review: advisory-skill-naming
+  # Refreshed OpenSpec semantic review: advisory-skill-naming
   
   Reviewer: openai-codex/gpt-6.1-sol
-  Reviewed committed implementation/spec/archive head: `09406cd589a540316aeb1f899147809c3c2f220b`.
+  Reviewed implementation/spec/archive head: `a78ff15346e87f45a5beb7ee4c54799a0cf929a6`.
   
-  ## Findings
+  Both selected requirement blocks remain exact statement/scenario matches: library-management / Skill inventory is live (five scenarios), and tui-workflows / The Library inspector exposes contextual diagnostics (four scenarios). Skill identity remains Source Key plus registered directory path. Safe human-readable/divergent metadata names stay usable with warnings; unsafe or malformed metadata remains blocking. Local, Target and follower inspectors separate warnings from errors without rewriting documents or inventing naming-only inventory errors. No capability, requirement or scenario was removed or renamed.
   
-  The Library inventory requirement keeps identity based on Source Key and registered directory path, makes safe naming differences advisory, and retains unsafe or malformed metadata as blocking errors. The inspector requirement distinguishes warnings from errors across Local, Targets and read-only followers without rewriting skill documents or adding naming-only error markers. All scenarios match the two committed main specs.
+  The library-management blob changed only to reconcile its unrelated first-run reference with the later archived fix-tui-scope-controls contract: explicit Library entry owns onboarding; root context startup does not automatically redirect to Library. This receipt refreshes that whole-file Git binding without re-synchronizing, weakening or modifying the advisory delta or historical archive. The current follower-inspection correction additionally preserves linked SKILL.md identities and metadata diagnostics while safely resolving contained relative links.
   
-  - `openspec/specs/library-management/spec.md`: **Skill inventory is live** — exact statement and 5 scenario matches; no delta content omitted.
-  - `openspec/specs/tui-workflows/spec.md`: **The Library inspector exposes contextual diagnostics** — exact statement and 4 scenario matches; no delta content omitted.
-  
-  No removed or renamed requirements or capabilities are declared. Every delta capability has its main spec; no intentional spec absence or no-delta exception is needed. Existing main-spec content outside the selected requirements was preserved during archival; all deltas were already synchronized before the archive command. All proposals, designs, tasks, delta specs and schema metadata are committed.
-  
-  ## Verification boundary
-  
-  Strict validation passed for all five active changes and 12 main specs before archival. Native archived-task validation passed for all 13 archives after archival, and post-archive policy preflight passed. The implementation previously passed full preflight (335 tests) and native macOS PTY/SSH/rsync smoke; no implementation files changed during archival or commit preparation. This receipt records semantic delta-to-main correspondence, not an independent human review or Linux/WSL verification.
+  Full preflight passed (347 tests, formatting, Clippy, OKF, 12 main specs and release safeguards). Native macOS arm64 PTY and real disposable trusted-key SSH/rsync smoke showed current scope lifecycle and the delivered relative-linked document in the follower inspector without rewriting its symlink. Strict spec validation and native archived-task validation passed (12 specs, 13 archives). All artifacts/tasks are committed and complete. This receipt is not an independent human review or Linux/WSL execution claim.
 no_spec_deltas: false
 archive_tree: d621ff48399ff8182d5110e3f424a242c11a6ad0
 specs:
-  openspec/specs/library-management/spec.md: 22de5828315fcacd6da396286cc0445335156a9b
+  openspec/specs/library-management/spec.md: 755faf2b42dbdde4593e36515a1b6f8bb9284c6e
   openspec/specs/tui-workflows/spec.md: 7d595af9e5d724865a1e124f974c032c8a6c2e34
