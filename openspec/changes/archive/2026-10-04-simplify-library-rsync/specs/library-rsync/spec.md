@@ -109,7 +109,6 @@ The command SHALL use ordinary rsync over existing SSH authentication. A pushed-
 #### Scenario: Missing leader export utility
 - **WHEN** the leader's SSH PATH lacks `cmp`, `rm`, `find`, or `chmod`
 - **THEN** the pull fails before creating a temporary export or changing the follower replica
-
 ### Requirement: Preview is write-free
 
 `--check` SHALL preview a leader push or follower pull without persistent changes or prompts. It SHALL use ordinary rsync dry-run for an existing managed replica and report creation/delivery for an absent replica without creating it. Temporary exports SHALL be cleaned after inspection; failed cleanup SHALL be reported. It SHALL return `1` for required, failed, or unverified work and `0` only when every affected replica matches the current leader export.
@@ -117,7 +116,6 @@ The command SHALL use ordinary rsync over existing SSH authentication. A pushed-
 #### Scenario: Read-only skill directory cleanup
 - **WHEN** valid leader skills contain read-only skill-root or supporting directories
 - **THEN** push, pull, and preview preserve delivered directory modes and remove their temporary exports without changing source file modes or modification times
-
 #### Scenario: Preview first delivery
 - **WHEN** the replica is absent and the user runs `--check`
 - **THEN** the report describes replica creation and delivery, returns `1`, and creates no remote directory, marker, or configuration

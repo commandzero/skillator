@@ -141,7 +141,7 @@ impl PreparedAcquisitions {
                     destination.display()
                 )));
             }
-            let stage = artifact_path(&local_root, "stage", &request.name);
+            let stage = artifact_path(&local_root, "stage");
             let result = match request.mode {
                 LibraryAcquisitionMode::Move | LibraryAcquisitionMode::Copy => {
                     copy_tree_all(&source, &stage)
@@ -282,7 +282,7 @@ fn publish_item(item: &mut PreparedItem) -> Result<(), AcquisitionError> {
         let parent = item.request.source.parent().ok_or_else(|| {
             AcquisitionError::Invalid("The source skill has no parent folder".to_owned())
         })?;
-        let backup = artifact_path(parent, "backup", &item.request.name);
+        let backup = artifact_path(parent, "backup");
         rename_noreplace(&item.request.source, &backup).map_err(failed)?;
         item.backup = Some(backup.clone());
         if !trees_equal(&backup, &item.stage).map_err(failed)? {
@@ -314,10 +314,10 @@ fn cleanup_items(items: &[PreparedItem]) -> Result<(), AcquisitionError> {
     }
 }
 
-fn artifact_path(parent: &Path, kind: &str, name: &str) -> PathBuf {
+fn artifact_path(parent: &Path, kind: &str) -> PathBuf {
     let sequence = ARTIFACT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     parent.join(format!(
-        ".skillator-acquisition-{kind}-{}-{sequence}-{name}",
+        ".skillator-acquisition-{kind}-{}-{sequence}",
         std::process::id()
     ))
 }
