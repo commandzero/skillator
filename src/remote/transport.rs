@@ -1,4 +1,6 @@
-use super::{EXPORT_PREFIX, Error, MARKER_CONTENT, MARKER_NAME, REPLICA_RELATIVE, Result, process};
+use super::{
+    EXPORT_PREFIX, Error, Execution, MARKER_CONTENT, MARKER_NAME, REPLICA_RELATIVE, Result,
+};
 use std::borrow::Cow;
 use std::fs;
 use std::io::Write;
@@ -31,11 +33,11 @@ const SSH_OPTIONS: &[&str] = &[
     "-oServerAliveCountMax=2",
 ];
 
-fn ssh(destination: &str, script: &str) -> Result<Vec<u8>> {
+fn ssh(destination: &str, script: &str, execution: &Execution<'_>) -> Result<Vec<u8>> {
     if !valid_destination(destination) {
         return Err(Error::input("invalid SSH destination"));
     }
-    process::capture(
+    execution.capture(
         Command::new("ssh")
             .args(SSH_OPTIONS)
             .arg("--")
@@ -44,7 +46,7 @@ fn ssh(destination: &str, script: &str) -> Result<Vec<u8>> {
     )
 }
 
-fn ssh_destination(destination: &str) -> Cow<'_, str> {
+pub(super) fn ssh_destination(destination: &str) -> Cow<'_, str> {
     // rsync strips IPv6 brackets before invoking ssh; preflight must connect
     // to the same literal host, not try to resolve "[::1]" as a hostname.
     match destination.split_once('[') {
@@ -75,13 +77,14 @@ fn checked_absolute(path: &Path) -> bool {
                 .all(|part| !part.is_empty() && part != b"." && part != b".."))
 }
 
-pub(super) fn check_rsync(ipv6: bool) -> Result<()> {
-    process::capture(
+pub(super) fn check_rsync(ipv6: bool, execution: &Execution<'_>) -> Result<()> {
+    execution.capture(
         Command::new("rsync")
             .args(RSYNC_OPTIONS.split_ascii_whitespace())
             .args(RSYNC_PROBE_OPTIONS.split_ascii_whitespace())
             .stdout(Stdio::null()),
     )
+
     .map_err(|error| {
         Error::input(format!(
             "rsync is unavailable or lacks required transfer options; install/update it and add it to PATH: {error}"
@@ -90,7 +93,8 @@ pub(super) fn check_rsync(ipv6: bool) -> Result<()> {
     if ipv6 {
         // System openrsync accepts --ipv6 but splits bracketed hosts at the first colon.
         // Require advertised IPv6 support, in addition to the shared option probe.
-        let capabilities = process::capture(Command::new("rsync").arg("--version"))
+        let capabilities = execution
+            .capture(Command::new("rsync").arg("--version"))
             .map_err(Error::input_display)?;
         if !capabilities
             .split(|byte| *byte == b',' || *byte == b'\n')
@@ -211,19 +215,27 @@ fn inspected_replica(output: Vec<u8>) -> Result<Replica> {
     }
 }
 
-pub(super) fn remote_replica(destination: &str, create: bool) -> Result<Replica> {
+pub(super) fn remote_replica(
+    destination: &str,
+    create: bool,
+    execution: &Execution<'_>,
+) -> Result<Replica> {
     // Validate the complete read-only inspection response before creating anything.
-    let mut replica = inspected_replica(ssh(destination, &replica_script(None)?)?)?;
+    let mut replica = inspected_replica(ssh(destination, &replica_script(None)?, execution)?)?;
     if create && !replica.exists {
         // The creation script checks its physical root against the inspected
         // path before any writes. It emits no response requiring validation.
-        ssh(destination, &replica_script(Some(&replica.path))?)?;
+        execution.ensure_running()?;
+        ssh(
+            destination,
+            &replica_script(Some(&replica.path))?,
+            execution,
+        )?;
         replica.exists = true;
         replica.created = true;
     }
     Ok(replica)
 }
-
 fn reject_linked_files(directory: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
@@ -411,7 +423,7 @@ fn validated_export_script(path: &Path) -> Result<String> {
     ))
 }
 
-pub(super) fn remote_export(destination: &str) -> Result<PathBuf> {
+pub(super) fn remote_export(destination: &str, execution: &Execution<'_>) -> Result<PathBuf> {
     let script = format!(
         "set -eu\n\
          command -v rsync >/dev/null 2>&1 || {{ echo 'rsync is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
@@ -423,7 +435,7 @@ pub(super) fn remote_export(destination: &str) -> Result<PathBuf> {
          command -v chmod >/dev/null 2>&1 || {{ echo 'chmod is not installed on leader; install it and add it to the SSH shell PATH' >&2; exit 1; }}\n\
          skillator library rsync --prepare-export\n",
     );
-    let output = ssh(destination, &script)?;
+    let output = ssh(destination, &script, execution)?;
     let path = String::from_utf8(output).map_err(Error::input_display)?;
     let Some(raw) = path.strip_suffix('\n') else {
         return Err(Error::input(
@@ -440,7 +452,7 @@ pub(super) fn remote_export(destination: &str) -> Result<PathBuf> {
     // before handing the leader's path to rsync. A failed validation cannot
     // safely authorize cleanup, so expose the retained path for manual recovery.
     validated_export_script(&path)
-        .and_then(|script| ssh(destination, &script).map(|_| ()))
+        .and_then(|script| ssh(destination, &script, execution).map(|_| ()))
         .map_err(|error| {
             Error::input(format!(
                 "leader export may remain at {} after physical validation failed: {error}; refusing cleanup",
@@ -450,7 +462,11 @@ pub(super) fn remote_export(destination: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-pub(super) fn cleanup_export(destination: &str, path: &Path) -> Result<()> {
+pub(super) fn cleanup_export(
+    destination: &str,
+    path: &Path,
+    execution: &Execution<'_>,
+) -> Result<()> {
     if !valid_export_path(path) {
         return Err(Error::input("invalid leader export path; refusing cleanup"));
     }
@@ -458,7 +474,7 @@ pub(super) fn cleanup_export(destination: &str, path: &Path) -> Result<()> {
     script.push_str(
         "find \"$dir\" -type d ! -perm -0700 -exec chmod u+rwx {} \\;\nrm -r -- \"$dir\"\n",
     );
-    ssh(destination, &script).map(|_| ())
+    ssh(destination, &script, execution).map(|_| ())
 }
 
 pub(super) fn rsync(
@@ -467,6 +483,7 @@ pub(super) fn rsync(
     replica: &Path,
     direction: Direction,
     check: bool,
+    execution: &Execution<'_>,
 ) -> Result<bool> {
     if !valid_destination(destination) {
         return Err(Error::input("invalid SSH destination"));
@@ -492,7 +509,7 @@ pub(super) fn rsync(
             command.arg("--").arg(remote_arg(&export)).arg(replica);
         }
     }
-    Ok(!process::capture(&mut command)?.is_empty())
+    Ok(!execution.capture(&mut command)?.is_empty())
 }
 
 pub(super) fn valid_destination(destination: &str) -> bool {
@@ -522,6 +539,7 @@ fn ordinary_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::process;
     use super::*;
     use std::os::unix::fs::symlink;
 
