@@ -1,0 +1,29 @@
+change: fix-follower-library-discovery
+reviewer: codex
+reviewed_at: 2026-10-15T03:18:12Z
+notes: |
+  # fix-follower-library-discovery semantic verification
+  
+  Implementation examined after Copilot approval: 874a3bc7695ff5f96e66223e43d4d58de68ccf96. Current-head verify is clean, approval recommended, no outstanding review or unresolved threads.
+  
+  ## Completeness
+  All eight implementation tasks complete; four delta requirements have implementation and behavior evidence. Proposal, design, tasks and both capability deltas are present. Native change validation passed. Full pinned repository preflight passed after the review fixes, including 405 behavior/repository-tool tests, one ignored worker, Clippy, formatting, doc validation, main-spec validation and release safeguards.
+  
+  ## Requirement correspondence
+  - library-management / Implicit Library discovery is shared across scopes: src/app.rs load_library_snapshot uses LibraryWorkflow::load and snapshot; inventory and User/Repo selector validation use the same effective configuration. Explicit valid configuration, including empty Locations, wins. Saved-only loaders for registration changes and the existing update/export paths retain their behavior. src/tui/tests.rs user_save_links_visible_replica_skills_before_library_configuration_exists proves first User save and explicit-empty precedence. tests/library-rsync.rs delivered_sources_keep_selectors_and_link_on_a_fresh_follower proves initial push and pull followed by CLI activation without Library registration. Actual User TUI save/restart and Repo CLI link/sync were exercised without Library configuration.
+  - library-management / Discovery respects Source boundaries: src/library.rs discover_replica and discover_replica_sources recognize the existing signature, validate source keys and skip linked containers; discover_tree respects Location-relative exclusions and separates replica inventory. Existing Git/local discovery and linked acquisition behavior are retained. tests/library.rs covers exclusions, malformed markers/keys, symlinks, root/nested skills, ordinary unmarked folders and genuine collisions.
+  - library-management / Source identity is discovered and portable: validated replica path supplies source_key, _skills is the source root, and existing insertion/collision logic remains authoritative. Exact arbitrary-depth Source Keys and original relative skill identities resolve canonical physical paths. Empty enclosing local inventory does not mask delivered local/library; nonempty local/Git collisions remain unresolved.
+  - cli-contract / Sync does not create or edit desired state: effective implicit discovery never persists Library configuration. Unavailable sources remain unresolved; existing Target configuration requirements and worktree exception remain. Actual Repo CLI sync repaired a missing link without Library configuration. No user-account mutation was performed; an actual-account preview encountered another Skillator process lock, which was not bypassed.
+  
+  Post-review correctness: discover_replica_sources now prunes .git before traversal, covered by replica_container_discovery_prunes_git_metadata. rows_for_directory now derives availability from full Skill Key resolution, covered by colliding_sources_cannot_activate_new_skills_and_keep_saved_choices_visible. Actual User TUI refused a colliding-source toggle and actual CLI omitted Git metadata inventory and spurious invalid-source diagnostics. These fixes satisfy the existing pruning and collision requirements; no additional delta is needed. No implementation/spec divergence remains.
+  
+  ## Delta-to-main comparison
+  The ADDED implicit-discovery requirement and all three MODIFIED requirement blocks were copied exactly from the implemented main specs. Mixed local/Git discovery, excluded/linked directories, Git-origin keys, collision scenarios, missing Target configuration and worktree synchronization scenarios are preserved. No removed or renamed capabilities. Main spec edits predate review; archive-time sync may correctly be a no-op after rechecking every block.
+  
+  ## Coherence and limits
+  Existing replica format, ownership signature, Source types, exclusions, collision safeguards and host-local state boundaries are reused. No shims, automatic selection migration, Git cloning or remote configuration edits. Real rsync smoke used local SSH routing, not a network SSH connection. No unresolved semantic discrepancies identified.
+no_spec_deltas: false
+archive_tree: 62e40ca6cf92e53eec29d8afcab536887ea6c946
+specs:
+  openspec/specs/cli-contract/spec.md: 2663b6a131a0f32df9d1f75cf44a84eeaf435ccc
+  openspec/specs/library-management/spec.md: 6416c4c0f51148ff1fc65e7841c090c1137a4105

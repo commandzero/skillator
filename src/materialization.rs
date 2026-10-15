@@ -154,7 +154,7 @@ fn walk(
     Ok(())
 }
 
-fn validate_internal_symlink(
+pub(crate) fn validate_internal_symlink(
     root: &Path,
     canonical_root: &Path,
     link: &Path,

@@ -56,26 +56,77 @@ fn git_facts_cover_origin_tracking_staging_and_ignore_rules() {
 }
 
 #[test]
-fn batched_git_facts_match_single_path_facts() {
+fn quoted_and_maximum_byte_paths_keep_tracking_staging_and_ignore_facts() {
     let home = support::TestHome::new();
     let repository = home.git_repo("project");
-    std::fs::create_dir_all(repository.join("managed/child")).unwrap();
-    std::fs::write(repository.join("managed/child/file"), "content").unwrap();
-    std::fs::write(repository.join(".gitignore"), "ignored\n").unwrap();
-    support::git(&repository, &["add", "managed", ".gitignore"]);
-    let git = GitRepository::discover(&repository).unwrap();
-    let paths = vec![
-        std::path::PathBuf::from("managed"),
-        std::path::PathBuf::from("ignored"),
-        std::path::PathBuf::from("missing"),
-    ];
-
-    let batched = git.facts_for_many(&paths).unwrap();
-    for path in paths {
-        assert_eq!(batched.get(&path), Some(&git.facts_for(&path).unwrap()));
+    std::fs::create_dir(repository.join("tracked")).unwrap();
+    std::fs::create_dir(repository.join("ignored")).unwrap();
+    std::fs::write(
+        repository.join(".gitignore"),
+        "ignored/*\n!ignored/keep:me\n",
+    )
+    .unwrap();
+    support::git(&repository, &["config", "core.quotepath", "true"]);
+    let names = [format!("{}x", "é".repeat(127)), "quote\"\ttab".to_owned()];
+    let mut paths = vec![std::path::PathBuf::from("tracked")];
+    for name in &names {
+        let tracked = format!("tracked/{name}");
+        let ignored = format!("ignored/{name}");
+        std::fs::write(repository.join(&tracked), "tracked bytes").unwrap();
+        std::fs::write(repository.join(&ignored), "ignored bytes").unwrap();
+        support::git(&repository, &["add", "--", &tracked]);
+        paths.push(tracked.into());
+        paths.push(ignored.into());
     }
-    assert!(batched[&std::path::PathBuf::from("managed")].tracked);
-    assert!(batched[&std::path::PathBuf::from("ignored")].ignored);
+    std::fs::write(repository.join("ignored/keep:me"), "not ignored").unwrap();
+    paths.push("ignored/keep:me".into());
+    let git = GitRepository::discover(&repository).unwrap();
+    let facts = git.facts_for_many(&paths).unwrap();
+    assert!(facts[&std::path::PathBuf::from("tracked")].tracked);
+    assert!(facts[&std::path::PathBuf::from("tracked")].staged);
+    for name in names {
+        let tracked = &facts[&std::path::PathBuf::from(format!("tracked/{name}"))];
+        assert!(tracked.tracked && tracked.staged);
+        assert!(facts[&std::path::PathBuf::from(format!("ignored/{name}"))].ignored);
+    }
+    assert!(!facts[&std::path::PathBuf::from("ignored/keep:me")].ignored);
+}
+
+#[test]
+fn quoted_unmerged_paths_remain_git_protected() {
+    let home = support::TestHome::new();
+    let repository = home.git_repo("project");
+    let name = "é-conflict\"\ttab";
+    support::git(&repository, &["config", "user.name", "Test User"]);
+    support::git(
+        &repository,
+        &["config", "user.email", "test@example.invalid"],
+    );
+    support::git(&repository, &["config", "core.quotepath", "true"]);
+    support::git(&repository, &["symbolic-ref", "HEAD", "refs/heads/base"]);
+    std::fs::write(repository.join(name), "base\n").unwrap();
+    support::git(&repository, &["add", "--", name]);
+    support::git(&repository, &["commit", "-m", "base"]);
+    support::git(&repository, &["checkout", "-b", "side"]);
+    std::fs::write(repository.join(name), "side\n").unwrap();
+    support::git(&repository, &["add", "--", name]);
+    support::git(&repository, &["commit", "-m", "side"]);
+    support::git(&repository, &["checkout", "base"]);
+    std::fs::write(repository.join(name), "main\n").unwrap();
+    support::git(&repository, &["add", "--", name]);
+    support::git(&repository, &["commit", "-m", "main"]);
+    let merge = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["merge", "--no-edit", "side"])
+        .output()
+        .unwrap();
+    assert_eq!(merge.status.code(), Some(1));
+    let facts = GitRepository::discover(&repository)
+        .unwrap()
+        .facts_for(name)
+        .unwrap();
+    assert!(facts.tracked && facts.staged && facts.unmerged);
 }
 
 #[test]
