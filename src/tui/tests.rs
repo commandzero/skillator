@@ -2191,3 +2191,71 @@ fn deleting_a_directory_with_staged_or_saved_enablements_is_blocked() {
         );
     }
 }
+
+#[test]
+fn colliding_sources_cannot_activate_new_skills_and_keep_saved_choices_visible() {
+    use crate::domain::{Enablement, SkillDirectoryKey, SkillKey, SkillPath, SourceKey};
+    let home = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(home.path().to_owned());
+    for replica_name in ["one", "two"] {
+        let root = home.path().join(".skillator/library").join(replica_name);
+        for name in ["saved", "new"] {
+            let skill = root.join("acme/tools/_skills").join(name);
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(
+                skill.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Collision fixture\n---\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join(".skillator-rsync-owned"),
+            "skillator library rsync replica v1\n",
+        )
+        .unwrap();
+    }
+    let library_config = LibraryConfig::first_run();
+    let library = LibraryWorkflow::snapshot(&paths, &library_config);
+    let config = RepositoryConfig::user_first_run()
+        .with_enablements(vec![Enablement::new(
+            SkillDirectoryKey::parse("agents").unwrap(),
+            SkillKey::new(
+                SourceKey::parse("acme/tools").unwrap(),
+                SkillPath::parse("saved").unwrap(),
+            ),
+            MaterializationKind::Linked,
+        )])
+        .unwrap();
+    let target = Target::user(home.path()).unwrap();
+    let observed = observe(&target, &config, &library);
+    let rows = target_rows(
+        &config,
+        &library,
+        &library_config,
+        &observed,
+        &BTreeSet::new(),
+        None,
+    )
+    .remove(0);
+    let mut model = Model::new(Workspace::Target, rows);
+    model.selected = model
+        .rows
+        .iter()
+        .position(|row| row.is_skill() && row.name == "new")
+        .unwrap();
+    assert!(!model.rows[model.selected].available);
+    reduce(&mut model, Action::Toggle);
+    assert_eq!(
+        model.rows[model.selected].check,
+        Some(CheckState::Unchecked)
+    );
+    let saved = model
+        .rows
+        .iter()
+        .find(|row| row.is_skill() && row.name == "saved")
+        .unwrap();
+    assert_eq!(saved.check, Some(CheckState::Checked));
+    assert!(!saved.available);
+    assert!(observed.enablements().next().unwrap().unresolved());
+    assert!(!paths.user_config().exists());
+}

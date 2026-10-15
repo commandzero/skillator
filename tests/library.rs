@@ -606,6 +606,31 @@ fn invalid_replica_markers_report_diagnostics_without_flattening_skills() {
 }
 
 #[test]
+fn replica_container_discovery_prunes_git_metadata() {
+    let home = support::TestHome::new();
+    let replica = home.path().join("replica");
+    mark_replica(&replica);
+    write_replica_skill(&replica, "acme/tools", "kept", "kept");
+    write_replica_skill(&replica.join(".git"), "Invalid/tools", "hidden", "hidden");
+    write_replica_skill(
+        &replica.join("nested/.git"),
+        "other/tools",
+        "hidden",
+        "hidden",
+    );
+    let snapshot = scan_fixture_library(&home, &replica, &[]);
+    assert!(snapshot.diagnostics().is_empty());
+    assert!(
+        snapshot
+            .source("acme/tools")
+            .unwrap()
+            .skill("kept")
+            .is_some()
+    );
+    assert!(snapshot.source("other/tools").is_none());
+}
+
+#[test]
 fn invalid_replica_source_keys_are_diagnostic() {
     let home = support::TestHome::new();
     let replica = home.path().join("replica");

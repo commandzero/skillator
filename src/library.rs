@@ -656,6 +656,9 @@ fn discover_replica_sources(
         .collect();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
+        if entry.file_name() == OsStr::new(".git") {
+            continue;
+        }
         let path = entry.path();
         let file_type = match entry.file_type() {
             Ok(kind) => kind,
