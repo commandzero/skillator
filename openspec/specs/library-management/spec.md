@@ -16,7 +16,7 @@ Skillator SHALL read and write one Library configuration at `~/.skillator/librar
 - **THEN** Skillator diagnoses the encountered and supported versions, preserves the document byte-for-byte, and performs no configuration or reconciliation writes
 
 ### Requirement: First run opens the normal Library workspace
-When Library configuration is absent, any root TUI invocation SHALL open the normal Library workspace before loading a Repository workspace. It SHALL show a welcome modal titled `I AM SKILLATOR!` explaining that the user must configure the Library before using `Ctrl+L` to manage the current Target. The normal Library table SHALL stage the first Location as selected with editable expression `./library` relative to `library.yaml`, display its resolved default as `~/.skillator/library`, and discover its local Source as `local/library`. It MUST NOT open a blocking path editor on entry; editing the staged default SHALL be an explicit action from the Location row. No file or directory SHALL be created until final confirmation.
+When Library configuration is absent and Library is explicitly opened, the Library TUI SHALL show the normal Library workspace with a welcome modal titled `I AM SKILLATOR!` explaining Library setup and scope navigation. Root TUI startup SHALL retain its context-selected User or Repo scope without automatic Library redirection. The normal Library table SHALL stage the first Location as selected with editable expression `./library` relative to `library.yaml`, display its resolved default as `~/.skillator/library`, and discover its local Source as `local/library`. It MUST NOT open a blocking path editor on entry; editing the staged default SHALL be an explicit action from the Location row. No file or directory SHALL be created until final confirmation.
 
 #### Scenario: First-run save
 - **WHEN** a user confirms the normal Library save with the default first Library Location
@@ -25,6 +25,18 @@ When Library configuration is absent, any root TUI invocation SHALL open the nor
 #### Scenario: First-run cancellation
 - **WHEN** a user exits the welcome or normal Library workspace without confirming
 - **THEN** Skillator leaves the filesystem unchanged
+
+### Requirement: Implicit Library discovery is shared across scopes
+When Library configuration is absent, inventory discovery, User and Repository saves, selector validation, and materialization observation SHALL discover the implicit `~/.skillator/library` Location without persisting Library configuration. Explicit Library configuration SHALL take precedence, including an empty Locations list. Library registration mutations, repository updates, and leader exports SHALL retain their explicit configuration requirements.
+
+#### Scenario: First user activation from a delivered replica
+- **WHEN** an owned replica exists below the default Location and both Library and User configuration are absent
+- **THEN** a Skill shown in the User TUI can be linked or copied and saved without first saving Library configuration
+- **AND** its saved selector remains resolved during subsequent inspection and reconciliation, with Library configuration still absent
+
+#### Scenario: Explicit empty Library
+- **WHEN** Library configuration contains an empty Locations list despite content below the default Location
+- **THEN** discovery does not use the implicit default and saved selectors remain unresolved
 
 ### Requirement: Locations resolve machine-local paths
 A Library Location path SHALL support expressions relative to `library.yaml`, absolute paths, home-relative paths, and `${VARIABLE}` interpolation. Skillator SHALL preserve the original expression in configuration while using a resolved path without redundant current-directory components for review, discovery, and overlap checks. Existing Locations SHALL use their canonical path for filesystem comparison. Failed expansion or unreadable content SHALL make the Location unavailable with a diagnostic; its live inventory is absent until it can be discovered again.
@@ -48,6 +60,12 @@ Skillator SHALL recursively discover Skills beneath every available Location, SH
 - **WHEN** a candidate subtree is excluded by the Location or reached through a directory symlink
 - **THEN** Skillator does not traverse that subtree during discovery
 
+#### Scenario: Owned replica discovery
+- **WHEN** a registered Location is an owned rsync replica or contains one
+- **THEN** Skillator discovers each `<SourceKey>/_skills` subtree as a separate non-Git Source, preserves the leader Source Key and original Skill paths, and does not flatten replica skills into an enclosing local Source
+- **AND** discovery applies Location exclusions, refuses invalid ownership markers with diagnostics, does not traverse linked source containers, and keeps real Source Key collisions unresolved
+- **AND** an empty enclosing local Source does not collide with a delivered Source of the same name
+
 ### Requirement: Overlapping Locations require deliberate authorization
 Skillator SHALL detect canonical exact and ancestor-descendant overlaps between configured Locations, warn about them, and reject saving the overlap by default. An explicit override MAY retain both Locations as distinct discovery boundaries, in which case affected Enablements SHALL carry an advisory overlap warning.
 
@@ -56,7 +74,7 @@ Skillator SHALL detect canonical exact and ancestor-descendant overlaps between 
 - **THEN** Skillator refuses to save the overlapping configuration
 
 ### Requirement: Source identity is discovered and portable
-Each discovery pass SHALL derive a canonical lowercase, slash-separated Source Key. Git Sources SHALL derive `owner/repository` from `origin`; non-Git Sources SHALL derive `local/name`. A suggested-key collision SHALL be surfaced rather than automatically suffixed or silently resolved.
+Each Snapshot SHALL use canonical lowercase, slash-separated Source Keys. Git Sources SHALL derive `owner/repository` from `origin`; ordinary non-Git Sources SHALL derive `local/name`. Owned replica Sources SHALL retain the leader Source Key from the replica layout, with Skill paths relative to `_skills`. Key collisions SHALL be diagnosed, never automatically suffixed or silently resolved.
 
 #### Scenario: Git Source discovery
 - **WHEN** discovery finds a Git repository with origin `elastic/agent-skills`
@@ -67,15 +85,27 @@ Each discovery pass SHALL derive a canonical lowercase, slash-separated Source K
 - **THEN** Skillator keeps both discovered rows visible with a collision diagnostic and does not offer ambiguous new Enablements
 
 ### Requirement: Skill inventory is live
-A Skill SHALL be identified by its Source Key plus slash-normalized directory path relative to the Source. Every discovered valid Skill SHALL appear as a choice for new Enablements on the next Library Snapshot. Invalid Skills SHALL remain visible with diagnostics but MUST NOT receive new Enablements.
+A Skill SHALL be identified by its Source Key plus slash-normalized directory path relative to the Source. Every discovered valid Skill SHALL appear as a choice for new Enablements on the next Library Snapshot. Invalid Skills SHALL remain visible with diagnostics but MUST NOT receive new Enablements. Naming-style deviations and divergence between a safe frontmatter name and its source directory SHALL be advisory warnings, not invalidity; warnings MUST NOT prevent enablement, acquisition, materialization or Library synchronization.
 
 #### Scenario: Newly discovered Skill
 - **WHEN** a user adds a valid Skill directory beneath a configured Library Location
 - **THEN** the Skill appears in the Library and Target inventories on the next discovery pass without a Library Configuration edit
 
 #### Scenario: Invalid Skill
-- **WHEN** a discovered directory has missing or invalid required `SKILL.md` metadata
-- **THEN** Skillator displays its validation diagnostic but prevents a new Enablement
+- **WHEN** a discovered directory has missing, malformed or unsafe required `SKILL.md` metadata
+- **THEN** Skillator displays its validation error but prevents a new Enablement
+
+#### Scenario: Divergent skill name
+- **WHEN** a usable skill named `cloud-onboarding` lives in an `onboarding` directory
+- **THEN** Skillator reports an advisory naming warning and permits ordinary enablement, acquisition, materialization and Library synchronization without rewriting the skill document
+
+#### Scenario: Human-readable skill name
+- **WHEN** a usable skill uses a safe frontmatter name such as `Make Bot UI`
+- **THEN** naming-style and directory-name inconsistencies are warnings rather than blockers
+
+#### Scenario: Unsafe metadata name
+- **WHEN** a frontmatter name is empty, a dot or parent component, contains a path separator or a control character
+- **THEN** the skill remains invalid and the name cannot authorize an acquisition or materialization path
 
 ### Requirement: Missing inventory leaves declarations unresolved
 Missing or unreadable Sources and Skills SHALL be absent from the live Snapshot. Existing Enablements SHALL retain their Skill Keys and become unresolved until discovery finds matching content again. Ordinary Target and worktree synchronization MUST NOT create Library inventory entries. Explicit `library rsync` SHALL deliver leader skill content into a dedicated follower replica, by leader push or follower pull, without creating or merging Library Location registrations. Incomplete leader inventory SHALL NOT authorize mirror deletion; both directions SHALL require complete usable leader input.

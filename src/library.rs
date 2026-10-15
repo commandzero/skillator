@@ -4,6 +4,7 @@ use crate::config::{LibraryConfig, LibraryLocationConfig};
 use crate::domain::{SkillKey, SourceKey};
 use crate::git::GitRepository;
 use crate::materialization::{EntryFingerprint, skill_fingerprint};
+use crate::remote::{MARKER_CONTENT, MARKER_NAME};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,6 +40,7 @@ pub struct LibrarySkill {
     validity: SkillValidity,
     available: bool,
     diagnostics: Vec<String>,
+    warnings: Vec<String>,
     absolute_path: Option<PathBuf>,
     fingerprint: EntryFingerprint,
 }
@@ -66,6 +68,10 @@ impl LibrarySkill {
 
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     pub fn absolute_path(&self) -> Option<&Path> {
@@ -372,13 +378,21 @@ fn scan_location(
 ) {
     let exclusions = build_exclusions(root, config.exclusions(), &mut snapshot.diagnostics);
     let mut discovered = Vec::new();
-    if is_git_root(root) {
+    if discover_replica(
+        root,
+        root,
+        &exclusions,
+        &mut discovered,
+        &mut snapshot.diagnostics,
+    ) {
+        // An owned replica is a container, not a source of its own.
+    } else if is_git_root(root) {
         discover_source(root, root, SourceKind::Git, &exclusions, &mut discovered);
     } else {
         let mut local =
             DiscoveredSource::new(root.to_owned(), PathBuf::from("."), SourceKind::Local);
         let is_local_library = location_index == 0;
-        discover_tree(
+        let contains_replica = discover_tree(
             root,
             root,
             &exclusions,
@@ -386,7 +400,11 @@ fn scan_location(
             &mut discovered,
             is_local_library,
         );
-        discovered.push(local);
+        if !contains_replica || !local.skills.is_empty() {
+            discovered.push(local);
+        } else {
+            snapshot.diagnostics.append(&mut local.diagnostics);
+        }
     }
 
     for mut discovered_source in discovered {
@@ -421,6 +439,7 @@ struct DiscoveredSource {
     relative: PathBuf,
     kind: SourceKind,
     origin: Option<String>,
+    source_key: Option<SourceKey>,
     skills: Vec<LibrarySkill>,
     diagnostics: Vec<LibraryDiagnostic>,
 }
@@ -439,6 +458,7 @@ impl DiscoveredSource {
             relative,
             kind,
             origin,
+            source_key: None,
             skills: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -451,7 +471,7 @@ fn discover_source(
     kind: SourceKind,
     exclusions: &Gitignore,
     sources: &mut Vec<DiscoveredSource>,
-) {
+) -> bool {
     let relative = source_root
         .strip_prefix(location_root)
         .unwrap_or(Path::new("."))
@@ -462,7 +482,7 @@ fn discover_source(
         relative
     };
     let mut source = DiscoveredSource::new(source_root.to_owned(), relative, kind);
-    discover_tree(
+    let contains_replica = discover_tree(
         source_root,
         location_root,
         exclusions,
@@ -471,6 +491,7 @@ fn discover_source(
         false,
     );
     sources.push(source);
+    contains_replica
 }
 
 fn discover_tree(
@@ -480,7 +501,8 @@ fn discover_tree(
     current: &mut DiscoveredSource,
     sources: &mut Vec<DiscoveredSource>,
     follow_root_skill_links: bool,
-) {
+) -> bool {
+    let mut contains_replica = false;
     let relative_to_source = directory
         .strip_prefix(&current.root)
         .unwrap_or(Path::new("."));
@@ -493,7 +515,7 @@ fn discover_tree(
         Ok(entries) => entries,
         Err(error) => {
             current.diagnostics.push(discovery_error(directory, error));
-            return;
+            return false;
         }
     };
     let mut entries: Vec<_> = entries
@@ -542,16 +564,155 @@ fn discover_tree(
         {
             continue;
         }
-        if is_git_root(&path) {
-            discover_source(location_root, &path, SourceKind::Git, exclusions, sources);
+        if current.source_key.is_none()
+            && discover_replica(
+                &path,
+                location_root,
+                exclusions,
+                sources,
+                &mut current.diagnostics,
+            )
+        {
+            contains_replica = true;
+        } else if current.source_key.is_none() && is_git_root(&path) {
+            contains_replica |=
+                discover_source(location_root, &path, SourceKind::Git, exclusions, sources);
         } else {
-            discover_tree(
+            contains_replica |= discover_tree(
                 &path,
                 location_root,
                 exclusions,
                 current,
                 sources,
                 follow_root_skill_links,
+            );
+        }
+    }
+    contains_replica
+}
+
+/// Recognize ownership before ordinary discovery can flatten a replica.
+/// Invalid markers also establish a boundary, but never provide inventory.
+fn discover_replica(
+    root: &Path,
+    location_root: &Path,
+    exclusions: &Gitignore,
+    sources: &mut Vec<DiscoveredSource>,
+    diagnostics: &mut Vec<LibraryDiagnostic>,
+) -> bool {
+    let marker = root.join(MARKER_NAME);
+    let valid = match fs::symlink_metadata(&marker) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            match fs::read(&marker) {
+                Ok(bytes) => bytes == MARKER_CONTENT.as_bytes(),
+                Err(error) => {
+                    diagnostics.push(discovery_error(&marker, error));
+                    false
+                }
+            }
+        }
+        Ok(_) => false,
+        Err(error) => {
+            diagnostics.push(discovery_error(&marker, error));
+            false
+        }
+    };
+    if valid {
+        discover_replica_sources(root, root, location_root, exclusions, sources, diagnostics);
+    } else {
+        diagnostics.push(LibraryDiagnostic {
+            code: "invalid_replica_marker",
+            message: format!("replica ownership marker is invalid: {}", marker.display()),
+            path: Some(marker),
+        });
+    }
+    true
+}
+
+fn discover_replica_sources(
+    directory: &Path,
+    replica_root: &Path,
+    location_root: &Path,
+    exclusions: &Gitignore,
+    sources: &mut Vec<DiscoveredSource>,
+    diagnostics: &mut Vec<LibraryDiagnostic>,
+) {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            diagnostics.push(discovery_error(directory, error));
+            return;
+        }
+    };
+    let mut entries: Vec<_> = entries
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                diagnostics.push(discovery_error(directory, error));
+                None
+            }
+        })
+        .collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if entry.file_name() == OsStr::new(".git") {
+            continue;
+        }
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) => {
+                diagnostics.push(discovery_error(&path, error));
+                continue;
+            }
+        };
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let relative_to_location = path.strip_prefix(location_root).unwrap_or(&path);
+        if exclusions
+            .matched_path_or_any_parents(relative_to_location, true)
+            .is_ignore()
+        {
+            continue;
+        }
+        if entry.file_name() == OsStr::new("_skills") {
+            let relative_to_replica = directory.strip_prefix(replica_root).unwrap_or(directory);
+            let key = match SourceKey::parse(path_text(relative_to_replica)) {
+                Ok(key) => key,
+                Err(error) => {
+                    diagnostics.push(LibraryDiagnostic {
+                        code: "invalid_replica_source",
+                        message: error.to_string(),
+                        path: Some(path),
+                    });
+                    continue;
+                }
+            };
+            let mut source = DiscoveredSource::new(
+                path.clone(),
+                relative_to_location.to_owned(),
+                SourceKind::Local,
+            );
+            source.source_key = Some(key);
+            discover_tree(
+                &path,
+                location_root,
+                exclusions,
+                &mut source,
+                sources,
+                false,
+            );
+            sources.push(source);
+        } else {
+            discover_replica_sources(
+                &path,
+                replica_root,
+                location_root,
+                exclusions,
+                sources,
+                diagnostics,
             );
         }
     }
@@ -568,6 +729,13 @@ struct SkillFrontmatter {
     description: String,
 }
 
+pub(crate) struct SkillMetadata {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) errors: Vec<String>,
+    pub(crate) warnings: Vec<String>,
+}
+
 fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
     let path = path_text(relative);
     let absolute_path = directory.canonicalize().ok();
@@ -576,29 +744,16 @@ fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
         .map(skill_fingerprint)
         .unwrap_or(EntryFingerprint::Uninspectable);
     let bytes = fs::read(directory.join("SKILL.md"));
-    let mut diagnostics = Vec::new();
+    let directory_name = (!relative.as_os_str().is_empty() && relative != Path::new("."))
+        .then(|| directory.file_name().and_then(OsStr::to_str))
+        .flatten();
     let metadata = match bytes {
-        Ok(bytes) => parse_frontmatter(&bytes),
+        Ok(bytes) => inspect_skill_metadata(&bytes, directory_name),
         Err(error) => Err(format!("cannot read SKILL.md: {error}")),
     };
     match metadata {
         Ok(metadata) => {
-            let basename = directory.file_name().and_then(OsStr::to_str);
-            if !valid_skill_name(&metadata.name) {
-                diagnostics.push("SKILL.md name must be 1 to 64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen".to_owned());
-            }
-            if !relative.as_os_str().is_empty()
-                && relative != Path::new(".")
-                && basename != Some(metadata.name.as_str())
-            {
-                diagnostics.push(format!(
-                    "SKILL.md name `{}` does not match directory",
-                    metadata.name
-                ));
-            }
-            if metadata.description.trim().is_empty() {
-                diagnostics.push("SKILL.md description is empty".to_owned());
-            }
+            let diagnostics = metadata.errors;
             LibrarySkill {
                 path,
                 name: Some(metadata.name),
@@ -610,6 +765,7 @@ fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
                 },
                 available: true,
                 diagnostics,
+                warnings: metadata.warnings,
                 absolute_path,
                 fingerprint,
             }
@@ -621,6 +777,7 @@ fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
             validity: SkillValidity::Invalid,
             available: true,
             diagnostics: vec![error],
+            warnings: Vec::new(),
             absolute_path,
             fingerprint,
         },
@@ -650,12 +807,56 @@ fn parse_frontmatter(bytes: &[u8]) -> Result<SkillFrontmatter, String> {
     serde_saphyr::from_str(&yaml).map_err(|error| error.to_string())
 }
 
+pub(crate) fn inspect_skill_metadata(
+    bytes: &[u8],
+    directory_name: Option<&str>,
+) -> Result<SkillMetadata, String> {
+    let metadata = parse_frontmatter(bytes)?;
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let safe_name = safe_skill_name(&metadata.name);
+    if !safe_name {
+        errors.push(
+            "SKILL.md name must be a nonempty, safe directory name of at most 255 UTF-8 bytes"
+                .to_owned(),
+        );
+    } else if !valid_skill_name(&metadata.name) {
+        warnings.push("SKILL.md name should be 1 to 64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen".to_owned());
+    }
+    if let Some(directory_name) = directory_name
+        && safe_name
+        && directory_name != metadata.name
+    {
+        warnings.push(format!(
+            "SKILL.md name `{}` does not match directory",
+            metadata.name
+        ));
+    }
+    if metadata.description.trim().is_empty() {
+        errors.push("SKILL.md description is empty".to_owned());
+    }
+    Ok(SkillMetadata {
+        name: metadata.name,
+        description: metadata.description,
+        errors,
+        warnings,
+    })
+}
+
 pub(crate) fn validated_skill_metadata_at(directory: &Path) -> Option<(String, String)> {
-    let metadata = fs::read(directory.join("SKILL.md"))
-        .ok()
-        .and_then(|bytes| parse_frontmatter(&bytes).ok())?;
-    (valid_skill_name(&metadata.name) && !metadata.description.trim().is_empty())
+    let bytes = fs::read(directory.join("SKILL.md")).ok()?;
+    let metadata = parse_frontmatter(&bytes).ok()?;
+    (safe_skill_name(&metadata.name) && !metadata.description.trim().is_empty())
         .then_some((metadata.name, metadata.description))
+}
+
+fn safe_skill_name(name: &str) -> bool {
+    name.len() <= 255
+        && !name.trim().is_empty()
+        && !matches!(name, "." | "..")
+        && !name
+            .chars()
+            .any(|character| matches!(character, '/' | '\\') || character.is_control())
 }
 
 pub(crate) fn validated_skill_name_at(directory: &Path) -> Option<String> {
@@ -744,7 +945,10 @@ fn insert_discovered_source(
 }
 
 fn suggest_source_key(source: &DiscoveredSource) -> SourceKey {
-    suggested_source_key(&source.root, source.origin.as_deref())
+    source
+        .source_key
+        .clone()
+        .unwrap_or_else(|| suggested_source_key(&source.root, source.origin.as_deref()))
 }
 
 fn key_from_remote(remote: &str) -> Option<String> {

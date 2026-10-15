@@ -238,7 +238,6 @@ pub(super) fn cleanup(path: &Path) -> io::Result<()> {
     grant_directory_access(path)?;
     fs::remove_dir_all(path)
 }
-
 fn io_error(path: &Path, error: std::io::Error) -> Error {
     Error::input(format!("cannot export `{}`: {error}", path.display()))
 }
@@ -456,6 +455,20 @@ mod tests {
                     .exists()
             );
         }
+    }
+
+    #[test]
+    fn exports_divergent_names_without_rewriting_skill_metadata() {
+        let (home, paths) = fixture(&["~/library"]);
+        let source = home.path().join("library/bot-ui");
+        skill(&source, "Make Bot UI");
+        let original = fs::read(source.join("SKILL.md")).unwrap();
+        let export = prepare(&paths).unwrap();
+        assert_eq!(
+            fs::read(export.path().join("local/library/_skills/bot-ui/SKILL.md")).unwrap(),
+            original
+        );
+        assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), original);
     }
 
     #[test]
@@ -867,7 +880,6 @@ mod tests {
             b"kept"
         );
     }
-
     #[test]
     fn root_and_nested_skill_exports_are_ambiguous() {
         let (home, paths) = fixture(&["~/library"]);
@@ -890,7 +902,7 @@ mod tests {
         let (home, paths) = fixture(&["~/missing"]);
         invalid(&paths);
         let root = home.path().join("missing");
-        skill(&root.join("demo"), "incorrect-name");
+        skill(&root.join("demo"), "../outside");
         invalid(&paths);
         fs::remove_dir_all(root.join("demo")).unwrap();
         let export = prepare(&paths).unwrap();
