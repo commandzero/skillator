@@ -1330,7 +1330,12 @@ pub(super) fn rows_for_directory(
                 (
                     skill.name().unwrap_or(skill.path()).to_owned(),
                     skill.description().unwrap_or("").to_owned(),
-                    skill.available(),
+                    library
+                        .resolve(&SkillKey::new(
+                            source.key().clone(),
+                            SkillPath::parse(skill.path()).expect("discovered Skill path is valid"),
+                        ))
+                        .is_some(),
                 ),
             );
         }

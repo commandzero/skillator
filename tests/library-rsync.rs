@@ -157,6 +157,128 @@ impl Fixture {
 }
 
 #[test]
+fn delivered_sources_keep_selectors_and_link_on_a_fresh_follower() {
+    for pull in [false, true] {
+        let fixture = Fixture::new();
+        for (repository, origin, skill_path, name) in [
+            (
+                "alpha",
+                "https://github.com/alpha/tools.git",
+                "tools/check",
+                "check",
+            ),
+            (
+                "beta",
+                "https://github.com/beta/tools.git",
+                ".",
+                "root-skill",
+            ),
+        ] {
+            let root = fixture.leader.join(".skillator/library").join(repository);
+            let skill = if skill_path == "." {
+                root.clone()
+            } else {
+                root.join(skill_path)
+            };
+            fs::create_dir_all(&skill).unwrap();
+            fs::write(
+                skill.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Replicated skill\n---\n{name}\n"),
+            )
+            .unwrap();
+            for args in [vec!["init", "-q"], vec!["remote", "add", "origin", origin]] {
+                assert!(
+                    std::process::Command::new("git")
+                        .args(args)
+                        .current_dir(&root)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+        }
+        if pull {
+            fixture.configure_follower();
+            fixture.report(&fixture.follower, &[], 0);
+        } else {
+            fixture.report(&fixture.leader, &["--hosts", "dev"], 0);
+        }
+        assert!(!fixture.follower.join(".agents").exists());
+        assert!(!fixture.follower.join(".skillator/library.yaml").exists());
+        let inventory = fixture
+            .command(&fixture.follower)
+            .args(["library", "list", "--format", "json"])
+            .assert()
+            .success();
+        let inventory: Value = serde_json::from_slice(&inventory.get_output().stdout).unwrap();
+        let sources = inventory["sources"].as_array().unwrap();
+        for (key, path) in [
+            ("local/library", "demo"),
+            ("alpha/tools", "tools/check"),
+            ("beta/tools", "."),
+        ] {
+            let source = sources.iter().find(|source| source["key"] == key).unwrap();
+            assert_eq!(source["skills"][0]["path"], path);
+        }
+        for (selector, name, replica_path) in [
+            ("local/library:demo", "demo", SKILL),
+            (
+                "alpha/tools:tools/check",
+                "check",
+                "alpha/tools/_skills/tools/check/SKILL.md",
+            ),
+            ("beta/tools:.", "root-skill", "beta/tools/_skills/SKILL.md"),
+        ] {
+            fixture
+                .command(&fixture.follower)
+                .args(["user", "link", selector, "--check", "--format", "json"])
+                .assert()
+                .code(1);
+            if name == "demo" {
+                assert!(!fixture.follower.join(".agents").exists());
+            }
+            fixture
+                .command(&fixture.follower)
+                .args(["user", "link", selector, "--format", "json"])
+                .assert()
+                .success();
+            let link = fixture.follower.join(".agents/skills").join(name);
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                fs::read(link.join("SKILL.md")).unwrap(),
+                fs::read(fixture.follower.join(REPLICA).join(replica_path)).unwrap()
+            );
+        }
+        let saved = fixture
+            .command(&fixture.follower)
+            .args(["user", "list", "--format", "json"])
+            .assert()
+            .success();
+        let saved: Value = serde_json::from_slice(&saved.get_output().stdout).unwrap();
+        for (source, skill) in [
+            ("local/library", "demo"),
+            ("alpha/tools", "tools/check"),
+            ("beta/tools", "."),
+        ] {
+            let enablement = saved["directories"][0]["enablements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["source"] == source && entry["skill"] == skill)
+                .unwrap();
+            assert_eq!(enablement["resolution"], "resolved");
+            assert_eq!(enablement["comparison"], "in_sync");
+        }
+        fixture.assert_exports_cleaned();
+    }
+}
+
+#[test]
 fn removed_policies_and_protocol_commands_are_invalid_invocations() {
     for args in [
         vec!["library", "rsync", "--conflict", "local"],

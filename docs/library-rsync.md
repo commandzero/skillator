@@ -111,6 +111,18 @@ Every follower receives the same layout beneath `~/.skillator/library/replica`:
 
 For example, `local/library` plus `demo` becomes `local/library/_skills/demo/SKILL.md`. A skill at a Source root uses `_skills/SKILL.md`. Equal skill names from different Sources remain separate. Overlapping root/nested skills are rejected rather than merged ambiguously.
 
+Normal Library discovery recognizes the owned replica and preserves each leader Source Key and original skill-relative path. Each repository remains a separate collapsible Source group on the follower; `_skills` and `replica` do not become part of skill selectors. No Git checkout is required. Existing replicas use this discovery behavior without another transfer or a layout migration.
+
+When Library configuration is absent, inventory discovery, User/Repo saves, and materialization checks all use the implicit `~/.skillator/library` Location. A fresh follower can therefore select delivered skills immediately without first saving Library configuration. Existing configuration takes precedence, including an explicitly empty `locations` list; if your configured Locations do not cover the replica, register `~/.skillator/library/replica`. Delivery itself does not register Locations or enable skills. For example:
+
+```sh
+skillator library list --format json
+skillator user link local/library:demo --check
+skillator user link local/library:demo
+```
+
+Use the Source Key and skill path reported by `library list`. First user activation creates `~/.agents/skillator.yaml` and the configured skill directory even when `~/.agents` is absent; its preview creates neither. Existing files or symlinks occupying destination ancestors remain errors, not directories Skillator replaces.
+
 Acquisition-link roots are materialized as ordinary usable directories. Self-contained relative internal links remain links and retain their source timestamps, so repeated fresh exports converge with rsync implementations that preserve link times; escaping or dangling links block delivery. Regular files preserve their executable modes, and skill-root and supporting-directory modes are retained rather than widened by the export's umask. Export preparation uses read-only hard links where possible and copies data with the original modes and times whenever linking is unavailable, including readable files that reject same-filesystem links. Copies do not inherit immutable flags that would block staging or cleanup. The leader's files and acquisition links are not chmodded or rewritten.
 
 Only skill content moves. Git administrative files, unrelated repository files outside skill directories, Library and User Scope configuration, credentials, registries, and materializations are not exported. No Git checkout, revision alignment, origin fetch, or remote registration occurs. Follower Library and User Scope configuration are neither read nor changed by a pull, even when malformed.
@@ -149,5 +161,7 @@ Interrupted rsync can leave a partially updated owned replica. Fix the connectio
 ## Migrate earlier unreleased builds
 
 Existing host maps now push as leaders. Choose one authoritative host, retain its `hosts` configuration, and give any pull-initiating follower the single `leader.destination` configuration above. Delivery uses the new shared replica root; previous registered Locations and Git checkouts are preserved, not migrated or deleted. Configure local skill use separately if those replicas should supply a follower's inventory.
+
+If an earlier build saved follower selections under flattened keys such as `local/replica` or paths containing `replica/<SourceKey>/_skills`, reselect those skills using the canonical identities from `library list`. Selections already using the leader's Source Key and skill path resolve against the existing replica. No automatic rewriting of host-local selections occurs.
 
 The old conflict/missing policies, hidden peer/server commands, Git bootstrap, identity, history, and recovery machinery are removed, with no legacy mode or compatibility shim. Old `~/.skillator/rsync/` data and recoverable files are not read or removed. Preserve them and use the old build for any recovery you still need before retiring that build. Removing a follower alias merely stops future pushes; it does not delete any remote content.

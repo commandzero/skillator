@@ -18,8 +18,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use transport::Direction;
 
-pub(super) const MARKER_NAME: &str = ".skillator-rsync-owned";
-pub(super) const MARKER_CONTENT: &str = "skillator library rsync replica v1\n";
+pub(crate) const MARKER_NAME: &str = ".skillator-rsync-owned";
+pub(crate) const MARKER_CONTENT: &str = "skillator library rsync replica v1\n";
 pub(super) const EXPORT_PREFIX: &str = "skillator-library-export-";
 pub(super) const REPLICA_RELATIVE: &str = ".skillator/library/replica";
 const REPLICA_DISPLAY: &str = "~/.skillator/library/replica";

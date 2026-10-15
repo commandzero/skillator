@@ -26,6 +26,18 @@ When Library configuration is absent and Library is explicitly opened, the Libra
 - **WHEN** a user exits the welcome or normal Library workspace without confirming
 - **THEN** Skillator leaves the filesystem unchanged
 
+### Requirement: Implicit Library discovery is shared across scopes
+When Library configuration is absent, inventory discovery, User and Repository saves, selector validation, and materialization observation SHALL discover the implicit `~/.skillator/library` Location without persisting Library configuration. Explicit Library configuration SHALL take precedence, including an empty Locations list. Library registration mutations, repository updates, and leader exports SHALL retain their explicit configuration requirements.
+
+#### Scenario: First user activation from a delivered replica
+- **WHEN** an owned replica exists below the default Location and both Library and User configuration are absent
+- **THEN** a Skill shown in the User TUI can be linked or copied and saved without first saving Library configuration
+- **AND** its saved selector remains resolved during subsequent inspection and reconciliation, with Library configuration still absent
+
+#### Scenario: Explicit empty Library
+- **WHEN** Library configuration contains an empty Locations list despite content below the default Location
+- **THEN** discovery does not use the implicit default and saved selectors remain unresolved
+
 ### Requirement: Locations resolve machine-local paths
 A Library Location path SHALL support expressions relative to `library.yaml`, absolute paths, home-relative paths, and `${VARIABLE}` interpolation. Skillator SHALL preserve the original expression in configuration while using a resolved path without redundant current-directory components for review, discovery, and overlap checks. Existing Locations SHALL use their canonical path for filesystem comparison. Failed expansion or unreadable content SHALL make the Location unavailable with a diagnostic; its live inventory is absent until it can be discovered again.
 
@@ -48,6 +60,12 @@ Skillator SHALL recursively discover Skills beneath every available Location, SH
 - **WHEN** a candidate subtree is excluded by the Location or reached through a directory symlink
 - **THEN** Skillator does not traverse that subtree during discovery
 
+#### Scenario: Owned replica discovery
+- **WHEN** a registered Location is an owned rsync replica or contains one
+- **THEN** Skillator discovers each `<SourceKey>/_skills` subtree as a separate non-Git Source, preserves the leader Source Key and original Skill paths, and does not flatten replica skills into an enclosing local Source
+- **AND** discovery applies Location exclusions, refuses invalid ownership markers with diagnostics, does not traverse linked source containers, and keeps real Source Key collisions unresolved
+- **AND** an empty enclosing local Source does not collide with a delivered Source of the same name
+
 ### Requirement: Overlapping Locations require deliberate authorization
 Skillator SHALL detect canonical exact and ancestor-descendant overlaps between configured Locations, warn about them, and reject saving the overlap by default. An explicit override MAY retain both Locations as distinct discovery boundaries, in which case affected Enablements SHALL carry an advisory overlap warning.
 
@@ -56,7 +74,7 @@ Skillator SHALL detect canonical exact and ancestor-descendant overlaps between 
 - **THEN** Skillator refuses to save the overlapping configuration
 
 ### Requirement: Source identity is discovered and portable
-Each discovery pass SHALL derive a canonical lowercase, slash-separated Source Key. Git Sources SHALL derive `owner/repository` from `origin`; non-Git Sources SHALL derive `local/name`. A suggested-key collision SHALL be surfaced rather than automatically suffixed or silently resolved.
+Each Snapshot SHALL use canonical lowercase, slash-separated Source Keys. Git Sources SHALL derive `owner/repository` from `origin`; ordinary non-Git Sources SHALL derive `local/name`. Owned replica Sources SHALL retain the leader Source Key from the replica layout, with Skill paths relative to `_skills`. Key collisions SHALL be diagnosed, never automatically suffixed or silently resolved.
 
 #### Scenario: Git Source discovery
 - **WHEN** discovery finds a Git repository with origin `elastic/agent-skills`

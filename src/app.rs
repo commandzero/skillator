@@ -671,34 +671,9 @@ fn add_configuration_check_change(
 fn load_library_snapshot(
     paths: &AppPaths,
 ) -> Result<(LibrarySnapshot, Vec<ReportDiagnostic>), WorkflowError> {
-    let path = paths.library_config();
-    let config = match load_library(&path).map_err(fatal)? {
-        LoadResult::Missing => LibraryConfig::empty(),
-        LoadResult::Valid(loaded) => loaded.value().clone(),
-        LoadResult::Unsupported { version, .. } => {
-            return Err(WorkflowError::InvalidInput {
-                message: format!("unsupported library configuration version {version}"),
-            });
-        }
-        LoadResult::Invalid { issues } => {
-            return Err(WorkflowError::InvalidInput {
-                message: format_issues("invalid library configuration", &issues),
-            });
-        }
-    };
-    let snapshot = scan_library(&config, &path, paths.home(), &paths.environment);
-    let diagnostics = snapshot
-        .diagnostics()
-        .iter()
-        .map(|diagnostic| ReportDiagnostic {
-            code: diagnostic.code.to_owned(),
-            severity: "warning".to_owned(),
-            message: diagnostic.message.clone(),
-            data: diagnostic.path.as_ref().map(|path| {
-                BTreeMap::from([("path".to_owned(), path.to_string_lossy().into_owned())])
-            }),
-        })
-        .collect::<Vec<_>>();
+    let session = LibraryWorkflow::load(paths)?;
+    let snapshot = LibraryWorkflow::snapshot(paths, &session.config);
+    let diagnostics = library_diagnostics(&snapshot);
     Ok((snapshot, diagnostics))
 }
 
@@ -1567,7 +1542,7 @@ impl LibraryWorkflow {
         paths: &AppPaths,
         filter: Option<&str>,
     ) -> Result<LibraryInventoryReport, WorkflowError> {
-        let session = Self::load_cli(paths)?;
+        let session = Self::load(paths)?;
         let snapshot = Self::snapshot(paths, &session.config);
         let prefix = filter.map(str::to_ascii_lowercase);
         let sources = snapshot
@@ -2420,8 +2395,7 @@ impl TargetWorkflow {
         let session = Self::load(target_path)?;
         let directory = select_directory(&session.config, directory)?;
         if materialization.is_some() {
-            let snapshot =
-                LibraryWorkflow::snapshot(paths, &LibraryWorkflow::load_cli(paths)?.config);
+            let (snapshot, _) = load_library_snapshot(paths)?;
             if snapshot.resolve(&selector.key).is_none() {
                 return Err(WorkflowError::InvalidInput {
                     message: format!("Skill is not registered and valid: {selector}"),
@@ -2775,8 +2749,7 @@ impl UserScopeWorkflow {
         }
         let directory = select_directory(&session.config, None)?;
         if materialization.is_some() {
-            let snapshot =
-                LibraryWorkflow::snapshot(paths, &LibraryWorkflow::load_cli(paths)?.config);
+            let (snapshot, _) = load_library_snapshot(paths)?;
             if snapshot.resolve(selector.key()).is_none() {
                 return Err(WorkflowError::InvalidInput {
                     message: format!("Skill is not registered and valid: {selector}"),

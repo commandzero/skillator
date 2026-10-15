@@ -631,6 +631,67 @@ fn first_run_shows_the_existing_default_library_inventory() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn user_save_links_visible_replica_skills_before_library_configuration_exists() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(home.path().to_owned());
+    let replica = home.path().join(".skillator/library/replica");
+    let skill = replica.join("commandzero/agent-skills/_skills/skills/cpr-loop");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        replica.join(".skillator-rsync-owned"),
+        "skillator library rsync replica v1\n",
+    )
+    .unwrap();
+    let document = "---\nname: cpr-loop\ndescription: Review a pull request\n---\n";
+    std::fs::write(skill.join("SKILL.md"), document).unwrap();
+
+    let mut data = load_target_data(&paths, home.path()).unwrap();
+    let user_index = data
+        .state
+        .tabs
+        .iter()
+        .position(|tab| tab.scope == TargetTabScope::User)
+        .unwrap();
+    let mut model = initial_target_model(&data.state.tabs);
+    model.scope = Scope::User;
+    activate_target_tab(&mut model, &data.state.tabs, &BTreeSet::new(), user_index);
+    model.selected = model
+        .rows
+        .iter()
+        .position(|row| row.is_skill() && row.name == "cpr-loop")
+        .unwrap();
+    reduce(&mut model, Action::Toggle);
+    store_active_target_tab(&model, &mut data.state.tabs);
+    let prepared =
+        prepare_scope_save(&paths, &data.state, &data.state.tabs, TargetTabScope::User).unwrap();
+    assert!(!home.path().join(".agents").exists());
+    assert!(!paths.library_config().exists());
+    let report = prepared.commit(&paths).unwrap();
+    assert_eq!(report.exit_status, 0, "{report:#?}");
+    let link = home.path().join(".agents/skills/cpr-loop");
+    assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(link.canonicalize().unwrap(), skill.canonicalize().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(link.join("SKILL.md")).unwrap(),
+        document
+    );
+    assert!(!paths.library_config().exists());
+    let saved = UserScopeWorkflow::inspect(&paths).unwrap();
+    let enablement = &saved.directories[0].enablements[0];
+    assert_eq!(enablement.source, "commandzero/agent-skills");
+    assert_eq!(enablement.skill, "skills/cpr-loop");
+    assert_eq!(enablement.resolution, "resolved");
+    assert_eq!(enablement.comparison, "in_sync");
+
+    // Explicit configuration takes precedence over the implicit first-run Location.
+    std::fs::write(paths.library_config(), "version: 1\nlocations: []\n").unwrap();
+    let saved = UserScopeWorkflow::inspect(&paths).unwrap();
+    assert_eq!(saved.directories[0].enablements[0].resolution, "unresolved");
+    assert_eq!(link.canonicalize().unwrap(), skill.canonicalize().unwrap());
+}
+
 #[test]
 fn naming_warnings_allow_toggles_but_unsafe_metadata_does_not() {
     let home = tempfile::tempdir().unwrap();
@@ -2129,4 +2190,72 @@ fn deleting_a_directory_with_staged_or_saved_enablements_is_blocked() {
             matches!(&model.overlay, Overlay::Notice(message) if message.contains("Disable all skills"))
         );
     }
+}
+
+#[test]
+fn colliding_sources_cannot_activate_new_skills_and_keep_saved_choices_visible() {
+    use crate::domain::{Enablement, SkillDirectoryKey, SkillKey, SkillPath, SourceKey};
+    let home = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(home.path().to_owned());
+    for replica_name in ["one", "two"] {
+        let root = home.path().join(".skillator/library").join(replica_name);
+        for name in ["saved", "new"] {
+            let skill = root.join("acme/tools/_skills").join(name);
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(
+                skill.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Collision fixture\n---\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join(".skillator-rsync-owned"),
+            "skillator library rsync replica v1\n",
+        )
+        .unwrap();
+    }
+    let library_config = LibraryConfig::first_run();
+    let library = LibraryWorkflow::snapshot(&paths, &library_config);
+    let config = RepositoryConfig::user_first_run()
+        .with_enablements(vec![Enablement::new(
+            SkillDirectoryKey::parse("agents").unwrap(),
+            SkillKey::new(
+                SourceKey::parse("acme/tools").unwrap(),
+                SkillPath::parse("saved").unwrap(),
+            ),
+            MaterializationKind::Linked,
+        )])
+        .unwrap();
+    let target = Target::user(home.path()).unwrap();
+    let observed = observe(&target, &config, &library);
+    let rows = target_rows(
+        &config,
+        &library,
+        &library_config,
+        &observed,
+        &BTreeSet::new(),
+        None,
+    )
+    .remove(0);
+    let mut model = Model::new(Workspace::Target, rows);
+    model.selected = model
+        .rows
+        .iter()
+        .position(|row| row.is_skill() && row.name == "new")
+        .unwrap();
+    assert!(!model.rows[model.selected].available);
+    reduce(&mut model, Action::Toggle);
+    assert_eq!(
+        model.rows[model.selected].check,
+        Some(CheckState::Unchecked)
+    );
+    let saved = model
+        .rows
+        .iter()
+        .find(|row| row.is_skill() && row.name == "saved")
+        .unwrap();
+    assert_eq!(saved.check, Some(CheckState::Checked));
+    assert!(!saved.available);
+    assert!(observed.enablements().next().unwrap().unresolved());
+    assert!(!paths.user_config().exists());
 }
