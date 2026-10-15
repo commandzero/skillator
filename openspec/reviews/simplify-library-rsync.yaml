@@ -1,0 +1,30 @@
+change: simplify-library-rsync
+reviewer: openai-codex/gpt-6.1-sol
+reviewed_at: 2026-10-07T04:19:30Z
+notes: |
+  # Refreshed OpenSpec semantic review: simplify-library-rsync after main synchronization
+  
+  Reviewer: openai-codex/gpt-6.1-sol
+  Reviewed committed implementation/spec/archive head: `95a90f94c21a5655e45be16eafd461fab7fd1daf`.
+  
+  ## Canonical archive and current correspondence
+  
+  The non-rewriting origin/main merge adopts the canonical already-merged PR #38 archive, including its corrected design/proposal, receiver/leader utility prerequisites and read-only export-cleanup scenarios. Newer TUI behavior was not inserted into that historical archive. All 16 archived requirement titles and 49 scenarios remain represented. Fifteen requirement blocks match current main specs exactly: eight library-rsync blocks, both selected library-management blocks, and five cli-contract blocks. The remaining CLI command/default-root block retains all scenario names but intentionally follows the later archived fix-tui-scope-controls context-startup contract instead of historical automatic Library onboarding. Root selects Repo in Git and User at physical home/outside Git even without Library configuration; explicit Library entry owns onboarding. No capability or requirement was removed or renamed.
+  
+  The newer advisory-skill-naming inventory contract remains authoritative: safe naming differences are warnings, unsafe/malformed metadata is blocking, and document identity/content is not rewritten. Hostname metadata and selected-follower TUI synchronization extend the shared registry without changing leader authority or host-local selections. Relative-linked follower SKILL.md inspection stays read-only and bounded.
+  
+  ## Merged implementation invariants
+  
+  Preserved upstream strict destination grammar and IPv6 capability checks, UTF-8 path validation, source directory permissions, any-hard-link-error copy fallback, regular/symlink inode boundaries, link timestamps, required-document exclusion refusal, utility/find capability probes, guarded read-only receiver inspection followed by separately guarded creation, fresh marker rollback/retry, read-only directory cleanup, helper publication/flush cleanup and retained-path diagnostics, and invalid local input exit3 before network. Preserved TUI cancellable delivery, process-group cleanup, bounded inspection/probes, complete transfer/failure details and safe naming behavior. TUI SSH now uses the same endpoint normalization as transport: aliases and bare IPv6 inner slices are borrowed; user@[IPv6] is normalized without another parser.
+  
+  ## Exercised verification
+  
+  Full merged repository preflight passed: 373 tests, formatting, strict Clippy, shell/workflow checks, OKF documentation, all 12 main specs and release safeguards. Native macOS arm64 PTY confirmed scope-local directory deletion/editing and cancel-versus-confirm Target-change discard after integration. Authenticated native IPv6 TCP SSH plus real rsync delivered user@[::1] content, preserved SKILL.md as a relative symlink and exact private directory/file modes, returned an unchanged preview, and displayed its body in the read-only follower inspector. Actual CLI exclusion of the defining SKILL.md returned exit3 with unchanged follower bytes and no export leak. Actual receivers missing cmp or mkdir returned actionable failure1 before creating receiver directories, with clean export areas. Owned services, keys, trust and fixtures were removed.
+  
+  The merge's canonical archive-to-main comparison is explicit semantic evidence; archived-task/native validation and the PR-scoped Git-object gate are required on the committed receipt head. This record is not independent human approval or Linux/WSL interactive verification.
+no_spec_deltas: false
+archive_tree: 367eec93ca9349dedd76f6da0b85375d25bb6dcc
+specs:
+  openspec/specs/cli-contract/spec.md: c0ed9f29e4b68d04244f2045b3726f278bf9226f
+  openspec/specs/library-management/spec.md: 755faf2b42dbdde4593e36515a1b6f8bb9284c6e
+  openspec/specs/library-rsync/spec.md: 6cb87799cff88498196f850f4e824cb5da64ff62

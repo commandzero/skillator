@@ -1,0 +1,28 @@
+change: add-tui-follower-sync
+reviewer: openai-codex/gpt-6.1-sol
+reviewed_at: 2026-10-06T06:25:17Z
+notes: |
+  # OpenSpec semantic review: add-tui-follower-sync
+  
+  Reviewer: openai-codex/gpt-6.1-sol
+  Reviewed committed implementation/spec/archive head: `09406cd589a540316aeb1f899147809c3c2f220b`.
+  
+  ## Findings
+  
+  The modified Busy/partial requirement retains nonzero failure acknowledgement and adds ordered initialization before host-only fast-save exit. The four additions separate selected-follower transfer from Local saves, require explicit owned-replica overwrite/deletion consent, preserve declined registrations, validate fresh saved leader state, and require responsive cancellation and truthful non-atomic results. All corresponding statements and scenarios match the committed main TUI spec.
+  
+  - `openspec/specs/tui-workflows/spec.md`: **Busy and partial outcomes preserve user understanding** — exact statement and 2 scenario matches; no delta content omitted.
+  - `openspec/specs/tui-workflows/spec.md`: **Remote Library synchronization is an explicit selected-follower action** — exact statement and 4 scenario matches; no delta content omitted.
+  - `openspec/specs/tui-workflows/spec.md`: **Saved follower registration offers optional initialization** — exact statement and 3 scenario matches; no delta content omitted.
+  - `openspec/specs/tui-workflows/spec.md`: **TUI follower delivery uses fresh validated leader state** — exact statement and 2 scenario matches; no delta content omitted.
+  - `openspec/specs/tui-workflows/spec.md`: **Follower delivery keeps the TUI responsive and reports the actual result** — exact statement and 4 scenario matches; no delta content omitted.
+  
+  No removed or renamed requirements or capabilities are declared. Every delta capability has its main spec; no intentional spec absence or no-delta exception is needed. Existing main-spec content outside the selected requirements was preserved during archival; all deltas were already synchronized before the archive command. All proposals, designs, tasks, delta specs and schema metadata are committed.
+  
+  ## Verification boundary
+  
+  Strict validation passed for all five active changes and 12 main specs before archival. Native archived-task validation passed for all 13 archives after archival, and post-archive policy preflight passed. The implementation previously passed full preflight (335 tests) and native macOS PTY/SSH/rsync smoke; no implementation files changed during archival or commit preparation. This receipt records semantic delta-to-main correspondence, not an independent human review or Linux/WSL verification.
+no_spec_deltas: false
+archive_tree: d83c3ebb554bc49918e60cd7c7be69ad71351c59
+specs:
+  openspec/specs/tui-workflows/spec.md: 7d595af9e5d724865a1e124f974c032c8a6c2e34
