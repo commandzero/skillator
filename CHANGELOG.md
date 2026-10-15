@@ -21,6 +21,8 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ### Fixed
 
+- Follower Library discovery preserves leader Source Keys and skill paths in owned rsync replicas, restoring separate collapsible repository groups and resolution of saved selectors. First user activation works without an existing `~/.agents` directory.
+- User/Repo saves, source validation, inventory listing, and materialization checks use the same implicit default Library as the TUI when `library.yaml` is absent, so visible replica skills can be enabled on a fresh follower without a separate Library save.
 - Skills with safe human-readable or divergent names remain usable and syncable; skill details show naming warnings instead of inventory errors (#39).
 - Root TUI startup selects Repo inside Git and User in the home directory, including home-as-Git, without requiring Library setup first (#39).
 - Library scope switches reuse loaded inventory and refresh in the background instead of waiting for a full scan, without overwriting staged edits (#39).
