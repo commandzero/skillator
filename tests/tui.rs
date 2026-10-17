@@ -423,29 +423,34 @@ fn table_wheel_moves_one_visible_row_and_stops_at_each_end() {
     assert_eq!(model.selected_row().unwrap().name(), "first");
 }
 
+fn filtered_model_with_hidden_selection() -> Model {
+    let mut rows = vec![Row::source("source", CheckState::Unchecked)];
+    for name in ["hidden", "match-first", "match-last"] {
+        rows.push(Row::skill(
+            "source",
+            name,
+            "",
+            false,
+            true,
+            MaterializationKind::Linked,
+            "",
+        ));
+    }
+    let mut model = Model::new(Workspace::Target, rows);
+    reduce(&mut model, Action::MoveDown);
+    reduce(&mut model, Action::StartFilter);
+    for character in "match".chars() {
+        reduce(&mut model, Action::Input(character));
+    }
+    reduce(&mut model, Action::Confirm);
+    assert_eq!(model.selected_row().unwrap().name(), "hidden");
+    model
+}
+
 #[test]
 fn filtered_hidden_selection_enters_at_first_visible_row_for_either_wheel_direction() {
     for initial_direction in [MouseEventKind::ScrollDown, MouseEventKind::ScrollUp] {
-        let mut rows = vec![Row::source("source", CheckState::Unchecked)];
-        for name in ["hidden", "match-first", "match-last"] {
-            rows.push(Row::skill(
-                "source",
-                name,
-                "",
-                false,
-                true,
-                MaterializationKind::Linked,
-                "",
-            ));
-        }
-        let mut model = Model::new(Workspace::Target, rows);
-        reduce(&mut model, Action::MoveDown);
-        reduce(&mut model, Action::StartFilter);
-        for character in "match".chars() {
-            reduce(&mut model, Action::Input(character));
-        }
-        reduce(&mut model, Action::Confirm);
-        assert_eq!(model.selected_row().unwrap().name(), "hidden");
+        let mut model = filtered_model_with_hidden_selection();
 
         let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
         let mut interactions = InteractionMap::default();
@@ -474,6 +479,16 @@ fn filtered_hidden_selection_enters_at_first_visible_row_for_either_wheel_direct
                 .filter_map(|row| row.check())
                 .all(|check| check == CheckState::Unchecked)
         );
+    }
+}
+
+#[test]
+fn keyboard_hidden_selection_preserves_directional_offsets() {
+    for (key, expected) in [('j', "match-first"), ('k', "source")] {
+        let mut model = filtered_model_with_hidden_selection();
+        let action = action_for_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)).unwrap();
+        reduce(&mut model, action);
+        assert_eq!(model.selected_row().unwrap().name(), expected);
     }
 }
 

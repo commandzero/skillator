@@ -453,10 +453,22 @@ pub fn render(frame: &mut Frame<'_>, model: &Model, interactions: &mut Interacti
     let offset = table_state.offset();
     let body_y = inner.y.saturating_add(1);
     let body_height = inner.height.saturating_sub(1);
+    // Wheel entry normalizes a hidden selection without changing keyboard fallbacks.
+    let (scroll_up, scroll_down) = if table_state.selected().is_none()
+        && let Some(&index) = visible.first()
+    {
+        let select = Action::ActivateRow {
+            index,
+            intent: RowAction::Select,
+        };
+        (select.clone(), select)
+    } else {
+        (Action::MoveUp, Action::MoveDown)
+    };
     interactions.add_scroll(
         Rect::new(inner.x, body_y, inner.width, body_height),
-        Action::MoveUp,
-        Action::MoveDown,
+        scroll_up,
+        scroll_down,
     );
     for (screen_row, visible_pos) in (offset..visible.len())
         .take(usize::from(body_height))
