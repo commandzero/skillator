@@ -614,11 +614,12 @@ impl Model {
         if visible.is_empty() {
             return;
         }
-        let position = visible
+        let next = visible
             .iter()
             .position(|index| *index == self.selected)
-            .unwrap_or(0);
-        let next = position.saturating_add_signed(delta).min(visible.len() - 1);
+            .map_or(0, |position| {
+                position.saturating_add_signed(delta).min(visible.len() - 1)
+            });
         self.selected = visible[next];
     }
 

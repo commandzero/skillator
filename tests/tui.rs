@@ -391,6 +391,60 @@ fn table_wheel_moves_one_visible_row_and_stops_at_each_end() {
     assert_eq!(model.selected_row().unwrap().name(), "first");
 }
 
+#[test]
+fn filtered_hidden_selection_enters_at_first_visible_row_for_either_wheel_direction() {
+    for initial_direction in [MouseEventKind::ScrollDown, MouseEventKind::ScrollUp] {
+        let mut rows = vec![Row::source("source", CheckState::Unchecked)];
+        for name in ["hidden", "match-first", "match-last"] {
+            rows.push(Row::skill(
+                "source",
+                name,
+                "",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "",
+            ));
+        }
+        let mut model = Model::new(Workspace::Target, rows);
+        reduce(&mut model, Action::MoveDown);
+        reduce(&mut model, Action::StartFilter);
+        for character in "match".chars() {
+            reduce(&mut model, Action::Input(character));
+        }
+        reduce(&mut model, Action::Confirm);
+        assert_eq!(model.selected_row().unwrap().name(), "hidden");
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        let mut interactions = InteractionMap::default();
+        let movements = [
+            (initial_direction, "source"),
+            (MouseEventKind::ScrollDown, "match-first"),
+            (MouseEventKind::ScrollDown, "match-last"),
+            (MouseEventKind::ScrollDown, "match-last"),
+            (MouseEventKind::ScrollUp, "match-first"),
+            (MouseEventKind::ScrollUp, "source"),
+            (MouseEventKind::ScrollUp, "source"),
+        ];
+        for (direction, expected) in movements {
+            terminal
+                .draw(|frame| render(frame, &model, &mut interactions))
+                .unwrap();
+            let y = rendered_row(terminal.backend().buffer(), "match-first").unwrap();
+            let action = action_for_mouse(mouse_event(direction, 30, y), &interactions).unwrap();
+            assert!(reduce(&mut model, action).is_empty());
+            assert_eq!(model.selected_row().unwrap().name(), expected);
+        }
+        assert!(
+            model
+                .rows()
+                .iter()
+                .filter_map(|row| row.check())
+                .all(|check| check == CheckState::Unchecked)
+        );
+    }
+}
+
 fn rendered_text_location(buffer: &ratatui::buffer::Buffer, text: &str) -> (u16, u16) {
     for y in 0..buffer.area.height {
         for x in 0..buffer.area.width {
