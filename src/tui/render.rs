@@ -1,5 +1,6 @@
 //! Shared terminal rendering, palettes and read-only inspectors.
 
+use super::controls::{overlay_controls, workspace_controls};
 use super::input::chooser_matches;
 use super::interaction::InteractionMap;
 use super::model::{
@@ -205,48 +206,71 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| value.contains(needle))
 }
 
-fn footer_help(model: &Model) -> Line<'static> {
-    let entries: &[(&str, &str)] = match model.workspace {
-        Workspace::Target => &[
-            ("s", "save"),
-            ("Ctrl+S", "save & exit"),
-            ("u", "undo"),
-            ("Space", "toggle"),
-            ("m", "mode"),
-            ("/", "filter"),
-            ("Ctrl+T", "new tab"),
-            ("?", "help"),
-        ],
-        Workspace::Library if model.host_index != 0 => &[
-            ("s", "sync"),
-            ("Ctrl+S", "sync"),
-            ("/", "filter"),
-            ("Esc", "cancel sync"),
-            ("?", "help"),
-        ],
-        Workspace::Library => &[
-            ("s", "save"),
-            ("Ctrl+S", "save & exit"),
-            ("u", "undo"),
-            ("Space", "show/hide"),
-            ("a/e/d", "location"),
-            ("m", "mode"),
-            ("/", "filter"),
-            ("Ctrl+T", "follower"),
-            ("r", "refresh"),
-            ("?", "help"),
-        ],
+fn controls_line(
+    controls: &[super::controls::Control],
+    width: u16,
+    origin_x: u16,
+    y: u16,
+    interactions: &mut InteractionMap,
+) -> Line<'static> {
+    let visible_width = usize::from(width.saturating_sub(1));
+    let controls_text: Vec<String> = controls
+        .iter()
+        .map(|control| format!("{} {}", control.key, control.label))
+        .collect();
+    let control_widths: Vec<usize> = controls_text
+        .iter()
+        .map(|text| Line::from(text.as_str()).width())
+        .collect();
+    let controls_width: usize = control_widths.iter().sum();
+    let wide_separator = Line::from(" · ").width();
+    let compact_separator = Line::from(" ").width();
+    let wide_width =
+        controls_width.saturating_add(controls.len().saturating_sub(1) * wide_separator);
+    let separator = if wide_width <= visible_width {
+        " · "
+    } else {
+        " "
     };
-    let mut spans = vec![Span::raw(" ")];
-    for (index, (key, description)) in entries.iter().enumerate() {
+    let separator_width = if separator == " · " {
+        wide_separator
+    } else {
+        compact_separator
+    };
+    let total_width =
+        controls_width.saturating_add(controls.len().saturating_sub(1) * separator_width);
+    let clip = total_width.saturating_sub(visible_width);
+    let padding = visible_width.saturating_sub(total_width);
+    let mut cursor = 0usize;
+    let mut spans = Vec::new();
+    for (index, (control, text, cells)) in controls
+        .iter()
+        .zip(controls_text)
+        .zip(control_widths)
+        .map(|((control, text), cells)| (control, text, cells))
+        .enumerate()
+    {
         if index > 0 {
-            spans.push(dim_span(" · "));
+            spans.push(dim_span(separator));
+            cursor += separator_width;
+        }
+        let end = cursor + cells;
+        if cursor >= clip && end <= clip.saturating_add(visible_width) && cells > 0 {
+            interactions.add(
+                Rect::new(
+                    origin_x.saturating_add((padding + cursor.saturating_sub(clip)) as u16),
+                    y,
+                    cells as u16,
+                    1,
+                ),
+                control.action.clone(),
+            );
         }
         spans.push(Span::styled(
-            (*key).to_owned(),
+            text,
             Style::default().fg(BONE).add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::raw(format!(" {description}")));
+        cursor = end;
     }
     spans.push(Span::raw(" "));
     Line::from(spans)
@@ -375,11 +399,24 @@ pub fn render(frame: &mut Frame<'_>, model: &Model, interactions: &mut Interacti
         Constraint::Min(1),
         Constraint::Length(18),
     ];
-    let key_help = footer_help(model).right_aligned();
+    let table_area = areas[2];
+    let key_help = if table_area.height > 0 {
+        controls_line(
+            workspace_controls(model),
+            table_area.width.saturating_sub(2),
+            table_area.x.saturating_add(1),
+            table_area
+                .y
+                .saturating_add(table_area.height.saturating_sub(1)),
+            interactions,
+        )
+        .right_aligned()
+    } else {
+        Line::default()
+    };
     let border_color = model.scope.color();
     let mut table_state = TableState::default();
     table_state.select(visible.iter().position(|index| *index == model.selected));
-    let table_area = areas[2];
     let inner = Rect::new(
         table_area.x.saturating_add(1),
         table_area.y.saturating_add(1),
@@ -681,57 +718,54 @@ fn status_line(model: &Model, width: u16) -> Line<'static> {
 pub(super) fn render_overlay(
     frame: &mut Frame<'_>,
     model: &Model,
-    _interactions: &mut InteractionMap,
+    interactions: &mut InteractionMap,
 ) {
-    let (title, body, footer, confirmation) = match &model.overlay {
+    if interactions.area != frame.area() {
+        interactions.reset(frame.area());
+    }
+    if !matches!(model.overlay, Overlay::None | Overlay::Notice(_)) {
+        interactions.clear_targets();
+    }
+    let (title, body, confirmation) = match &model.overlay {
         Overlay::None => return,
         Overlay::Welcome => (
             "I AM SKILLATOR!".to_owned(),
             "Your Library starts at ./library. Press e to edit this location. After closing this welcome, Ctrl+H/Ctrl+L move between Library, User and Repo.".to_owned(),
-            Some("Enter continue · Esc exit".to_owned()),
             false,
         ),
-        Overlay::Help => return render_help(frame, model, model.detail_scroll),
-        Overlay::Filter => return render_filter(frame, &model.filter),
+        Overlay::Help => return render_help(frame, model, interactions, model.detail_scroll),
+        Overlay::Filter => return render_filter(frame, model, interactions),
         Overlay::ConfirmSave => (
             "Save changes".to_owned(),
             "Save your changes?".to_owned(),
-            Some("y/Enter save · n/Esc return".to_owned()),
             true,
         ),
         Overlay::ConfirmSaveWarning(message) => save_warning_modal(message),
-        Overlay::GuardedConfirmation(message) => {
-            let (body, footer) = split_confirmation_message(message);
-            (
-                "Review changes".to_owned(),
-                remove_first_line(&body),
-                Some(footer),
-                true,
-            )
-        }
+        Overlay::GuardedConfirmation(message) => (
+            "Review changes".to_owned(),
+            remove_first_line(&confirmation_body(message)),
+            true,
+        ),
         Overlay::DiscardTarget => (
             "Discard pending changes".to_owned(),
             "Discard unsaved changes before opening another repository?".to_owned(),
-            Some("y/Enter discard · n/Esc return".to_owned()),
             true,
         ),
         Overlay::ScopeSwitch { .. } => (
             "Switch scope".to_owned(),
             "This scope has unsaved changes.".to_owned(),
-            Some("Enter save and switch · d discard and switch · Esc return".to_owned()),
             true,
         ),
         Overlay::DirectoryChooser { input, selected } => {
-            return render_directory_chooser(frame, input, *selected, model);
+            return render_directory_chooser(frame, input, *selected, model, interactions);
         }
         Overlay::FollowerEditor(input) => {
-            return render_input(frame, "Follower name",
+            return render_input(frame, model, interactions, "Follower name",
                 "SSH alias from ~/.ssh/config · existing credentials and host trust required", input);
         }
         Overlay::FollowerProbe { name } => (
             "Connecting to follower".to_owned(),
-            format!("Checking SSH alias {name} (read-only hostname probe). Esc cancels."),
-            Some("Esc cancel".to_owned()),
+            format!("Checking SSH alias {name} (read-only hostname probe)."),
             false,
         ),
         Overlay::ConfirmFollowerSync { alias, initial } => (
@@ -743,13 +777,14 @@ pub(super) fn render_overlay(
             format!(
                 "Push the leader's current saved Library to {alias}? This overwrites follower edits and deletes stale files only inside its owned ~/.skillator/library/replica. Other host files and selections are untouched. Interrupted rsync may leave a partial replica."
             ),
-            Some("y/Enter sync · n/Esc skip".to_owned()),
             true,
         ),
         Overlay::DirectoryEditor { edit, input } => {
             let mode = if *edit { "Edit" } else { "New" };
             return render_input(
                 frame,
+                model,
+                interactions,
                 &format!("{mode} skill tab"),
                 "agents | .claude | key,path,label",
                 input,
@@ -759,6 +794,8 @@ pub(super) fn render_overlay(
             let mode = if *edit { "Edit" } else { "Add" };
             return render_input(
                 frame,
+                model,
+                interactions,
                 &format!("{mode} library folder"),
                 "path",
                 input,
@@ -767,52 +804,50 @@ pub(super) fn render_overlay(
         Overlay::SourceKeyEditor(input) => {
             return render_input(
                 frame,
-                "Choose a unique source name",
+                model,
+                interactions,
+                "Source key",
                 "owner/repository",
                 input,
             );
         }
         Overlay::TargetPicker(input) => {
-            return render_input(frame, "Change repository", "directory", input);
+            return render_input(frame, model, interactions, "Change repository", "directory", input);
         }
         Overlay::ConfirmDelete => (
             "Remove from configuration".to_owned(),
             "Remove the selected folder from the configuration? This does not delete the folder or its files.".to_owned(),
-            Some("y/Enter delete · n/Esc return".to_owned()),
             true,
         ),
         Overlay::Busy => (
             "Another Skillator process is saving changes".to_owned(),
             "Another Skillator process is saving changes here. Wait for it to finish, then retry.".to_owned(),
-            Some("Enter retry · Esc return to editing".to_owned()),
             true,
         ),
-        Overlay::Details {
-            title,
-            path,
-            document,
-            warnings,
-            errors,
-        } => {
-            return render_skill_details(frame, title, path, document, warnings, errors, model.detail_scroll);
+        Overlay::Details { .. } => {
+            return render_skill_details(frame, model, interactions);
         }
         Overlay::Diagnostic { title, body } | Overlay::FollowerSyncResult { title, body } => {
             let area = centered(frame.area(), 76, 70);
             frame.render_widget(Clear, area);
-            frame.render_widget(
-                Paragraph::new(body.as_str())
-                    .wrap(ratatui::widgets::Wrap { trim: true })
-                    .scroll((model.detail_scroll, 0))
-                    .block(modal_block(title, Some("j/k scroll · PgUp/PgDn page · Enter/Esc close"))),
-                area,
-            );
+            let block = modal_controls_block(title, &model.overlay, area, interactions);
+            let inner = block.inner(area);
+            let paragraph = Paragraph::new(body.as_str())
+                .wrap(ratatui::widgets::Wrap { trim: true });
+            let max = paragraph
+                .line_count(inner.width)
+                .saturating_sub(usize::from(inner.height))
+                .min(usize::from(u16::MAX)) as u16;
+            interactions.detail_scroll_max = Some(max);
+            let scroll = model.detail_scroll.min(max);
+            interactions.add_scroll(inner, Action::MoveUp, Action::MoveDown);
+            frame.render_widget(paragraph.scroll((scroll, 0)).block(block), area);
             return;
         }
         Overlay::Notice(_) => return,
         Overlay::Result(message) => (
             "Save result".to_owned(),
             message.to_owned(),
-            Some("Enter exit".to_owned()),
             false,
         ),
     };
@@ -834,12 +869,22 @@ pub(super) fn render_overlay(
     frame.render_widget(
         Paragraph::new(text)
             .wrap(ratatui::widgets::Wrap { trim: true })
-            .block(modal_block(&title, footer.as_deref())),
+            .block(modal_controls_block(
+                &title,
+                &model.overlay,
+                area,
+                interactions,
+            )),
         area,
     );
 }
 
-fn render_help(frame: &mut Frame<'_>, model: &Model, scroll: u16) {
+fn render_help(
+    frame: &mut Frame<'_>,
+    model: &Model,
+    interactions: &mut InteractionMap,
+    scroll: u16,
+) {
     let mut entries = vec![
         ("Navigation", None),
         ("j/k · ↑/↓", Some("Move by row")),
@@ -855,6 +900,34 @@ fn render_help(frame: &mut Frame<'_>, model: &Model, scroll: u16) {
             Some("Cycle Library, User, Repo left / right"),
         ),
     ];
+    entries.extend([
+        ("Mouse", None),
+        (
+            "Row body",
+            Some("Select and inspect; pending actions are never run"),
+        ),
+        (
+            "Checkbox",
+            Some("Toggle; Source disclosure and Skill Mode cells have their own actions"),
+        ),
+        (
+            "Tabs / commands",
+            Some("Click a visible tab or labeled command"),
+        ),
+        (
+            "Modal choices",
+            Some("Click a labeled choice; outside clicks do nothing"),
+        ),
+        (
+            "Vertical wheel",
+            Some("Move rows, chooser suggestions, or scrollable content"),
+        ),
+        (
+            "Text selection",
+            Some("Mouse capture may require a terminal-specific bypass gesture"),
+        ),
+        ("Text entry", Some("Always uses the keyboard")),
+    ]);
     match model.workspace {
         Workspace::Target => entries.extend([
             ("Skills", None),
@@ -918,6 +991,7 @@ fn render_help(frame: &mut Frame<'_>, model: &Model, scroll: u16) {
             ("q", Some("Quit; close overlays like Esc")),
         ]),
     }
+    let entry_count = entries.len();
     let rows = entries.into_iter().map(|(key, action)| match action {
         Some(action) => TableRow::new(vec![
             Cell::from(Span::styled(
@@ -936,6 +1010,26 @@ fn render_help(frame: &mut Frame<'_>, model: &Model, scroll: u16) {
     });
     let area = centered(frame.area(), 70, 72);
     frame.render_widget(Clear, area);
+    let block = modal_controls_block("Help", &model.overlay, area, interactions);
+    let inner = block.inner(area);
+    let visible_rows = inner.height.saturating_sub(1);
+    let max = entry_count
+        .saturating_sub(usize::from(visible_rows))
+        .min(usize::from(u16::MAX)) as u16;
+    interactions.detail_scroll_max = Some(max);
+    let scroll = scroll.min(max);
+    if visible_rows > 0 {
+        interactions.add_scroll(
+            Rect::new(
+                inner.x,
+                inner.y.saturating_add(1),
+                inner.width,
+                visible_rows,
+            ),
+            Action::MoveUp,
+            Action::MoveDown,
+        );
+    }
     let mut state = TableState::default().with_offset(usize::from(scroll));
     frame.render_stateful_widget(
         Table::new(rows, [Constraint::Length(18), Constraint::Min(1)])
@@ -944,24 +1038,23 @@ fn render_help(frame: &mut Frame<'_>, model: &Model, scroll: u16) {
                     .style(Style::default().fg(BONE).add_modifier(Modifier::BOLD)),
             )
             .column_spacing(1)
-            .block(modal_block(
-                "Help",
-                Some("j/k scroll · PgUp/PgDn page · q/Esc close"),
-            )),
+            .block(block),
         area,
         &mut state,
     );
 }
 
-fn render_skill_details(
-    frame: &mut Frame<'_>,
-    title: &str,
-    path: &str,
-    document: &str,
-    warnings: &[String],
-    errors: &[String],
-    scroll: u16,
-) {
+fn render_skill_details(frame: &mut Frame<'_>, model: &Model, interactions: &mut InteractionMap) {
+    let Overlay::Details {
+        title,
+        path,
+        document,
+        warnings,
+        errors,
+    } = &model.overlay
+    else {
+        return;
+    };
     let mut lines = vec![Line::from(Span::styled(
         path.to_owned(),
         Style::default().fg(DIM_FOREGROUND),
@@ -1026,16 +1119,22 @@ fn render_skill_details(
     }
     let area = centered(frame.area(), 76, 70);
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .wrap(ratatui::widgets::Wrap { trim: true })
-            .scroll((scroll, 0))
-            .block(modal_block(
-                &format!("Skill details: {title}"),
-                Some("j/k or ↑/↓ scroll · PgUp/PgDn page · Enter/Esc close"),
-            )),
+    let block = modal_controls_block(
+        &format!("Skill details: {title}"),
+        &model.overlay,
         area,
+        interactions,
     );
+    let inner = block.inner(area);
+    let paragraph = Paragraph::new(Text::from(lines)).wrap(ratatui::widgets::Wrap { trim: true });
+    let max = paragraph
+        .line_count(inner.width)
+        .saturating_sub(usize::from(inner.height))
+        .min(usize::from(u16::MAX)) as u16;
+    interactions.detail_scroll_max = Some(max);
+    let scroll = model.detail_scroll.min(max);
+    interactions.add_scroll(inner, Action::MoveUp, Action::MoveDown);
+    frame.render_widget(paragraph.scroll((scroll, 0)).block(block), area);
 }
 
 pub(super) fn markdown_detail_line(line: &str, fenced_code: &mut bool) -> Line<'static> {
@@ -1203,44 +1302,40 @@ pub(super) fn markdown_inline_spans(text: &str, normal: Style) -> Vec<Span<'stat
     spans
 }
 
-fn save_warning_modal(message: &str) -> (String, String, Option<String>, bool) {
-    let (body, footer) = split_confirmation_message(message);
+fn save_warning_modal(message: &str) -> (String, String, bool) {
+    let body = confirmation_body(message);
     if message.starts_with("Initialize Skillator") {
         (
             "Initialize Skillator".to_owned(),
             remove_first_line(&body),
-            Some(footer),
             true,
         )
     } else if message.starts_with("Save library changes?") {
         (
             "Save library changes".to_owned(),
             remove_question_from_first_line(&body),
-            Some(footer),
             true,
         )
     } else {
-        ("Confirm save".to_owned(), body, Some(footer), true)
+        ("Confirm save".to_owned(), body, true)
     }
 }
 
-fn split_confirmation_message(message: &str) -> (String, String) {
+fn confirmation_body(message: &str) -> String {
     let mut lines = message.lines().collect::<Vec<_>>();
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
     }
-    let footer = if lines
+    if lines
         .last()
         .is_some_and(|line| line.contains("Enter") || line.contains("Esc"))
     {
-        lines.pop().unwrap_or_default().to_owned()
-    } else {
-        String::new()
-    };
+        lines.pop();
+    }
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
     }
-    (lines.join("\n"), footer)
+    lines.join("\n")
 }
 
 fn remove_first_line(text: &str) -> String {
@@ -1292,27 +1387,6 @@ pub(super) fn confirmation_text(text: &str) -> Text<'static> {
     Text::from(lines)
 }
 
-pub(super) fn confirmation_prompt_line(line: &str) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (index, segment) in line.split(" · ").enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(" · ", Style::default().fg(DIM_FOREGROUND)));
-        }
-        let (key, description) = segment.split_once(' ').unwrap_or((segment, ""));
-        spans.push(Span::styled(
-            key.to_owned(),
-            Style::default().fg(BONE).add_modifier(Modifier::BOLD),
-        ));
-        if !description.is_empty() {
-            spans.push(Span::styled(
-                format!(" {description}"),
-                Style::default().fg(DIM_FOREGROUND),
-            ));
-        }
-    }
-    Line::from(spans)
-}
-
 fn overlay_text_style(overlay: &Overlay) -> Style {
     match overlay {
         Overlay::Help => Style::default().fg(BONE),
@@ -1351,22 +1425,46 @@ fn overlay_text_style(overlay: &Overlay) -> Style {
     }
 }
 
-fn modal_block(title: &str, footer: Option<&str>) -> Block<'static> {
-    let block = Block::default()
+fn modal_controls_block(
+    title: &str,
+    overlay: &Overlay,
+    area: Rect,
+    interactions: &mut InteractionMap,
+) -> Block<'static> {
+    let line = if area.height > 0 && area.width > 2 {
+        controls_line(
+            overlay_controls(overlay),
+            area.width.saturating_sub(2),
+            area.x.saturating_add(1),
+            area.y.saturating_add(area.height.saturating_sub(1)),
+            interactions,
+        )
+        .right_aligned()
+    } else {
+        Line::default()
+    };
+    modal_block(title).title_bottom(line)
+}
+
+fn modal_block(title: &str) -> Block<'static> {
+    Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(BLUE))
         .title_style(Style::default().fg(BONE))
         .title(Line::styled(
             format!(" {title} "),
             Style::default().fg(BONE).add_modifier(Modifier::BOLD),
-        ));
-    match footer {
-        Some(footer) => block.title_bottom(confirmation_prompt_line(footer).right_aligned()),
-        None => block,
-    }
+        ))
 }
 
-fn render_input(frame: &mut Frame<'_>, title: &str, hint: &str, input: &str) {
+fn render_input(
+    frame: &mut Frame<'_>,
+    model: &Model,
+    interactions: &mut InteractionMap,
+    title: &str,
+    hint: &str,
+    input: &str,
+) {
     let area = centered(frame.area(), 70, 30);
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -1379,15 +1477,17 @@ fn render_input(frame: &mut Frame<'_>, title: &str, hint: &str, input: &str) {
             ]),
         ]))
         .style(Style::default().fg(BONE))
-        .block(modal_block(
+        .block(modal_controls_block(
             title,
-            Some("Tab complete · Enter apply · Esc cancel"),
+            &model.overlay,
+            area,
+            interactions,
         )),
         area,
     );
 }
 
-fn render_filter(frame: &mut Frame<'_>, filter: &str) {
+fn render_filter(frame: &mut Frame<'_>, model: &Model, interactions: &mut InteractionMap) {
     let area = Rect::new(
         2,
         frame.area().height.saturating_sub(3),
@@ -1396,9 +1496,14 @@ fn render_filter(frame: &mut Frame<'_>, filter: &str) {
     );
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(format!("/{filter}"))
+        Paragraph::new(format!("/{}", model.filter))
             .style(Style::default().fg(BONE))
-            .block(modal_block("Filter", Some("Enter apply · Esc clear"))),
+            .block(modal_controls_block(
+                "Filter",
+                &model.overlay,
+                area,
+                interactions,
+            )),
         area,
     );
 }
@@ -1418,7 +1523,13 @@ fn centered(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
     .split(vertical[1])[1]
 }
 
-fn render_directory_chooser(frame: &mut Frame<'_>, input: &str, selected: usize, model: &Model) {
+fn render_directory_chooser(
+    frame: &mut Frame<'_>,
+    input: &str,
+    selected: usize,
+    model: &Model,
+    interactions: &mut InteractionMap,
+) {
     let area = centered(frame.area(), 76, 48);
     frame.render_widget(Clear, area);
     let matches = chooser_matches(input);
@@ -1472,11 +1583,37 @@ fn render_directory_chooser(frame: &mut Frame<'_>, input: &str, selected: usize,
     };
     let mut lines = vec![Line::from(format!(" Search: {input}▌")), Line::raw("")];
     lines.extend(rows);
+    let block = modal_controls_block("Choose skill directory", &model.overlay, area, interactions);
+    let inner = block.inner(area);
+    let mut scroll = 0usize;
+    if !matches.is_empty() && inner.height > 2 {
+        let list_height = inner.height.saturating_sub(2);
+        let start = selected
+            .saturating_sub(usize::from(list_height.saturating_sub(1)))
+            .min(matches.len().saturating_sub(usize::from(list_height)));
+        scroll = start;
+        let row_y = if start == 0 {
+            inner.y.saturating_add(2)
+        } else {
+            inner.y
+        };
+        let row_height = inner.height.saturating_sub(row_y.saturating_sub(inner.y));
+        interactions.add_scroll(
+            Rect::new(inner.x, row_y, inner.width, row_height),
+            Action::MoveUp,
+            Action::MoveDown,
+        );
+        for row in 0..usize::from(row_height).min(matches.len().saturating_sub(start)) {
+            interactions.add(
+                Rect::new(inner.x, row_y.saturating_add(row as u16), inner.width, 1),
+                Action::SelectSuggestion(start + row),
+            );
+        }
+    }
     frame.render_widget(
-        Paragraph::new(lines).block(modal_block(
-            "Choose skill directory",
-            Some("↑/↓ select · Enter stage · Esc cancel"),
-        )),
+        Paragraph::new(lines)
+            .scroll((scroll.min(usize::from(u16::MAX)) as u16, 0))
+            .block(block),
         area,
     );
 }
@@ -1484,6 +1621,7 @@ fn render_directory_chooser(frame: &mut Frame<'_>, input: &str, selected: usize,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::model::Effect;
 
     #[test]
     fn narrow_overflow_arrow_advances_one_scoped_tab() {
@@ -1515,6 +1653,103 @@ mod tests {
                 assert_eq!(model.host_index, 1);
             } else {
                 assert_eq!(model.directory_index, 1);
+            }
+        }
+    }
+    fn rendered_control_position(
+        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+        text: &str,
+    ) -> Option<(u16, u16)> {
+        let buffer = terminal.backend().buffer();
+        let chars: Vec<_> = text.chars().collect();
+        if chars.len() > usize::from(buffer.area.width) {
+            return None;
+        }
+        for y in 0..buffer.area.height {
+            for x in 0..=buffer.area.width.saturating_sub(chars.len() as u16) {
+                if chars.iter().enumerate().all(|(offset, character)| {
+                    buffer[(x + offset as u16, y)].symbol() == character.to_string()
+                }) {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn library_controls_follow_drawn_layout_and_hit_targets() {
+        let controls_model = Model::new(Workspace::Library, Vec::new());
+        for width in [140, 100, 80] {
+            let mut row = Row::location("./library");
+            row.location_index = Some(0);
+            let model = Model::new(Workspace::Library, vec![row]);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            let mut interactions = InteractionMap::default();
+            terminal
+                .draw(|frame| render(frame, &model, &mut interactions))
+                .unwrap();
+
+            let controls = workspace_controls(&controls_model);
+            let mut visible_controls = Vec::new();
+            let mut control_targets = Vec::new();
+            for control in controls {
+                let text = format!("{} {}", control.key, control.label);
+                let position = rendered_control_position(&terminal, &text);
+                let length = text.chars().count() as u16;
+                if let Some((x, y)) = position {
+                    let click_x = x + (length / 2);
+                    assert_eq!(
+                        interactions.action_at(click_x, y),
+                        Some(control.action.clone()),
+                        "wrong hit target for visible control {text:?} at width {width}"
+                    );
+                    visible_controls.push((control.action.clone(), x, y, length));
+                }
+                control_targets.push((control.action.clone(), position, length));
+            }
+            let buffer = terminal.backend().buffer();
+            if let Some(y) = visible_controls.first().map(|entry| entry.2) {
+                for (action, position, length) in control_targets {
+                    for x in 0..buffer.area.width {
+                        if interactions.action_at(x, y).as_ref() == Some(&action) {
+                            assert!(
+                                position.is_some_and(|(label_x, label_y)| {
+                                    label_y == y && label_x <= x && x < label_x + length
+                                }),
+                                "incomplete control fragment has a hit target at width {width}"
+                            );
+                        }
+                    }
+                }
+            }
+
+            let edit_position = rendered_control_position(&terminal, "e edit");
+            let save_position = rendered_control_position(&terminal, "s save");
+            if width == 140 {
+                assert!(edit_position.is_some(), "e edit must be fully visible");
+                assert!(save_position.is_some(), "s save must be fully visible");
+            }
+            if let Some((x, y)) = edit_position {
+                let mut edit_model = model.clone();
+                let action = interactions.action_at(x + 1, y).unwrap();
+                crate::tui::reducer::reduce(&mut edit_model, action);
+                assert_eq!(
+                    edit_model.overlay,
+                    Overlay::LocationEditor {
+                        edit: true,
+                        input: "./library".to_owned()
+                    }
+                );
+            }
+            if let Some((x, y)) = save_position {
+                let mut save_model = model.clone();
+                let action = interactions.action_at(x + 1, y).unwrap();
+                assert_eq!(
+                    crate::tui::reducer::reduce(&mut save_model, action),
+                    [Effect::PrepareSave { fast: false }]
+                );
             }
         }
     }

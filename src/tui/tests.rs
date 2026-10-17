@@ -313,7 +313,10 @@ fn inherited_override_save_reload_remove_and_conflict_preserve_user_scope() {
     );
     model.overlay = save_review_overlay(prepared.plan());
     assert!(matches!(model.overlay, Overlay::GuardedConfirmation(_)));
-    assert_eq!(reduce(&mut model, Action::Escape), vec![Effect::CancelSave]);
+    assert_eq!(
+        click_rendered_action(&mut model, Action::Escape),
+        vec![Effect::CancelSave]
+    );
     drop(prepared);
     assert_eq!(
         std::fs::read_to_string(destination.join("keep.txt")).unwrap(),
@@ -324,7 +327,7 @@ fn inherited_override_save_reload_remove_and_conflict_preserve_user_scope() {
         prepare_scope_save(&paths, &state, &state.tabs, TargetTabScope::Repository).unwrap();
     model.overlay = save_review_overlay(prepared.plan());
     assert_eq!(
-        reduce(&mut model, Action::Confirm),
+        click_rendered_action(&mut model, Action::Confirm),
         vec![Effect::CommitSave]
     );
     assert_eq!(prepared.commit(&paths).unwrap().exit_status, 0);
@@ -451,7 +454,7 @@ fn occupied_ignore_path_review_explains_replacement_and_preserves_the_folder() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(screen.contains("ignore file"), "{screen}");
-    assert!(screen.contains("confirm and save"), "{screen}");
+    assert!(screen.contains("replace"), "{screen}");
 }
 
 #[test]
@@ -716,15 +719,6 @@ fn confirmation_distinguishes_desired_actions_from_warnings() {
     assert_eq!(text.lines[0].style.fg, None);
     assert_eq!(text.lines[1].style.fg, Some(WARNING));
     assert_eq!(text.lines[2].style.fg, Some(ERROR));
-
-    let footer = confirmation_prompt_line("y/Enter initialize · n/Esc return");
-    assert!(footer.spans.iter().any(|span| span.style.fg == Some(BONE)));
-    assert!(
-        footer
-            .spans
-            .iter()
-            .any(|span| span.style.fg == Some(DIM_FOREGROUND))
-    );
 }
 
 #[test]
@@ -2441,4 +2435,369 @@ fn directory_overflow_tracks_scoped_indices_and_unicode_cells() {
     let effects = reduce(&mut model, interactions.action_at(unicode_x, 1).unwrap());
     assert_eq!(model.directory_index, 1);
     assert!(effects.is_empty());
+}
+fn click_rendered_action(model: &mut Model, action: Action) -> Vec<Effect> {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 32)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, model, &mut interactions))
+        .unwrap();
+    let area = terminal.backend().buffer().area;
+    for y in 0..area.height {
+        for x in 0..area.width {
+            if interactions.action_at(x, y).as_ref() == Some(&action) {
+                return reduce(model, action);
+            }
+        }
+    }
+    panic!("rendered action has no hit target: {action:?}");
+}
+
+#[test]
+fn rendered_scope_switch_choices_keep_the_exact_requested_destination() {
+    let destination = Scope::Repo;
+    for (action, save, discard) in [
+        (Action::Confirm, true, false),
+        (Action::DeleteDirectory, false, true),
+    ] {
+        let mut model = Model::new(Workspace::Target, Vec::new());
+        model.overlay = Overlay::ScopeSwitch {
+            destination,
+            host_to: Some(7),
+        };
+        assert_eq!(
+            click_rendered_action(&mut model, action),
+            [Effect::SwitchToScope {
+                destination,
+                host_to: Some(7),
+                save,
+                discard,
+            }]
+        );
+    }
+    let mut model = Model::new(Workspace::Target, Vec::new());
+    model.overlay = Overlay::ScopeSwitch {
+        destination,
+        host_to: Some(7),
+    };
+    model.dirty = true;
+    assert!(click_rendered_action(&mut model, Action::Escape).is_empty());
+    assert_eq!(model.overlay, Overlay::None);
+    assert!(model.dirty);
+}
+
+#[test]
+fn rendered_modal_choices_preserve_guard_retry_result_and_follower_effects() {
+    let mut model = Model::new(Workspace::Target, Vec::new());
+    model.overlay =
+        Overlay::GuardedConfirmation("Prepared changes require explicit approval.".to_owned());
+    assert_eq!(
+        click_rendered_action(&mut model, Action::Escape),
+        [Effect::CancelSave]
+    );
+    assert_eq!(model.overlay, Overlay::None);
+
+    let mut model = Model::new(Workspace::Target, Vec::new());
+    model.overlay = Overlay::Busy;
+    assert_eq!(
+        click_rendered_action(&mut model, Action::Confirm),
+        [Effect::RetrySave]
+    );
+
+    let mut model = Model::new(Workspace::Target, Vec::new());
+    model.overlay = Overlay::Result("partial save failed".to_owned());
+    model.exit_after_save = true;
+    assert_eq!(
+        click_rendered_action(&mut model, Action::Confirm),
+        [Effect::Quit { status: 1 }]
+    );
+
+    let mut model = Model::new(Workspace::Library, Vec::new());
+    model.overlay = Overlay::ConfirmFollowerSync {
+        alias: "saved-host".to_owned(),
+        initial: true,
+    };
+    assert_eq!(
+        click_rendered_action(&mut model, Action::Escape),
+        [Effect::FinishFollowerInit]
+    );
+    let mut model = Model::new(Workspace::Library, Vec::new());
+    model.overlay = Overlay::ConfirmFollowerSync {
+        alias: "saved-host".to_owned(),
+        initial: false,
+    };
+    assert_eq!(
+        click_rendered_action(&mut model, Action::Confirm),
+        [Effect::StartFollowerSync("saved-host".to_owned())]
+    );
+}
+
+#[test]
+fn rendered_overlay_controls_close_details_and_keep_filter_isolated() {
+    let mut model = Model::new(Workspace::Target, Vec::new());
+    model.overlay = Overlay::Details {
+        title: "Details".to_owned(),
+        path: "skill.md".to_owned(),
+        document: "contents".to_owned(),
+        warnings: Vec::new(),
+        errors: Vec::new(),
+    };
+    assert!(click_rendered_action(&mut model, Action::Escape).is_empty());
+    assert_eq!(model.overlay, Overlay::None);
+
+    let mut model = Model::new(Workspace::Target, Vec::new());
+    model.filter = "needle".to_owned();
+    model.overlay = Overlay::Filter;
+    assert!(click_rendered_action(&mut model, Action::Escape).is_empty());
+    assert_eq!(model.filter, "");
+    assert_eq!(model.overlay, Overlay::None);
+}
+
+#[test]
+fn rendered_modal_cancel_and_outside_click_do_not_activate_background_rows() {
+    let row = Row::skill(
+        "source",
+        "demo",
+        "Demo",
+        false,
+        true,
+        MaterializationKind::Linked,
+        "",
+    );
+    let mut model = Model::new(Workspace::Target, vec![row]);
+    model.overlay = Overlay::DirectoryEditor {
+        edit: false,
+        input: "another".to_owned(),
+    };
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 32)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    assert!(interactions.action_at(0, 1).is_none());
+    assert!(interactions.action_at(20, 20).is_none());
+    assert!(click_rendered_action(&mut model, Action::Escape).is_empty());
+    assert_eq!(model.rows[0].check, Some(CheckState::Unchecked));
+}
+
+#[test]
+fn rendered_location_completion_is_not_submission_and_unsupported_editor_has_no_complete() {
+    let mut model = Model::new(Workspace::Library, Vec::new());
+    model.overlay = Overlay::LocationEditor {
+        edit: false,
+        input: "./lib".to_owned(),
+    };
+    let effects = click_rendered_action(&mut model, Action::CompletePath);
+    assert!(effects.is_empty());
+    assert!(matches!(model.overlay, Overlay::LocationEditor { .. }));
+
+    let mut model = Model::new(Workspace::Target, Vec::new());
+    model.overlay = Overlay::DirectoryEditor {
+        edit: false,
+        input: "skills".to_owned(),
+    };
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 32)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    assert!(
+        !(0..32)
+            .any(|y| (0..100)
+                .any(|x| { interactions.action_at(x, y) == Some(Action::CompletePath) }))
+    );
+}
+
+#[test]
+fn rendered_welcome_filter_and_follower_result_choices_apply_their_transitions() {
+    let mut model = Model::new(Workspace::Target, Vec::new());
+    model.overlay = Overlay::Welcome;
+    assert!(click_rendered_action(&mut model, Action::Confirm).is_empty());
+    assert_eq!(model.overlay, Overlay::None);
+
+    let mut model = Model::new(Workspace::Target, Vec::new());
+    model.filter = "kept".to_owned();
+    model.overlay = Overlay::Filter;
+    assert!(click_rendered_action(&mut model, Action::Confirm).is_empty());
+    assert_eq!(model.filter, "kept");
+    assert_eq!(model.overlay, Overlay::None);
+
+    let mut model = Model::new(Workspace::Library, Vec::new());
+    model.overlay = Overlay::FollowerSyncResult {
+        title: "Sync complete".to_owned(),
+        body: "follower".to_owned(),
+    };
+    assert_eq!(
+        click_rendered_action(&mut model, Action::Escape),
+        [Effect::FinishFollowerInit]
+    );
+}
+
+#[test]
+fn diagnostic_and_follower_result_scroll_render_wrapped_content_and_resize_bounds() {
+    use ratatui::layout::Rect;
+
+    for follower in [false, true] {
+        let body = format!(
+            "{}\nFINAL-ENTRY",
+            (0..48)
+                .map(|index| format!("entry-{index:02} with wrapped content"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let mut model = Model::new(Workspace::Library, Vec::new());
+        model.overlay = if follower {
+            Overlay::FollowerSyncResult {
+                title: "Follower result".to_owned(),
+                body: body.clone(),
+            }
+        } else {
+            Overlay::Diagnostic {
+                title: "Diagnostic".to_owned(),
+                body: body.clone(),
+            }
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(36, 12)).unwrap();
+        let mut interactions = InteractionMap::default();
+        terminal
+            .draw(|frame| render(frame, &model, &mut interactions))
+            .unwrap();
+        let max = interactions.detail_scroll_max.unwrap();
+        assert!(max > 0, "long wrapped modal content must scroll");
+        let first = (0..12)
+            .flat_map(|y| (0..36).map(move |x| (x, y)))
+            .map(|(x, y)| terminal.backend().buffer()[(x, y)].symbol())
+            .collect::<String>();
+        assert!(
+            first.contains("entry-00"),
+            "rendered modal content is visible"
+        );
+        assert!(
+            !first.contains("entry-47"),
+            "later content starts below the viewport"
+        );
+
+        let area = interactions.area;
+        let (x, y) = (area.x + area.width / 2, area.y + area.height / 2);
+        let down = interactions.scroll_at(x, y, true).unwrap();
+        assert_eq!(down, Action::MoveDown);
+        reduce(&mut model, down);
+        assert_eq!(model.detail_scroll, 1);
+        terminal
+            .draw(|frame| render(frame, &model, &mut interactions))
+            .unwrap();
+        assert_eq!(interactions.detail_scroll_max, Some(max));
+
+        model.detail_scroll = max;
+        terminal
+            .draw(|frame| render(frame, &model, &mut interactions))
+            .unwrap();
+        let last = (0..12)
+            .flat_map(|y| (0..36).map(move |x| (x, y)))
+            .map(|(x, y)| terminal.backend().buffer()[(x, y)].symbol())
+            .collect::<String>();
+        assert!(
+            last.contains("FINAL-ENTRY"),
+            "the final content is visible at the scroll bound"
+        );
+        let down = interactions.scroll_at(x, y, true).unwrap();
+        reduce(&mut model, down);
+        model.detail_scroll = model
+            .detail_scroll
+            .min(interactions.detail_scroll_max.unwrap());
+        assert_eq!(model.detail_scroll, max, "scrolling down is bounded");
+        let up = interactions.scroll_at(x, y, false).unwrap();
+        reduce(&mut model, up);
+        assert_eq!(model.detail_scroll, max - 1);
+
+        terminal.backend_mut().resize(36, 20);
+        terminal.resize(Rect::new(0, 0, 36, 20)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &model, &mut interactions))
+            .unwrap();
+        let resized_max = interactions.detail_scroll_max.unwrap();
+        assert!(
+            resized_max < max,
+            "a taller viewport reduces the scroll bound"
+        );
+        model.detail_scroll = resized_max;
+        terminal
+            .draw(|frame| render(frame, &model, &mut interactions))
+            .unwrap();
+        let resized_last = (0..20)
+            .flat_map(|y| (0..36).map(move |x| (x, y)))
+            .map(|(x, y)| terminal.backend().buffer()[(x, y)].symbol())
+            .collect::<String>();
+        assert!(
+            resized_last.contains("FINAL-ENTRY"),
+            "the final content remains visible at the resized scroll bound"
+        );
+        let (x, y) = (
+            interactions.area.x + interactions.area.width / 2,
+            interactions.area.y + interactions.area.height / 2,
+        );
+        assert_eq!(interactions.scroll_at(x, y, true), Some(Action::MoveDown));
+        reduce(&mut model, Action::MoveDown);
+        model.detail_scroll = model
+            .detail_scroll
+            .min(interactions.detail_scroll_max.unwrap());
+        assert_eq!(
+            model.detail_scroll, resized_max,
+            "resized scrolling stays bounded"
+        );
+        assert_eq!(interactions.scroll_at(x, y, false), Some(Action::MoveUp));
+        reduce(&mut model, Action::MoveUp);
+        assert_eq!(model.detail_scroll, resized_max - 1);
+    }
+}
+
+#[test]
+fn selected_directory_commands_are_visible_and_delete_requires_confirmation() {
+    let row = Row::location("./library");
+    let mut model = Model::new(Workspace::Library, vec![row]);
+    model.selected = 0;
+    let controls = super::controls::workspace_controls(&model);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 32)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    for action in [
+        Action::AddDirectory,
+        Action::EditDirectory,
+        Action::DeleteDirectory,
+    ] {
+        assert!(
+            (0..32).any(|y| {
+                (0..100).any(|x| interactions.action_at(x, y).as_ref() == Some(&action))
+            }),
+            "selected library action is rendered as a clickable command: {action:?}"
+        );
+    }
+    for (action, label) in [
+        (Action::AddDirectory, "add"),
+        (Action::EditDirectory, "edit"),
+        (Action::DeleteDirectory, "remove"),
+    ] {
+        assert!(
+            controls
+                .iter()
+                .any(|control| control.action == action && control.label == label),
+            "selected library commands include {label}"
+        );
+    }
+    assert!(reduce(&mut model, Action::DeleteDirectory).is_empty());
+    assert_eq!(model.overlay, Overlay::ConfirmDelete);
+    assert_eq!(
+        click_rendered_action(&mut model, Action::Escape),
+        Vec::<Effect>::new()
+    );
+    assert_eq!(model.overlay, Overlay::None);
+    assert!(reduce(&mut model, Action::DeleteDirectory).is_empty());
+    assert_eq!(model.overlay, Overlay::ConfirmDelete);
+    assert_eq!(
+        click_rendered_action(&mut model, Action::Confirm),
+        [Effect::DeleteDirectory]
+    );
 }

@@ -1,5 +1,6 @@
 //! Terminal session, scope navigation and shared event dispatch.
 
+mod controls;
 pub mod input;
 pub mod interaction;
 pub mod library;
@@ -212,6 +213,7 @@ fn run_interactive_with_tick(
         let Some(action) = action else {
             continue;
         };
+        redraw = true;
         let keeps_detail_scroll_view = interactions.detail_scroll_max.is_some()
             && matches!(
                 &action,
@@ -219,8 +221,7 @@ fn run_interactive_with_tick(
                     | model::Action::MoveUp
                     | model::Action::PageDown
                     | model::Action::PageUp
-            )
-            && matches!(&model.overlay, model::Overlay::Details { .. });
+            );
         let overlay_before_action =
             keeps_detail_scroll_view.then(|| std::mem::discriminant(&model.overlay));
         for effect in reducer::reduce(&mut model, action) {
