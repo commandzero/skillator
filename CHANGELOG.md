@@ -6,6 +6,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ### Added
 
+- Use mouse clicks for TUI selection, staged controls, and explicit modal choices, with wheel navigation for rows and scrollable views.
 - Deliver only discovered skill directories—not whole registered repositories—to owned follower replicas: push authoritative leader content or pull fresh snapshots, with write-free previews, early local-input validation, pre-write SSH and filesystem capability checks, source permissions and content exclusions preserved, retryable ownership-marker creation, cleanup or retained-export diagnostics, and host-local selections (#38).
 - Filter agent-directory presets or enter custom paths with `Ctrl+T`; verify and stage Library followers over SSH, then browse their delivered replicas read-only (#39).
 - Sync a selected follower from its Library tab, with optional initialization after registration and confirmation before overwriting or deleting owned replica content (#39).

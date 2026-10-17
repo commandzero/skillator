@@ -1,6 +1,7 @@
 //! Terminal session, scope navigation and shared event dispatch.
 
 pub mod input;
+pub mod interaction;
 pub mod library;
 pub mod model;
 pub mod reducer;
@@ -59,20 +60,21 @@ struct TerminalSession {
 
 impl TerminalSession {
     fn new() -> Result<Self, WorkflowError> {
-        use crossterm::execute;
-        use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+        use crossterm::terminal::enable_raw_mode;
         use std::io::stdout;
 
         enable_raw_mode().map_err(fatal)?;
-        if let Err(error) = execute!(stdout(), EnterAlternateScreen) {
+        let mut stdout = stdout();
+        if let Err(error) = enter_terminal_with_cleanup(&mut stdout) {
             let _ = crossterm::terminal::disable_raw_mode();
             return Err(fatal(error));
         }
-        let terminal = match Terminal::new(CrosstermBackend::new(stdout())) {
+        let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
             Ok(terminal) => terminal,
             Err(error) => {
+                let mut stdout = std::io::stdout();
+                let _ = restore_terminal(&mut stdout);
                 let _ = crossterm::terminal::disable_raw_mode();
-                let _ = execute!(stdout(), crossterm::terminal::LeaveAlternateScreen);
                 return Err(fatal(error));
             }
         };
@@ -80,14 +82,44 @@ impl TerminalSession {
     }
 }
 
+fn enter_terminal(writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    use crossterm::ExecutableCommand;
+    writer
+        .execute(crossterm::terminal::EnterAlternateScreen)?
+        .execute(crossterm::event::EnableMouseCapture)
+        .map(|_| ())
+}
+
+fn enter_terminal_with_cleanup(writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    match enter_terminal(writer) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = restore_terminal(writer);
+            Err(error)
+        }
+    }
+}
+
+fn restore_terminal(writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    use crossterm::ExecutableCommand;
+    let disable_mouse = writer
+        .execute(crossterm::event::DisableMouseCapture)
+        .map(|_| ());
+    let leave_screen = writer
+        .execute(crossterm::terminal::LeaveAlternateScreen)
+        .map(|_| ());
+    match (disable_mouse, leave_screen) {
+        (Err(error), _) => Err(error),
+        (Ok(()), result) => result,
+    }
+}
+
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        use crossterm::execute;
-        use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
         use std::io::stdout;
 
-        let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = restore_terminal(&mut stdout());
     }
 }
 
@@ -142,33 +174,55 @@ fn run_interactive_with_tick(
 ) -> Result<(InteractionExit, Model), WorkflowError> {
     use crossterm::event::{self, Event};
     let mut redraw = true;
+    let mut interactions = interaction::InteractionMap::default();
     loop {
         redraw |= on_tick(&mut model)?;
         if redraw {
             terminal
-                .draw(|frame| render::render(frame, &model))
+                .draw(|frame| render::render(frame, &model, &mut interactions))
                 .map_err(fatal)?;
+            if let Some(max) = interactions.detail_scroll_max {
+                model.detail_scroll = model.detail_scroll.min(max);
+            }
             redraw = false;
         }
         if !event::poll(Duration::from_millis(80)).map_err(fatal)? {
             continue;
         }
-        let key = match event::read().map_err(fatal)? {
+        let event = event::read().map_err(fatal)?;
+        let action = match event {
             Event::Resize(_, _) => {
+                interactions.clear_targets();
                 redraw = true;
                 continue;
             }
-            Event::Key(key) => key,
-            _ => continue,
+            Event::Mouse(mouse) => {
+                let size = terminal.size().map_err(fatal)?;
+                if interactions.area.width != size.width || interactions.area.height != size.height
+                {
+                    interactions.clear_targets();
+                    redraw = true;
+                    continue;
+                }
+                input::action_for_mouse(mouse, &interactions)
+            }
+            Event::Key(key) => input::action_for_model_key(&model, key),
+            _ => None,
         };
-        let Some(action) = input::action_for_model_key(&model, key) else {
+        let Some(action) = action else {
             continue;
         };
         redraw = true;
+        let overlay_before_action = model.overlay.clone();
         for effect in reducer::reduce(&mut model, action) {
             if let Some(status) = handle_effect(&mut model, effect)? {
                 return Ok((status, model));
             }
+        }
+        if model.overlay == overlay_before_action
+            && let Some(max) = interactions.detail_scroll_max
+        {
+            model.detail_scroll = model.detail_scroll.min(max);
         }
     }
 }
@@ -176,5 +230,71 @@ fn run_interactive_with_tick(
 fn fatal(error: impl std::fmt::Display) -> WorkflowError {
     WorkflowError::Fatal {
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod terminal_lifecycle_tests {
+    use super::{enter_terminal_with_cleanup, restore_terminal};
+    use std::io::{self, Write};
+
+    #[derive(Default)]
+    struct FailWrite {
+        fail_at: [usize; 2],
+        writes: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for FailWrite {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            if self.fail_at.contains(&self.writes) {
+                return Err(io::Error::other(format!(
+                    "injected write failure {}",
+                    self.writes
+                )));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn terminal_cleanup_commands_disable_capture_before_leaving_screen() {
+        let mut output = Vec::new();
+        restore_terminal(&mut output).unwrap();
+        let commands = String::from_utf8(output).unwrap();
+        assert!(commands.find("?1006l").is_some());
+        assert!(commands.find("?1049l").is_some());
+        assert!(commands.find("?1006l") < commands.find("?1049l"));
+    }
+
+    #[test]
+    fn failed_setup_after_entering_screen_preserves_error_and_attempts_cleanup() {
+        let mut writer = FailWrite {
+            fail_at: [2, 3],
+            ..FailWrite::default()
+        };
+        let error = enter_terminal_with_cleanup(&mut writer).unwrap_err();
+        assert_eq!(error.to_string(), "injected write failure 2");
+        assert_eq!(writer.writes, 4);
+        let commands = String::from_utf8(writer.bytes).unwrap();
+        assert!(commands.contains("?1049h"));
+        assert!(commands.contains("?1049l"));
+    }
+
+    #[test]
+    fn cleanup_attempts_leave_screen_after_disabling_capture_fails() {
+        let mut writer = FailWrite {
+            fail_at: [1, 0],
+            ..FailWrite::default()
+        };
+        let error = restore_terminal(&mut writer).unwrap_err();
+        assert_eq!(error.to_string(), "injected write failure 1");
+        assert!(String::from_utf8(writer.bytes).unwrap().contains("?1049l"));
     }
 }

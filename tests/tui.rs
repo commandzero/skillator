@@ -3,10 +3,321 @@ use ratatui::style::{Color, Modifier};
 use ratatui::{Terminal, backend::TestBackend};
 use skillator::domain::MaterializationKind;
 use skillator::tui::input::action_for_key;
+use skillator::tui::interaction::InteractionMap;
 use skillator::tui::model::{Action, CheckState, Effect, Model, Overlay, Row, Workspace};
 use skillator::tui::reducer::reduce;
 use skillator::tui::render::render;
 
+#[test]
+fn rendered_checkbox_and_row_body_address_the_visible_row() {
+    let rows = vec![
+        Row::source("source", CheckState::Mixed),
+        Row::skill(
+            "source",
+            "skill",
+            "Description",
+            false,
+            true,
+            MaterializationKind::Linked,
+            "Missing",
+        ),
+    ];
+    let mut model = Model::new(Workspace::Target, rows);
+    let backend = TestBackend::new(100, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+
+    let toggle = interactions
+        .action_at(2, 5)
+        .expect("visible checkbox target");
+    reduce(&mut model, toggle);
+    assert_eq!(model.selected_row().unwrap().name(), "skill");
+    assert_eq!(model.rows()[1].check(), Some(CheckState::Checked));
+
+    let select = interactions
+        .action_at(20, 5)
+        .expect("visible row body target");
+    reduce(&mut model, select);
+    assert_eq!(model.selected_row().unwrap().name(), "skill");
+    assert_eq!(model.rows()[1].check(), Some(CheckState::Checked));
+}
+fn rendered_row(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<u16> {
+    (0..buffer.area.height).find(|&y| {
+        let line: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect();
+        line.contains(text)
+    })
+}
+
+fn rendered_checkbox_x(buffer: &ratatui::buffer::Buffer, y: u16) -> u16 {
+    (0..buffer.area.width.saturating_sub(2))
+        .find(|&x| {
+            buffer[(x, y)].symbol() == "["
+                && buffer[(x + 1, y)].symbol() == " "
+                && buffer[(x + 2, y)].symbol() == "]"
+        })
+        .expect("rendered checkbox")
+}
+
+#[test]
+fn source_disclosure_glyph_is_a_collapse_target() {
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![
+            Row::source("source", CheckState::Mixed),
+            Row::skill(
+                "source",
+                "skill",
+                "Description",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "",
+            ),
+        ],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let source_y = rendered_row(buffer, "source").expect("rendered Source row");
+    let arrow_x = (0..buffer.area.width)
+        .find(|&x| matches!(buffer[(x, source_y)].symbol(), "▾" | "▸"))
+        .expect("rendered Source disclosure glyph");
+    reduce(
+        &mut model,
+        interactions
+            .action_at(arrow_x, source_y)
+            .expect("Source disclosure glyph hit target"),
+    );
+    assert!(model.is_collapsed("source"));
+}
+
+#[test]
+fn checkbox_hit_testing_tracks_keyboard_scrolled_filtered_rows() {
+    let mut rows = Vec::new();
+    for index in 0..24 {
+        let name = format!("skill-{index:02}");
+        rows.push(Row::skill(
+            "source",
+            name.clone(),
+            name,
+            false,
+            true,
+            MaterializationKind::Linked,
+            "",
+        ));
+    }
+    let mut model = Model::new(Workspace::Target, rows);
+    for _ in 0..18 {
+        reduce(&mut model, Action::MoveDown);
+    }
+    let backend = TestBackend::new(100, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let y = rendered_row(buffer, "skill-18").expect("scrolled selected skill is shown");
+    let x = rendered_checkbox_x(buffer, y);
+    for checkbox_cell in x..=x + 2 {
+        assert!(
+            interactions.action_at(checkbox_cell, y).is_some(),
+            "checkbox glyph cell at x={checkbox_cell} has a hit target"
+        );
+    }
+    let click = interactions.action_at(x, y).expect("checkbox hit target");
+    reduce(&mut model, click);
+    assert_eq!(model.rows()[18].check(), Some(CheckState::Checked));
+    assert!(
+        model.rows()[..18]
+            .iter()
+            .all(|row| row.check() == Some(CheckState::Unchecked))
+    );
+}
+
+#[test]
+fn filtered_checkbox_respects_stored_collapse_after_filter_clears() {
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![
+            Row::source("source", CheckState::Mixed),
+            Row::skill(
+                "source",
+                "needle",
+                "Needle",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "",
+            ),
+            Row::skill(
+                "source",
+                "other",
+                "Other",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "",
+            ),
+        ],
+    );
+    reduce(&mut model, Action::Collapse);
+    reduce(&mut model, Action::StartFilter);
+    reduce(&mut model, Action::Input('n'));
+    reduce(&mut model, Action::Input('e'));
+    reduce(&mut model, Action::Input('e'));
+    reduce(&mut model, Action::Input('d'));
+    reduce(&mut model, Action::Input('l'));
+    reduce(&mut model, Action::Input('e'));
+    reduce(&mut model, Action::Confirm);
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let y = rendered_row(buffer, "needle").expect("matching collapsed child is visible");
+    let x = rendered_checkbox_x(buffer, y);
+    reduce(
+        &mut model,
+        interactions
+            .action_at(x, y)
+            .expect("filtered checkbox target"),
+    );
+    assert_eq!(model.rows()[1].check(), Some(CheckState::Checked));
+    assert_eq!(model.rows()[2].check(), Some(CheckState::Unchecked));
+
+    reduce(&mut model, Action::Escape);
+    assert!(model.is_collapsed("source"));
+}
+
+#[test]
+fn table_headers_status_empty_space_and_borders_are_not_row_actions() {
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![Row::skill(
+            "source",
+            "skill",
+            "Skill",
+            false,
+            true,
+            MaterializationKind::Linked,
+            "",
+        )],
+    );
+    let initial = model.selected_row().unwrap().name().to_owned();
+    let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    for (x, y) in [(2, 2), (95, 7), (0, 0)] {
+        if let Some(action) = interactions.action_at(x, y) {
+            reduce(&mut model, action);
+        }
+    }
+    assert_eq!(model.selected_row().unwrap().name(), initial);
+    assert_eq!(model.rows()[0].check(), Some(CheckState::Unchecked));
+}
+
+#[test]
+fn resized_frame_replaces_old_hit_targets() {
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![Row::skill(
+            "source",
+            "skill",
+            "Skill",
+            false,
+            true,
+            MaterializationKind::Linked,
+            "",
+        )],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    terminal
+        .resize(ratatui::layout::Rect::new(0, 0, 1, 1))
+        .unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let stale = interactions.action_at(2, 5);
+    if let Some(action) = stale {
+        reduce(&mut model, action);
+    }
+    assert_eq!(model.rows()[0].check(), Some(CheckState::Unchecked));
+}
+
+#[test]
+fn refreshed_row_insertion_rebuilds_checkbox_targets() {
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![Row::skill(
+            "source",
+            "beta",
+            "Beta",
+            false,
+            true,
+            MaterializationKind::Linked,
+            "",
+        )],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    model = Model::new(
+        Workspace::Target,
+        vec![
+            Row::skill(
+                "source",
+                "alpha",
+                "Alpha",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "",
+            ),
+            Row::skill(
+                "source",
+                "beta",
+                "Beta",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "",
+            ),
+        ],
+    );
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let y = rendered_row(buffer, "alpha").expect("refreshed row is rendered");
+    let x = rendered_checkbox_x(buffer, y);
+    reduce(
+        &mut model,
+        interactions
+            .action_at(x, y)
+            .expect("refreshed checkbox target"),
+    );
+    assert_eq!(model.rows()[0].check(), Some(CheckState::Checked));
+    assert_eq!(model.rows()[1].check(), Some(CheckState::Unchecked));
+}
 #[test]
 fn source_bulk_toggle_includes_filtered_and_collapsed_children() {
     let rows = vec![
@@ -153,7 +464,9 @@ fn representative_target_table_renders_columns_and_tree_context() {
     );
     let backend = TestBackend::new(90, 14);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let screen = terminal
         .backend()
         .buffer()
@@ -187,7 +500,9 @@ fn temporary_messages_use_the_final_status_line() {
     );
     let backend = TestBackend::new(100, 14);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let lines = terminal
         .backend()
         .buffer()
@@ -226,7 +541,9 @@ fn notice_messages_use_the_final_status_line_without_a_modal() {
 
     let backend = TestBackend::new(100, 14);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let lines = terminal
         .backend()
         .buffer()
@@ -259,7 +576,9 @@ fn skill_row_color_is_driven_by_pending_action_not_description_prose() {
     let backend = TestBackend::new(120, 14);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let skill_y = (0..terminal.backend().buffer().area.height)
         .find(|y| {
             (0..terminal.backend().buffer().area.width)
@@ -277,7 +596,9 @@ fn skill_row_color_is_driven_by_pending_action_not_description_prose() {
     reduce(&mut model, Action::MoveDown);
     reduce(&mut model, Action::Toggle);
     reduce(&mut model, Action::MoveUp);
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     assert!(
         (0..terminal.backend().buffer().area.width)
             .any(|x| terminal.backend().buffer()[(x, skill_y)].fg == Color::Indexed(196)),
@@ -304,7 +625,9 @@ fn rendered_palette_preserves_semantics_and_structure() {
     );
     let backend = TestBackend::new(120, 14);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let cells = terminal.backend().buffer().content();
 
     assert!(
@@ -329,7 +652,9 @@ fn rendered_palette_preserves_semantics_and_structure() {
     );
 
     reduce(&mut model, Action::Help);
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     assert!(
         terminal
             .backend()
@@ -358,7 +683,9 @@ fn inherited_user_skill_renders_as_read_only_user_enablement() {
     reduce(&mut model, Action::MoveDown);
     let backend = TestBackend::new(90, 14);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let screen = terminal
         .backend()
         .buffer()
@@ -440,7 +767,9 @@ fn editor_modal_renders_a_visible_input_cursor() {
     let backend = TestBackend::new(80, 16);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
 
     assert!(
         terminal
@@ -482,7 +811,9 @@ fn target_footer_keeps_modes_and_navigation_in_help() {
     );
     let backend = TestBackend::new(140, 14);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let screen = terminal
         .backend()
         .buffer()
@@ -508,7 +839,9 @@ fn help_scrolls_to_the_full_mode_reference_and_q_closes_it() {
 
     let backend = TestBackend::new(100, 12);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let screen = terminal
         .backend()
         .buffer()
@@ -530,7 +863,9 @@ fn library_keeps_the_default_location_in_the_table_until_edit_is_requested() {
     let mut model = Model::new(Workspace::Library, vec![Row::location("./library")]);
     let backend = TestBackend::new(140, 14);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let screen = terminal
         .backend()
         .buffer()
@@ -544,7 +879,9 @@ fn library_keeps_the_default_location_in_the_table_until_edit_is_requested() {
     assert!(screen.contains("a/e/d location"));
 
     reduce(&mut model, Action::EditDirectory);
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let editor = terminal
         .backend()
         .buffer()
@@ -575,7 +912,9 @@ fn confirmation_uses_a_descriptive_title_and_bottom_border_controls() {
 
     let backend = TestBackend::new(100, 14);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let lines = terminal
         .backend()
         .buffer()
@@ -663,7 +1002,9 @@ fn pending_filter_keeps_group_context_and_hides_no_op_skills() {
 
     let backend = TestBackend::new(100, 14);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let screen = terminal
         .backend()
         .buffer()

@@ -3,20 +3,174 @@
 mod support;
 
 use assert_cmd::Command;
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use predicates::prelude::*;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use skillator::app::TargetWorkflow;
 use skillator::app::{AppPaths, CommandReport, ReportStatus, SyncMode, SyncWorkflow};
 use skillator::cli::{ColorPolicy, render_text, render_yaml};
 use skillator::config::{
     LibraryConfig, LibraryConfigCodec, LoadResult, RepositoryConfig, RepositoryConfigCodec,
 };
 use skillator::domain::MaterializationKind;
+use skillator::domain::{SkillKey, SkillPath, SourceKey};
 use skillator::library::{LibrarySnapshot, SkillValidity, scan_library};
 use skillator::reconcile::{Authorization, Outcome, Safety, execute, plan, prepare_check};
 use skillator::target::{Comparison, MaterializationState, ObservedState, Target, observe};
+use skillator::tui::input::action_for_mouse;
+use skillator::tui::interaction::InteractionMap;
 use skillator::tui::model::{Action as TuiAction, CheckState, Model, Overlay, Row, Workspace};
 use skillator::tui::reducer::reduce;
+use skillator::tui::render::render;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+#[test]
+fn wayfinder_21_mouse_staging_waits_for_explicit_save_and_preserves_other_scope() {
+    let home = support::TestHome::new();
+    let library = home.path().join("catalog");
+    let release = library.join("release-checklist");
+    write_skill(&release, "release-checklist", "Prepare releases");
+    let preserved = library.join("user-preserved");
+    write_skill(&preserved, "user-preserved", "Keep this user skill");
+
+    let paths = AppPaths::new(home.path().to_owned());
+    let library_yaml = format!(
+        "version: 1\nlocations:\n  - path: {}\n    exclusions: []\n    allow_overlap: false\n    sources:\n      - key: local/catalog\n        path: .\n        skills:\n          - path: release-checklist\n          - path: user-preserved\n",
+        serde_json::to_string(library.to_str().unwrap()).unwrap(),
+    );
+    std::fs::create_dir_all(paths.library_config().parent().unwrap()).unwrap();
+    std::fs::write(paths.library_config(), library_yaml).unwrap();
+
+    let user_yaml = b"version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements:\n  - directory: agents\n    skill:\n      source: local/catalog\n      path: user-preserved\n    materialization: linked\n";
+    std::fs::create_dir_all(paths.user_config().parent().unwrap()).unwrap();
+    std::fs::write(paths.user_config(), user_yaml).unwrap();
+    let user_materialization = home.path().join(".agents/skills/user-preserved");
+    std::fs::create_dir_all(user_materialization.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(preserved.canonicalize().unwrap(), &user_materialization).unwrap();
+
+    let target_path = home.git_repo("target");
+    let gitignore_path = target_path.join(".agents/.gitignore");
+    let repository_path = target_path.join(".agents/skillator.yaml");
+    let repository_yaml = b"version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements:\n  - directory: agents\n    skill:\n      source: local/catalog\n      path: release-checklist\n    materialization: linked\n";
+    let repository_materialization = target_path.join(".agents/skills/release-checklist");
+    std::fs::create_dir_all(repository_materialization.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(release.canonicalize().unwrap(), &repository_materialization)
+        .unwrap();
+    std::fs::write(&repository_path, repository_yaml).unwrap();
+    let initial = TargetWorkflow::load(&target_path).unwrap();
+    let prepared = TargetWorkflow::prepare_save(&paths, &initial, initial.config.clone()).unwrap();
+    let initialized = TargetWorkflow::commit_save(prepared, Authorization::SafeOnly).unwrap();
+    assert_eq!(initialized.exit_status, 0, "{initialized:?}");
+
+    let library_before = std::fs::read(paths.library_config()).unwrap();
+    let repository_before = std::fs::read(&repository_path).unwrap();
+    let gitignore_before = std::fs::read(&gitignore_path).unwrap();
+    let user_before = std::fs::read(paths.user_config()).unwrap();
+    let repository_link_before = std::fs::read_link(&repository_materialization).unwrap();
+    let user_link_before = std::fs::read_link(&user_materialization).unwrap();
+
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![Row::skill(
+            "local/catalog",
+            "release-checklist",
+            "Prepare releases",
+            true,
+            true,
+            MaterializationKind::Linked,
+            "Enabled",
+        )],
+    );
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let skill_row = (0..buffer.area.height)
+        .find(|&y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("release-checklist")
+        })
+        .expect("rendered skill row");
+    let checkbox_column = (0..100)
+        .find(|&x| buffer[(x, skill_row)].symbol() == "[")
+        .expect("rendered checkbox");
+    let action = action_for_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: checkbox_column,
+            row: skill_row,
+            modifiers: KeyModifiers::NONE,
+        },
+        &interactions,
+    )
+    .expect("mouse click on rendered checkbox");
+    reduce(&mut model, action);
+    reduce(&mut model, TuiAction::MoveDown);
+    assert_eq!(model.rows()[0].check(), Some(CheckState::Unchecked));
+    assert!(model.dirty());
+    assert_eq!(
+        std::fs::read(paths.library_config()).unwrap(),
+        library_before
+    );
+    assert_eq!(std::fs::read(&repository_path).unwrap(), repository_before);
+    assert_eq!(std::fs::read(paths.user_config()).unwrap(), user_before);
+    assert_eq!(
+        std::fs::read_link(&repository_materialization).unwrap(),
+        repository_link_before
+    );
+    assert_eq!(
+        std::fs::read_link(&user_materialization).unwrap(),
+        user_link_before
+    );
+    assert_eq!(std::fs::read(&gitignore_path).unwrap(), gitignore_before);
+
+    let session = TargetWorkflow::load(&target_path).unwrap();
+    let key = SkillKey::new(
+        SourceKey::parse("local/catalog").unwrap(),
+        SkillPath::parse("release-checklist").unwrap(),
+    );
+    let mut enablements = session.config.enablements().to_vec();
+    enablements.retain(|enablement| enablement.skill() != &key);
+    let staged = session.config.with_enablements(enablements).unwrap();
+    let prepared = TargetWorkflow::prepare_save(&paths, &session, staged).unwrap();
+    let report = TargetWorkflow::commit_save(prepared, Authorization::SafeOnly).unwrap();
+    assert_eq!(
+        report.exit_status,
+        0,
+        "{}",
+        serde_json::to_string(&report).unwrap()
+    );
+    let LoadResult::Valid(saved) =
+        RepositoryConfigCodec::parse(&std::fs::read(&repository_path).unwrap())
+    else {
+        panic!("saved repository configuration remains valid");
+    };
+    assert!(
+        !saved
+            .value()
+            .enablements()
+            .iter()
+            .any(|enablement| enablement.skill() == &key)
+    );
+    assert_eq!(
+        std::fs::read(paths.library_config()).unwrap(),
+        library_before
+    );
+    assert_eq!(std::fs::read(paths.user_config()).unwrap(), user_before);
+    assert!(!repository_materialization.exists());
+    assert_eq!(
+        std::fs::read_link(&user_materialization).unwrap(),
+        user_link_before
+    );
+    assert_eq!(std::fs::read(&gitignore_path).unwrap(), gitignore_before);
+}
 
 struct AcceptanceFixture {
     home: support::TestHome,

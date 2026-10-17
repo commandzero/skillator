@@ -1,12 +1,14 @@
 //! Shared terminal rendering, palettes and read-only inspectors.
 
 use super::input::chooser_matches;
+use super::interaction::InteractionMap;
 use super::model::{
-    CheckState, Model, Overlay, Row, RowKind, Scope, TargetTabScope, Workspace, row_identity,
+    Action, CheckState, Model, Overlay, Row, RowAction, RowKind, Scope, TargetTabScope, Workspace,
+    row_identity,
 };
 use crate::domain::MaterializationKind;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span, Text};
@@ -250,7 +252,8 @@ fn footer_help(model: &Model) -> Line<'static> {
     Line::from(spans)
 }
 
-pub fn render(frame: &mut Frame<'_>, model: &Model) {
+pub fn render(frame: &mut Frame<'_>, model: &Model, interactions: &mut InteractionMap) {
+    interactions.reset(frame.area());
     let areas = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -277,6 +280,15 @@ pub fn render(frame: &mut Frame<'_>, model: &Model) {
         if header_width + width > available {
             break;
         }
+        interactions.add(
+            Rect::new(
+                areas[0].x.saturating_add(header_width as u16),
+                areas[0].y,
+                width as u16,
+                1,
+            ),
+            Action::SelectScope(candidate),
+        );
         labels.push(Span::styled(
             label,
             if candidate == scope {
@@ -302,7 +314,12 @@ pub fn render(frame: &mut Frame<'_>, model: &Model) {
     }
     frame.render_widget(Paragraph::new(Line::from(labels)), areas[0]);
     frame.render_widget(
-        Paragraph::new(target_tabs_for_width(model, areas[1].width)),
+        Paragraph::new(target_tabs_for_width(
+            model,
+            areas[1].width,
+            areas[1],
+            interactions,
+        )),
         areas[1],
     );
     let header = match model.workspace {
@@ -362,22 +379,102 @@ pub fn render(frame: &mut Frame<'_>, model: &Model) {
     let border_color = model.scope.color();
     let mut table_state = TableState::default();
     table_state.select(visible.iter().position(|index| *index == model.selected));
+    let table_area = areas[2];
+    let inner = Rect::new(
+        table_area.x.saturating_add(1),
+        table_area.y.saturating_add(1),
+        table_area.width.saturating_sub(2),
+        table_area.height.saturating_sub(2),
+    );
+    // The table has no highlight symbol, so its first column starts at the
+    // inner left edge even when a row is selected.
+    let columns = Layout::horizontal(widths)
+        .flex(Flex::Start)
+        .spacing(1)
+        .split(Rect::new(0, 0, inner.width, 1));
+    let resolved_widths: Vec<_> = columns
+        .iter()
+        .map(|column| Constraint::Length(column.width))
+        .collect();
     frame.render_stateful_widget(
-        Table::new(rows, widths).header(header).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_set(TAB_TOP_BORDER)
-                .border_style(Style::default().fg(border_color))
-                .title_bottom(key_help),
-        ),
-        areas[2],
+        Table::new(rows, resolved_widths)
+            .column_spacing(1)
+            .flex(Flex::Start)
+            .header(header)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(TAB_TOP_BORDER)
+                    .border_style(Style::default().fg(border_color))
+                    .title_bottom(key_help),
+            ),
+        table_area,
         &mut table_state,
     );
+    let offset = table_state.offset();
+    let body_y = inner.y.saturating_add(1);
+    let body_height = inner.height.saturating_sub(1);
+    interactions.add_scroll(
+        Rect::new(inner.x, body_y, inner.width, body_height),
+        Action::MoveUp,
+        Action::MoveDown,
+    );
+    for (screen_row, visible_pos) in (offset..visible.len())
+        .take(usize::from(body_height))
+        .enumerate()
+    {
+        let row_index = visible[visible_pos];
+        let y = body_y.saturating_add(screen_row as u16);
+        interactions.add(
+            Rect::new(inner.x, y, inner.width, 1),
+            Action::ActivateRow {
+                index: row_index,
+                intent: RowAction::Select,
+            },
+        );
+        let row = &model.rows[row_index];
+        let column_x = |column: usize| inner.x.saturating_add(columns[column].x);
+        if row.kind != RowKind::Location && row.check.is_some() {
+            interactions.add(
+                Rect::new(column_x(0), y, columns[0].width.min(3), 1),
+                Action::ActivateRow {
+                    index: row_index,
+                    intent: RowAction::Toggle,
+                },
+            );
+        }
+        if row.kind == RowKind::Skill {
+            interactions.add(
+                Rect::new(column_x(1), y, columns[1].width, 1),
+                Action::ActivateRow {
+                    index: row_index,
+                    intent: RowAction::SwitchMode,
+                },
+            );
+        }
+        if row.kind == RowKind::Source {
+            interactions.add(
+                Rect::new(column_x(2), y, columns[2].width.min(1), 1),
+                Action::ActivateRow {
+                    index: row_index,
+                    intent: RowAction::ToggleDisclosure,
+                },
+            );
+        }
+    }
     frame.render_widget(Paragraph::new(status_line(model, areas[3].width)), areas[3]);
-    render_overlay(frame, model);
+    if !matches!(&model.overlay, Overlay::None | Overlay::Notice(_)) {
+        interactions.clear_targets();
+    }
+    render_overlay(frame, model, interactions);
 }
 
-fn target_tabs_for_width(model: &Model, width: u16) -> Line<'static> {
+fn target_tabs_for_width(
+    model: &Model,
+    width: u16,
+    area: Rect,
+    interactions: &mut InteractionMap,
+) -> Line<'static> {
     let (labels, active): (Vec<(usize, String)>, usize) = if model.scope == Scope::Library {
         (
             model.host_labels.iter().cloned().enumerate().collect(),
@@ -426,16 +523,41 @@ fn target_tabs_for_width(model: &Model, width: u16) -> Line<'static> {
     };
     let mut spans = vec![Span::raw(if first == 0 { " " } else { "‹ " })];
     let mut used = if first == 0 { 1 } else { 2 };
-    for (position, (index, label)) in labels.into_iter().enumerate().skip(first) {
+    if first > 0 {
+        let action = if model.scope == Scope::Library {
+            Action::SelectHost(labels[first - 1].0)
+        } else {
+            Action::SelectDirectory(labels[first - 1].0)
+        };
+        interactions.add(Rect::new(area.x, area.y, 1, 1), action);
+    }
+    for (position, (index, label)) in labels.iter().enumerate().skip(first) {
         let text = format!(" {label} ");
         let required = Line::from(text.as_str()).width() + 1;
         if position != first && used + required > available {
             if used < available {
                 spans.push(Span::styled("›", dim_style()));
+                let action = if model.scope == Scope::Library {
+                    Action::SelectHost(labels[position].0)
+                } else {
+                    Action::SelectDirectory(labels[position].0)
+                };
+                interactions.add(
+                    Rect::new(area.x.saturating_add(used as u16), area.y, 1, 1),
+                    action,
+                );
             }
             break;
         }
-        let style = if index == active {
+        let x = area.x.saturating_add(used as u16);
+        let label_width = Line::from(text.as_str()).width() as u16;
+        let action = if model.scope == Scope::Library {
+            Action::SelectHost(*index)
+        } else {
+            Action::SelectDirectory(*index)
+        };
+        interactions.add(Rect::new(x, area.y, label_width, 1), action);
+        let style = if *index == active {
             Style::default()
                 .fg(Color::Black)
                 .bg(model.scope.color())
@@ -554,7 +676,11 @@ fn status_line(model: &Model, width: u16) -> Line<'static> {
     ))
 }
 
-pub(super) fn render_overlay(frame: &mut Frame<'_>, model: &Model) {
+pub(super) fn render_overlay(
+    frame: &mut Frame<'_>,
+    model: &Model,
+    _interactions: &mut InteractionMap,
+) {
     let (title, body, footer, confirmation) = match &model.overlay {
         Overlay::None => return,
         Overlay::Welcome => (

@@ -1,5 +1,6 @@
 //! Behavior coverage for scope workflows and shared interaction.
 use super::input::*;
+use super::interaction::InteractionMap;
 use super::library::*;
 use super::model::*;
 use super::reducer::*;
@@ -315,7 +316,7 @@ fn occupied_ignore_path_review_explains_replacement_and_preserves_the_folder() {
     let backend = ratatui::backend::TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
-        .draw(|frame| render_overlay(frame, &model))
+        .draw(|frame| render_overlay(frame, &model, &mut InteractionMap::default()))
         .unwrap();
     let buffer = terminal.backend().buffer();
     let screen = (0..24)
@@ -428,7 +429,9 @@ fn scope_paths_appear_in_status_not_header() {
     let backend = ratatui::backend::TestBackend::new(100, 12);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let repository_screen = terminal
         .backend()
         .buffer()
@@ -440,7 +443,9 @@ fn scope_paths_appear_in_status_not_header() {
 
     model.scope = Scope::User;
     activate_target_tab(&mut model, &tabs, &BTreeSet::new(), 0);
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let user_screen = terminal
         .backend()
         .buffer()
@@ -789,7 +794,9 @@ fn skill_details_document_end_remains_reachable_with_warnings() {
     };
     let backend = ratatui::backend::TestBackend::new(100, 24);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let screen = terminal
         .backend()
         .buffer()
@@ -801,7 +808,9 @@ fn skill_details_document_end_remains_reachable_with_warnings() {
 
     reduce(&mut model, Action::PageDown);
     reduce(&mut model, Action::PageDown);
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
     let screen = terminal
         .backend()
         .buffer()
@@ -1121,7 +1130,9 @@ fn repository_skill_renders_with_r_marker_and_repo_mode() {
     let backend = ratatui::backend::TestBackend::new(90, 12);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+        .unwrap();
 
     let screen = terminal
         .backend()
@@ -2258,4 +2269,52 @@ fn colliding_sources_cannot_activate_new_skills_and_keep_saved_choices_visible()
     assert!(!saved.available);
     assert!(observed.enablements().next().unwrap().unresolved());
     assert!(!paths.user_config().exists());
+}
+
+#[test]
+fn directory_overflow_tracks_scoped_indices_and_unicode_cells() {
+    let mut model = Model::new(Workspace::Target, vec![]);
+    model.scope = Scope::Repo;
+    model.directory_labels = vec![
+        "User".to_owned(),
+        "界e\u{301}".to_owned(),
+        "repo-two".to_owned(),
+        "Other User".to_owned(),
+        "repo-three".to_owned(),
+    ];
+    model.directory_scopes = vec![
+        TargetTabScope::User,
+        TargetTabScope::Repository,
+        TargetTabScope::Repository,
+        TargetTabScope::User,
+        TargetTabScope::Repository,
+    ];
+    model.directory_index = 2;
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(24, 10)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let arrow_x = (0..buffer.area.width)
+        .find(|&x| buffer[(x, 1)].symbol() == "›")
+        .expect("visible overflow arrow");
+    assert_eq!(
+        interactions.action_at(arrow_x, 1),
+        Some(Action::SelectDirectory(4))
+    );
+
+    model.directory_index = 1;
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let unicode_x = (0..buffer.area.width)
+        .find(|&x| buffer[(x, 1)].symbol() == "界")
+        .expect("wide Unicode label is rendered");
+    assert_eq!(
+        interactions.action_at(unicode_x, 1),
+        Some(Action::SelectDirectory(1))
+    );
 }

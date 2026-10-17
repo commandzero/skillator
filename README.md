@@ -173,6 +173,14 @@ git rm --cached -- .agents/skillator.yaml
 | `?` | Show all shortcuts |
 | `q` | Quit |
 
+## Mouse
+
+Mouse support is enabled in interactive sessions. Click a row body to select it; click its checkbox to toggle it, a Skill Mode cell to cycle its mode, or a Source disclosure glyph to expand or collapse it. Click scope, directory, and Library host tabs to select them directly; visible sub-tab arrows move one tab. Click individually labeled workspace commands, including Details, to run their existing actions. Modal buttons perform their labeled choice; chooser suggestions select only, so click Stage to apply one. Editors use Apply/Cancel (and Complete where supported); Filter has Apply/Clear. Click an input to keep typing with the keyboard; clicks do not position a text cursor or submit text.
+
+Over the table, the vertical wheel moves selection one visible row without toggling it. In a directory chooser it moves one suggestion; over scrollable Help, Details, diagnostics, or follower results it scrolls one line. Scrolling stops at content bounds; other surfaces ignore it. Only an unmodified left press activates controls. Right or modified clicks, dragging, double-clicking, and horizontal wheel input have no special application action. Clicking outside a modal neither dismisses it nor reaches the workspace behind it.
+
+Mouse capture may intercept terminal-native text selection. The bypass gesture depends on the terminal emulator; modified clicks are ignored by Skillator. Keyboard navigation, editing, and save safeguards remain available.
+
 ## Development
 
 ```sh
