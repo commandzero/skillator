@@ -242,35 +242,67 @@ fn table_headers_status_empty_space_and_borders_are_not_row_actions() {
 }
 
 #[test]
-fn resized_frame_replaces_old_hit_targets() {
-    let mut model = Model::new(
-        Workspace::Target,
-        vec![Row::skill(
-            "source",
-            "skill",
-            "Skill",
-            false,
-            true,
-            MaterializationKind::Linked,
-            "",
-        )],
-    );
+fn resize_to_zero_rendered_columns_leaves_blank_row_space_inert() {
+    let rows = ["first", "second"]
+        .into_iter()
+        .map(|name| {
+            Row::skill(
+                "source",
+                name,
+                "",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "",
+            )
+        })
+        .collect();
+    let mut model = Model::new(Workspace::Target, rows);
     let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
     let mut interactions = InteractionMap::default();
     terminal
         .draw(|frame| render(frame, &model, &mut interactions))
         .unwrap();
+    let (_, second_y) = rendered_text_location(terminal.backend().buffer(), "second");
+    terminal.backend_mut().resize(3, 14);
     terminal
-        .resize(ratatui::layout::Rect::new(0, 0, 1, 1))
+        .resize(ratatui::layout::Rect::new(0, 0, 3, 14))
         .unwrap();
     terminal
         .draw(|frame| render(frame, &model, &mut interactions))
         .unwrap();
-    let stale = interactions.action_at(2, 5);
-    if let Some(action) = stale {
-        reduce(&mut model, action);
-    }
-    assert_eq!(model.rows()[0].check(), Some(CheckState::Unchecked));
+    assert_eq!(terminal.backend().buffer()[(1, second_y)].symbol(), " ");
+    assert_eq!(
+        action_for_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, second_y),
+            &interactions,
+        ),
+        None
+    );
+    assert_eq!(model.selected_row().unwrap().name(), "first");
+
+    terminal.backend_mut().resize(100, 14);
+    terminal
+        .resize(ratatui::layout::Rect::new(0, 0, 100, 14))
+        .unwrap();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let (x, y) = rendered_text_location(terminal.backend().buffer(), "second");
+    let select = action_for_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), x, y),
+        &interactions,
+    )
+    .expect("rendered row body becomes selectable after widening");
+    reduce(&mut model, select);
+    assert_eq!(model.selected_row().unwrap().name(), "second");
+    assert!(
+        model
+            .rows()
+            .iter()
+            .filter_map(|row| row.check())
+            .all(|check| check == CheckState::Unchecked)
+    );
 }
 
 fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {

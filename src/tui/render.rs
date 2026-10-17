@@ -423,6 +423,14 @@ pub fn render(frame: &mut Frame<'_>, model: &Model, interactions: &mut Interacti
         .flex(Flex::Start)
         .spacing(1)
         .split(Rect::new(0, 0, inner.width, 1));
+    let row_start = columns
+        .iter()
+        .find(|column| column.width > 0)
+        .map_or(0, |column| column.x);
+    let row_end = columns
+        .iter()
+        .rfind(|column| column.width > 0)
+        .map_or(0, |column| column.right());
     let resolved_widths: Vec<_> = columns
         .iter()
         .map(|column| Constraint::Length(column.width))
@@ -457,7 +465,12 @@ pub fn render(frame: &mut Frame<'_>, model: &Model, interactions: &mut Interacti
         let row_index = visible[visible_pos];
         let y = body_y.saturating_add(screen_row as u16);
         interactions.add(
-            Rect::new(inner.x, y, inner.width, 1),
+            Rect::new(
+                inner.x.saturating_add(row_start),
+                y,
+                row_end.saturating_sub(row_start),
+                1,
+            ),
             Action::ActivateRow {
                 index: row_index,
                 intent: RowAction::Select,
