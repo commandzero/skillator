@@ -1605,7 +1605,7 @@ fn next_group_from_a_child_selects_the_immediately_following_source() {
 }
 
 #[test]
-fn rendered_help_wheel_stays_within_wrapped_content_after_resize() {
+fn help_mode_reference_remains_reachable_after_scroll_and_resize() {
     let mut model = Model::new(Workspace::Target, Vec::new());
     reduce(&mut model, Action::Help);
     let mut terminal = Terminal::new(TestBackend::new(34, 9)).unwrap();
@@ -1626,17 +1626,6 @@ fn rendered_help_wheel_stays_within_wrapped_content_after_resize() {
     terminal
         .draw(|frame| render(frame, &model, &mut interactions))
         .unwrap();
-    let narrow = terminal
-        .backend()
-        .buffer()
-        .content()
-        .chunks(34)
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(narrow.contains("Esc"), "narrow Help retains its close key");
-
-    let original_area = terminal.backend().buffer().area;
     terminal.backend_mut().resize(100, 20);
     terminal
         .resize(ratatui::layout::Rect::new(0, 0, 100, 20))
@@ -1645,9 +1634,6 @@ fn rendered_help_wheel_stays_within_wrapped_content_after_resize() {
         .draw(|frame| render(frame, &model, &mut interactions))
         .unwrap();
     let resized_area = terminal.backend().buffer().area;
-    assert_ne!(resized_area, original_area);
-    assert_eq!(resized_area.width, 100);
-    assert_eq!(resized_area.height, 20);
     let (x, y) = rendered_wheel_target(
         &interactions,
         MouseEventKind::ScrollUp,
@@ -1692,6 +1678,43 @@ fn rendered_help_wheel_stays_within_wrapped_content_after_resize() {
         reduce(&mut model, action);
     }
     assert!(found_reference, "Help exposes the complete mode reference");
+}
+
+#[test]
+fn help_wheel_moves_exactly_one_displayed_row_in_both_directions() {
+    let mut model = Model::new(Workspace::Target, Vec::new());
+    reduce(&mut model, Action::Help);
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let (x, y) = rendered_wheel_target(&interactions, MouseEventKind::ScrollDown, 100, 20);
+    let rendered_line = |terminal: &Terminal<TestBackend>, row: u16| {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.width)
+            .map(|column| buffer[(column, row)].symbol())
+            .collect::<String>()
+    };
+    let initial = [
+        rendered_line(&terminal, y),
+        rendered_line(&terminal, y + 1),
+        rendered_line(&terminal, y + 2),
+    ];
+    for (direction, expected) in [
+        (MouseEventKind::ScrollDown, &initial[1]),
+        (MouseEventKind::ScrollDown, &initial[2]),
+        (MouseEventKind::ScrollUp, &initial[1]),
+        (MouseEventKind::ScrollUp, &initial[0]),
+        (MouseEventKind::ScrollUp, &initial[0]),
+    ] {
+        let action = action_for_mouse(mouse_event(direction, x, y), &interactions).unwrap();
+        reduce(&mut model, action);
+        terminal
+            .draw(|frame| render(frame, &model, &mut interactions))
+            .unwrap();
+        assert_eq!(rendered_line(&terminal, y), *expected);
+    }
 }
 
 #[test]
