@@ -425,6 +425,27 @@ fn workspace_save_commands_keep_distinct_preparation_semantics() {
 }
 
 #[test]
+fn clipped_save_exit_label_remains_clickable_at_narrow_width() {
+    let mut model = Model::new(Workspace::Target, vec![]);
+    let mut terminal = Terminal::new(TestBackend::new(90, 32)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+
+    let (label_x, label_y) = rendered_text_location(terminal.backend().buffer(), "save & exit");
+    let action = action_for_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), label_x, label_y),
+        &interactions,
+    )
+    .expect("visible save & exit label");
+    assert_eq!(
+        reduce(&mut model, action),
+        [Effect::PrepareSave { fast: true }]
+    );
+}
+
+#[test]
 fn modal_outside_click_isolated_and_return_preserves_staged_work() {
     let mut model = Model::new(
         Workspace::Target,
@@ -529,6 +550,84 @@ fn chooser_suggestion_selects_before_stage_applies_its_path() {
         }]
     );
     assert_eq!(model.overlay(), &Overlay::None);
+}
+
+#[test]
+fn short_chooser_clicks_only_visible_suggestions_and_stages_selected_path() {
+    let mut model = Model::new(Workspace::Target, vec![]);
+    reduce(&mut model, Action::NewTargetTab);
+    reduce(&mut model, Action::MoveDown);
+    let mut terminal = Terminal::new(TestBackend::new(140, 11)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+
+    let (generic_x, generic_y) = rendered_text_location(terminal.backend().buffer(), "Generic");
+    let blank_y = generic_y - 1;
+    assert_eq!(
+        terminal.backend().buffer()[(generic_x, blank_y)].symbol(),
+        " "
+    );
+    assert_eq!(
+        action_for_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), generic_x, blank_y),
+            &interactions,
+        ),
+        None
+    );
+    assert!(matches!(
+        model.overlay(),
+        Overlay::DirectoryChooser { selected: 1, .. }
+    ));
+
+    let generic = action_for_mouse(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            generic_x,
+            generic_y,
+        ),
+        &interactions,
+    )
+    .expect("visible Generic suggestion");
+    reduce(&mut model, generic);
+    assert!(matches!(
+        model.overlay(),
+        Overlay::DirectoryChooser { selected: 0, .. }
+    ));
+
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let (stage_x, stage_y) = rendered_text_location(terminal.backend().buffer(), "stage");
+    let stage = action_for_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), stage_x, stage_y),
+        &interactions,
+    )
+    .expect("visible Stage command");
+    assert_eq!(
+        reduce(&mut model, stage),
+        [Effect::ApplyDirectoryEdit {
+            edit: false,
+            value: ".agents/skills".into(),
+        }]
+    );
+    assert!(matches!(model.overlay(), Overlay::None));
+}
+
+#[test]
+fn chooser_keeps_selected_suggestion_visible_at_short_height_boundaries() {
+    let mut model = Model::new(Workspace::Target, vec![]);
+    reduce(&mut model, Action::NewTargetTab);
+    reduce(&mut model, Action::MoveDown);
+
+    for height in [10, 7] {
+        let mut terminal = Terminal::new(TestBackend::new(140, height)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &model, &mut InteractionMap::default()))
+            .unwrap();
+        rendered_text_location(terminal.backend().buffer(), "Claude");
+    }
 }
 
 #[test]

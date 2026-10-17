@@ -214,17 +214,12 @@ fn controls_line(
     interactions: &mut InteractionMap,
 ) -> Line<'static> {
     let visible_width = usize::from(width.saturating_sub(1));
-    let controls_text: Vec<String> = controls
-        .iter()
-        .map(|control| format!("{} {}", control.key, control.label))
-        .collect();
-    let control_widths: Vec<usize> = controls_text
-        .iter()
-        .map(|text| Line::from(text.as_str()).width())
-        .collect();
-    let controls_width: usize = control_widths.iter().sum();
-    let wide_separator = Line::from(" · ").width();
-    let compact_separator = Line::from(" ").width();
+    let control_width = |control: &super::controls::Control| {
+        Span::raw(control.key).width() + 1 + Span::raw(control.label).width()
+    };
+    let controls_width: usize = controls.iter().map(&control_width).sum();
+    let wide_separator = Span::raw(" · ").width();
+    let compact_separator = Span::raw(" ").width();
     let wide_width =
         controls_width.saturating_add(controls.len().saturating_sub(1) * wide_separator);
     let separator = if wide_width <= visible_width {
@@ -242,34 +237,33 @@ fn controls_line(
     let clip = total_width.saturating_sub(visible_width);
     let padding = visible_width.saturating_sub(total_width);
     let mut cursor = 0usize;
-    let mut spans = Vec::new();
-    for (index, (control, text, cells)) in controls
-        .iter()
-        .zip(controls_text)
-        .zip(control_widths)
-        .map(|((control, text), cells)| (control, text, cells))
-        .enumerate()
-    {
+    let mut spans = Vec::with_capacity(controls.len().saturating_mul(4));
+    let control_style = Style::default().fg(BONE).add_modifier(Modifier::BOLD);
+    for (index, control) in controls.iter().enumerate() {
+        let cells = control_width(control);
         if index > 0 {
             spans.push(dim_span(separator));
             cursor += separator_width;
         }
         let end = cursor + cells;
-        if cursor >= clip && end <= clip.saturating_add(visible_width) && cells > 0 {
+        let visible_start = cursor.max(clip);
+        let visible_end = end.min(clip.saturating_add(visible_width));
+        if visible_start < visible_end && cells > 0 {
             interactions.add(
                 Rect::new(
-                    origin_x.saturating_add((padding + cursor.saturating_sub(clip)) as u16),
+                    origin_x.saturating_add(
+                        padding.saturating_add(visible_start.saturating_sub(clip)) as u16,
+                    ),
                     y,
-                    cells as u16,
+                    visible_end.saturating_sub(visible_start) as u16,
                     1,
                 ),
                 control.action.clone(),
             );
         }
-        spans.push(Span::styled(
-            text,
-            Style::default().fg(BONE).add_modifier(Modifier::BOLD),
-        ));
+        spans.push(Span::styled(control.key, control_style));
+        spans.push(Span::styled(" ", control_style));
+        spans.push(Span::styled(control.label, control_style));
         cursor = end;
     }
     spans.push(Span::raw(" "));
@@ -1586,27 +1580,27 @@ fn render_directory_chooser(
     let block = modal_controls_block("Choose skill directory", &model.overlay, area, interactions);
     let inner = block.inner(area);
     let mut scroll = 0usize;
-    if !matches.is_empty() && inner.height > 2 {
-        let list_height = inner.height.saturating_sub(2);
-        let start = selected
-            .saturating_sub(usize::from(list_height.saturating_sub(1)))
-            .min(matches.len().saturating_sub(usize::from(list_height)));
-        scroll = start;
-        let row_y = if start == 0 {
-            inner.y.saturating_add(2)
-        } else {
-            inner.y
-        };
-        let row_height = inner.height.saturating_sub(row_y.saturating_sub(inner.y));
+    if !matches.is_empty() && inner.height > 0 {
+        let height = usize::from(inner.height);
+        let selected_line = 2 + selected;
+        scroll = selected_line
+            .saturating_sub(height.saturating_sub(1))
+            .min(lines.len().saturating_sub(height));
+        let first_suggestion = scroll.saturating_sub(2);
+        let prefix_visible = 2usize.saturating_sub(scroll);
+        let row_y = inner.y.saturating_add(prefix_visible as u16);
+        let list_viewport_height = inner.height - prefix_visible as u16;
         interactions.add_scroll(
-            Rect::new(inner.x, row_y, inner.width, row_height),
+            Rect::new(inner.x, row_y, inner.width, list_viewport_height),
             Action::MoveUp,
             Action::MoveDown,
         );
-        for row in 0..usize::from(row_height).min(matches.len().saturating_sub(start)) {
+        let row_count =
+            usize::from(list_viewport_height).min(matches.len().saturating_sub(first_suggestion));
+        for row in 0..row_count {
             interactions.add(
                 Rect::new(inner.x, row_y.saturating_add(row as u16), inner.width, 1),
-                Action::SelectSuggestion(start + row),
+                Action::SelectSuggestion(first_suggestion + row),
             );
         }
     }
@@ -1679,7 +1673,6 @@ mod tests {
 
     #[test]
     fn library_controls_follow_drawn_layout_and_hit_targets() {
-        let controls_model = Model::new(Workspace::Library, Vec::new());
         for width in [140, 100, 80] {
             let mut row = Row::location("./library");
             row.location_index = Some(0);
@@ -1690,40 +1683,6 @@ mod tests {
             terminal
                 .draw(|frame| render(frame, &model, &mut interactions))
                 .unwrap();
-
-            let controls = workspace_controls(&controls_model);
-            let mut visible_controls = Vec::new();
-            let mut control_targets = Vec::new();
-            for control in controls {
-                let text = format!("{} {}", control.key, control.label);
-                let position = rendered_control_position(&terminal, &text);
-                let length = text.chars().count() as u16;
-                if let Some((x, y)) = position {
-                    let click_x = x + (length / 2);
-                    assert_eq!(
-                        interactions.action_at(click_x, y),
-                        Some(control.action.clone()),
-                        "wrong hit target for visible control {text:?} at width {width}"
-                    );
-                    visible_controls.push((control.action.clone(), x, y, length));
-                }
-                control_targets.push((control.action.clone(), position, length));
-            }
-            let buffer = terminal.backend().buffer();
-            if let Some(y) = visible_controls.first().map(|entry| entry.2) {
-                for (action, position, length) in control_targets {
-                    for x in 0..buffer.area.width {
-                        if interactions.action_at(x, y).as_ref() == Some(&action) {
-                            assert!(
-                                position.is_some_and(|(label_x, label_y)| {
-                                    label_y == y && label_x <= x && x < label_x + length
-                                }),
-                                "incomplete control fragment has a hit target at width {width}"
-                            );
-                        }
-                    }
-                }
-            }
 
             let edit_position = rendered_control_position(&terminal, "e edit");
             let save_position = rendered_control_position(&terminal, "s save");
