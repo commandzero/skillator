@@ -14,7 +14,6 @@ use skillator::config::{
     LibraryConfig, LibraryConfigCodec, LoadResult, RepositoryConfig, RepositoryConfigCodec,
 };
 use skillator::domain::MaterializationKind;
-use skillator::domain::{SkillKey, SkillPath, SourceKey};
 use skillator::library::{LibrarySnapshot, SkillValidity, scan_library};
 use skillator::reconcile::{Authorization, Outcome, Safety, execute, plan, prepare_check};
 use skillator::target::{Comparison, MaterializationState, ObservedState, Target, observe};
@@ -125,46 +124,6 @@ fn wayfinder_21_mouse_staging_waits_for_explicit_save_and_preserves_other_scope(
         std::fs::read_link(&repository_materialization).unwrap(),
         repository_link_before
     );
-    assert_eq!(
-        std::fs::read_link(&user_materialization).unwrap(),
-        user_link_before
-    );
-    assert_eq!(std::fs::read(&gitignore_path).unwrap(), gitignore_before);
-
-    let session = TargetWorkflow::load(&target_path).unwrap();
-    let key = SkillKey::new(
-        SourceKey::parse("local/catalog").unwrap(),
-        SkillPath::parse("release-checklist").unwrap(),
-    );
-    let mut enablements = session.config.enablements().to_vec();
-    enablements.retain(|enablement| enablement.skill() != &key);
-    let staged = session.config.with_enablements(enablements).unwrap();
-    let prepared = TargetWorkflow::prepare_save(&paths, &session, staged).unwrap();
-    let report = TargetWorkflow::commit_save(prepared, Authorization::SafeOnly).unwrap();
-    assert_eq!(
-        report.exit_status,
-        0,
-        "{}",
-        serde_json::to_string(&report).unwrap()
-    );
-    let LoadResult::Valid(saved) =
-        RepositoryConfigCodec::parse(&std::fs::read(&repository_path).unwrap())
-    else {
-        panic!("saved repository configuration remains valid");
-    };
-    assert!(
-        !saved
-            .value()
-            .enablements()
-            .iter()
-            .any(|enablement| enablement.skill() == &key)
-    );
-    assert_eq!(
-        std::fs::read(paths.library_config()).unwrap(),
-        library_before
-    );
-    assert_eq!(std::fs::read(paths.user_config()).unwrap(), user_before);
-    assert!(!repository_materialization.exists());
     assert_eq!(
         std::fs::read_link(&user_materialization).unwrap(),
         user_link_before

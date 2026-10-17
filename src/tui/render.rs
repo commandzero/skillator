@@ -280,15 +280,15 @@ pub fn render(frame: &mut Frame<'_>, model: &Model, interactions: &mut Interacti
         if header_width + width > available {
             break;
         }
-        interactions.add(
-            Rect::new(
-                areas[0].x.saturating_add(header_width as u16),
-                areas[0].y,
-                width as u16,
-                1,
-            ),
-            Action::SelectScope(candidate),
+        let target = Rect::new(
+            areas[0].x.saturating_add(header_width as u16),
+            areas[0].y,
+            width as u16,
+            1,
         );
+        if let Some(target) = visible_target(target, areas[0]) {
+            interactions.add(target, Action::SelectScope(candidate));
+        }
         labels.push(Span::styled(
             label,
             if candidate == scope {
@@ -469,6 +469,14 @@ pub fn render(frame: &mut Frame<'_>, model: &Model, interactions: &mut Interacti
     render_overlay(frame, model, interactions);
 }
 
+fn visible_target(target: Rect, strip: Rect) -> Option<Rect> {
+    let left = target.x.max(strip.x);
+    let top = target.y.max(strip.y);
+    let right = target.right().min(strip.right());
+    let bottom = target.bottom().min(strip.bottom());
+    (right > left && bottom > top).then(|| Rect::new(left, top, right - left, bottom - top))
+}
+
 fn target_tabs_for_width(
     model: &Model,
     width: u16,
@@ -523,13 +531,10 @@ fn target_tabs_for_width(
     };
     let mut spans = vec![Span::raw(if first == 0 { " " } else { "‹ " })];
     let mut used = if first == 0 { 1 } else { 2 };
-    if first > 0 {
-        let action = if model.scope == Scope::Library {
-            Action::SelectHost(labels[first - 1].0)
-        } else {
-            Action::SelectDirectory(labels[first - 1].0)
-        };
-        interactions.add(Rect::new(area.x, area.y, 1, 1), action);
+    if first > 0
+        && let Some(target) = visible_target(Rect::new(area.x, area.y, 1, 1), area)
+    {
+        interactions.add(target, Action::PreviousDirectory);
     }
     for (position, (index, label)) in labels.iter().enumerate().skip(first) {
         let text = format!(" {label} ");
@@ -537,15 +542,10 @@ fn target_tabs_for_width(
         if position != first && used + required > available {
             if used < available {
                 spans.push(Span::styled("›", dim_style()));
-                let action = if model.scope == Scope::Library {
-                    Action::SelectHost(labels[position].0)
-                } else {
-                    Action::SelectDirectory(labels[position].0)
-                };
-                interactions.add(
-                    Rect::new(area.x.saturating_add(used as u16), area.y, 1, 1),
-                    action,
-                );
+                let target = Rect::new(area.x.saturating_add(used as u16), area.y, 1, 1);
+                if let Some(target) = visible_target(target, area) {
+                    interactions.add(target, Action::NextDirectory);
+                }
             }
             break;
         }
@@ -556,7 +556,9 @@ fn target_tabs_for_width(
         } else {
             Action::SelectDirectory(*index)
         };
-        interactions.add(Rect::new(x, area.y, label_width, 1), action);
+        if let Some(target) = visible_target(Rect::new(x, area.y, label_width, 1), area) {
+            interactions.add(target, action);
+        }
         let style = if *index == active {
             Style::default()
                 .fg(Color::Black)
@@ -1477,4 +1479,43 @@ fn render_directory_chooser(frame: &mut Frame<'_>, input: &str, selected: usize,
         )),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn narrow_overflow_arrow_advances_one_scoped_tab() {
+        for workspace in [Workspace::Target, Workspace::Library] {
+            let mut model = Model::new(workspace, Vec::new());
+            let mut interactions = InteractionMap::default();
+            interactions.reset(Rect::new(0, 0, 12, 1));
+            if workspace == Workspace::Library {
+                model.host_labels = vec!["a".into(), "b".into(), "c".into()];
+                model.host_index = 0;
+                model.scope = Scope::Library;
+            } else {
+                model.directory_labels = vec!["a".into(), "b".into(), "c".into()];
+                model.directory_scopes = vec![
+                    TargetTabScope::User,
+                    TargetTabScope::User,
+                    TargetTabScope::User,
+                ];
+                model.directory_index = 0;
+                model.scope = Scope::User;
+            }
+
+            let area = Rect::new(0, 0, 12, 1);
+            let _ = target_tabs_for_width(&model, 12, area, &mut interactions);
+            assert_eq!(interactions.action_at(9, 0), Some(Action::NextDirectory));
+            crate::tui::reducer::reduce(&mut model, Action::NextDirectory);
+
+            if workspace == Workspace::Library {
+                assert_eq!(model.host_index, 1);
+            } else {
+                assert_eq!(model.directory_index, 1);
+            }
+        }
+    }
 }

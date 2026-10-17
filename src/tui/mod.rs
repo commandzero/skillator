@@ -212,14 +212,24 @@ fn run_interactive_with_tick(
         let Some(action) = action else {
             continue;
         };
-        redraw = true;
-        let overlay_before_action = model.overlay.clone();
+        let keeps_detail_scroll_view = interactions.detail_scroll_max.is_some()
+            && matches!(
+                &action,
+                model::Action::MoveDown
+                    | model::Action::MoveUp
+                    | model::Action::PageDown
+                    | model::Action::PageUp
+            )
+            && matches!(&model.overlay, model::Overlay::Details { .. });
+        let overlay_before_action =
+            keeps_detail_scroll_view.then(|| std::mem::discriminant(&model.overlay));
         for effect in reducer::reduce(&mut model, action) {
             if let Some(status) = handle_effect(&mut model, effect)? {
                 return Ok((status, model));
             }
         }
-        if model.overlay == overlay_before_action
+        if let Some(overlay_before_action) = overlay_before_action
+            && std::mem::discriminant(&model.overlay) == overlay_before_action
             && let Some(max) = interactions.detail_scroll_max
         {
             model.detail_scroll = model.detail_scroll.min(max);

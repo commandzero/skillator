@@ -85,6 +85,8 @@ Register content rectangles as wheel targets. Over a main table body, vertical w
 
 For scrollable modal views, calculate maximum offset from content height and visible inner height using the same wrapping/row layout as drawing. Clamp offsets after movement, content change and resize, including existing keyboard movement so mixed input cannot leave the view blank. Do not rely only on `u16` saturation, which currently allows scrolling beyond content. Empty chooser/table input remains a no-op.
 
+Use Ratatui's own `Paragraph::line_count` with the existing dependency's `unstable-rendered-line-info` feature for wrapped-text measurement. This avoids a second word-wrap implementation and adds no dependency. The API is unstable, so pinned-dependency upgrades must keep the narrow/wrapped-content regression checks green.
+
 **Alternative rejected:** moving background selection whenever a wheel event arrives ignores modal focus and the surface under the pointer; unbounded offsets lose the content entirely.
 
 ## Risks / Trade-offs

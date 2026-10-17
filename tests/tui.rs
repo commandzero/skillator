@@ -262,6 +262,28 @@ fn resized_frame_replaces_old_hit_targets() {
 }
 
 #[test]
+fn zero_height_tab_strips_do_not_leave_border_click_targets() {
+    let model = Model::new(Workspace::Target, vec![]);
+    let mut terminal = Terminal::new(TestBackend::new(100, 5)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            if matches!(buffer[(x, y)].symbol(), "─" | "│" | "┌" | "┐" | "└" | "┘") {
+                assert!(
+                    interactions.action_at(x, y).is_none(),
+                    "border cell at ({x}, {y}) must not activate a hidden tab"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn refreshed_row_insertion_rebuilds_checkbox_targets() {
     let mut model = Model::new(
         Workspace::Target,

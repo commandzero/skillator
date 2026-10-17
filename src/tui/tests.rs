@@ -16,7 +16,134 @@ use crate::target::{Target, observe};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use std::collections::BTreeSet;
+#[cfg(unix)]
 #[test]
+fn mouse_staging_flows_through_target_save_conversion_and_preserves_user_scope() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::Terminal;
+
+    let home = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(home.path().to_owned());
+    let library = home.path().join(".skillator/library/release-checklist");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::write(
+        library.join("SKILL.md"),
+        "---\nname: release-checklist\ndescription: Prepare releases\n---\n",
+    )
+    .unwrap();
+    let library_session = LibraryWorkflow::load(&paths).unwrap();
+    LibraryWorkflow::save(&paths, &library_session, &library_session.config, true).unwrap();
+
+    let repository = home.path().join("target");
+    std::fs::create_dir(&repository).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let user_materialization = home.path().join(".agents/skills/release-checklist");
+    let repository_config = repository.join(".agents/skillator.yaml");
+    let repository_materialization = repository.join(".agents/skills/release-checklist");
+    std::fs::create_dir_all(repository_materialization.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(library.canonicalize().unwrap(), &repository_materialization)
+        .unwrap();
+    std::fs::write(
+        &repository_config,
+        b"version: 1\nskill_directories:\n  - key: agents\n    path: .agents/skills\nenablements:\n  - directory: agents\n    skill:\n      source: local/library\n      path: release-checklist\n    materialization: linked\n",
+    )
+    .unwrap();
+    let selector = crate::app::SkillSelector::parse("local/library:release-checklist").unwrap();
+    let user_saved = UserScopeWorkflow::mutate_enablement(
+        &paths,
+        &selector,
+        Some(MaterializationKind::Linked),
+        crate::app::SyncMode::Apply { force: false },
+    )
+    .unwrap();
+    assert_eq!(user_saved.exit_status, 0);
+    let user_before = std::fs::read(paths.user_config()).unwrap();
+
+    let library_config = LibraryWorkflow::load(&paths).unwrap().config;
+    let library_snapshot = LibraryWorkflow::snapshot(&paths, &library_config);
+    let mut state = build_target_state(
+        UserScopeWorkflow::load(&paths).unwrap(),
+        TargetWorkflow::load(&repository).unwrap(),
+        &library_snapshot,
+        &library_config,
+    );
+    let mut model = initial_target_model(&state.tabs);
+    let repository_tab = state
+        .tabs
+        .iter()
+        .position(|tab| tab.scope == TargetTabScope::Repository)
+        .unwrap();
+    activate_target_tab(&mut model, &state.tabs, &BTreeSet::new(), repository_tab);
+    model.scope = Scope::Repo;
+    model.selected = model
+        .rows
+        .iter()
+        .position(|row| row.is_skill() && row.name == "release-checklist")
+        .unwrap();
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    let mut interactions = InteractionMap::default();
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let skill_row = (0..buffer.area.height)
+        .find(|&y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("release-checklist")
+        })
+        .expect("rendered skill row");
+    let checkbox_column = (0..buffer.area.width)
+        .find(|&x| buffer[(x, skill_row)].symbol() == "[")
+        .expect("rendered checkbox");
+    let click = action_for_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: checkbox_column,
+            row: skill_row,
+            modifiers: KeyModifiers::NONE,
+        },
+        &interactions,
+    )
+    .expect("mouse click on rendered checkbox");
+    reduce(&mut model, click);
+    assert_eq!(model.rows[model.selected].check, Some(CheckState::User));
+    store_active_target_tab(&model, &mut state.tabs);
+    let prepared =
+        prepare_scope_save(&paths, &state, &state.tabs, TargetTabScope::Repository).unwrap();
+    model.overlay = save_review_overlay(prepared.plan());
+    assert_eq!(
+        reduce(&mut model, Action::Confirm),
+        vec![Effect::CommitSave]
+    );
+    assert_eq!(prepared.commit(&paths).unwrap().exit_status, 0);
+
+    let saved = TargetWorkflow::load(&repository).unwrap();
+    assert!(
+        !saved
+            .config
+            .enablements()
+            .iter()
+            .any(|enablement| enablement.skill().path().as_str() == "release-checklist"),
+        "the mouse-staged removal is persisted by the production row conversion"
+    );
+    assert_eq!(std::fs::read(paths.user_config()).unwrap(), user_before);
+    assert_eq!(
+        std::fs::read_link(&user_materialization).unwrap(),
+        library.canonicalize().unwrap()
+    );
+    assert!(!repository_materialization.exists());
+}
+#[test]
+
 fn inherited_override_modes_and_cancellation_remain_staged() {
     let row = Row::inherited_user("local/library", "demo", "Demo", true, "User account");
     let mut model = Model::new(Workspace::Target, vec![row.clone()]);
@@ -2300,10 +2427,8 @@ fn directory_overflow_tracks_scoped_indices_and_unicode_cells() {
     let arrow_x = (0..buffer.area.width)
         .find(|&x| buffer[(x, 1)].symbol() == "›")
         .expect("visible overflow arrow");
-    assert_eq!(
-        interactions.action_at(arrow_x, 1),
-        Some(Action::SelectDirectory(4))
-    );
+    reduce(&mut model, interactions.action_at(arrow_x, 1).unwrap());
+    assert_eq!(model.directory_index, 4);
 
     model.directory_index = 1;
     terminal
@@ -2313,8 +2438,7 @@ fn directory_overflow_tracks_scoped_indices_and_unicode_cells() {
     let unicode_x = (0..buffer.area.width)
         .find(|&x| buffer[(x, 1)].symbol() == "界")
         .expect("wide Unicode label is rendered");
-    assert_eq!(
-        interactions.action_at(unicode_x, 1),
-        Some(Action::SelectDirectory(1))
-    );
+    let effects = reduce(&mut model, interactions.action_at(unicode_x, 1).unwrap());
+    assert_eq!(model.directory_index, 1);
+    assert!(effects.is_empty());
 }
