@@ -1600,7 +1600,7 @@ fn render_directory_chooser(
             .saturating_sub(height.saturating_sub(1))
             .min(lines.len().saturating_sub(height));
         let first_suggestion = scroll.saturating_sub(2);
-        let prefix_visible = 2usize.saturating_sub(scroll);
+        let prefix_visible = 2usize.saturating_sub(scroll).min(height);
         let row_y = inner.y.saturating_add(prefix_visible as u16);
         let list_viewport_height = inner.height - prefix_visible as u16;
         interactions.add_scroll(
