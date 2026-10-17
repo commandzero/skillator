@@ -1686,7 +1686,7 @@ mod tests {
 
     #[test]
     fn library_controls_follow_drawn_layout_and_hit_targets() {
-        for width in [140, 100, 80] {
+        for width in 7..=160 {
             let mut row = Row::location("./library");
             row.location_index = Some(0);
             let model = Model::new(Workspace::Library, vec![row]);
@@ -1697,31 +1697,85 @@ mod tests {
                 .draw(|frame| render(frame, &model, &mut interactions))
                 .unwrap();
 
-            let edit_position = rendered_control_position(&terminal, "e edit");
+            let edit_position = rendered_control_position(&terminal, "edit");
             let save_position = rendered_control_position(&terminal, "s save");
             if width == 140 {
                 assert!(edit_position.is_some(), "e edit must be fully visible");
                 assert!(save_position.is_some(), "s save must be fully visible");
             }
             if let Some((x, y)) = edit_position {
-                let mut edit_model = model.clone();
-                let action = interactions.action_at(x + 1, y).unwrap();
-                crate::tui::reducer::reduce(&mut edit_model, action);
-                assert_eq!(
-                    edit_model.overlay,
-                    Overlay::LocationEditor {
-                        edit: true,
-                        input: "./library".to_owned()
+                for cell in 0..4 {
+                    let mut edit_model = model.clone();
+                    let action = interactions.action_at(x + cell, y).unwrap();
+                    crate::tui::reducer::reduce(&mut edit_model, action);
+                    assert_eq!(
+                        edit_model.overlay,
+                        Overlay::LocationEditor {
+                            edit: true,
+                            input: "./library".to_owned()
+                        },
+                        "Edit cell {cell} at width {width}"
+                    );
+                }
+            }
+            for (label, fast) in [("s save", false), ("save & exit", true)] {
+                if let Some((x, y)) = rendered_control_position(&terminal, label) {
+                    for cell in 0..label.len() as u16 {
+                        let mut save_model = model.clone();
+                        let action = interactions.action_at(x + cell, y).unwrap();
+                        assert_eq!(
+                            crate::tui::reducer::reduce(&mut save_model, action),
+                            [Effect::PrepareSave { fast }],
+                            "{label} cell {cell} at width {width}"
+                        );
                     }
+                }
+            }
+            let (x, y) = rendered_control_position(&terminal, "help").unwrap();
+            for cell in 0..4 {
+                let mut help_model = model.clone();
+                let action = interactions.action_at(x + cell, y).unwrap();
+                crate::tui::reducer::reduce(&mut help_model, action);
+                assert!(
+                    matches!(help_model.overlay, Overlay::Help),
+                    "Help cell {cell} at width {width}"
                 );
             }
-            if let Some((x, y)) = save_position {
-                let mut save_model = model.clone();
-                let action = interactions.action_at(x + 1, y).unwrap();
-                assert_eq!(
-                    crate::tui::reducer::reduce(&mut save_model, action),
-                    [Effect::PrepareSave { fast: false }]
-                );
+        }
+    }
+
+    #[test]
+    fn clipped_filter_choices_keep_apply_and_clear_distinct() {
+        for width in 7..=160 {
+            let mut model = Model::new(Workspace::Target, Vec::new());
+            model.filter = "needle".to_owned();
+            model.overlay = Overlay::Filter;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            let mut interactions = InteractionMap::default();
+            terminal
+                .draw(|frame| render(frame, &model, &mut interactions))
+                .unwrap();
+            for (label, retained_filter) in [("apply", "needle"), ("clear", "")] {
+                let position = rendered_control_position(&terminal, label);
+                if width == 80 {
+                    assert!(position.is_some(), "{label} must be visible at width 80");
+                }
+                if let Some((x, y)) = position {
+                    for cell in 0..label.len() as u16 {
+                        let mut filtered_model = model.clone();
+                        let action = interactions.action_at(x + cell, y).unwrap();
+                        crate::tui::reducer::reduce(&mut filtered_model, action);
+                        assert!(
+                            matches!(filtered_model.overlay, Overlay::None),
+                            "{label} cell {cell} at width {width}"
+                        );
+                        assert_eq!(
+                            filtered_model.filter, retained_filter,
+                            "{label} cell {cell} at width {width}"
+                        );
+                    }
+                }
             }
         }
     }
