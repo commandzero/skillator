@@ -1,0 +1,40 @@
+change: add-mouse-support
+reviewer: codex
+reviewed_at: "2026-10-17T23:36:14Z"
+notes: |
+  # Mouse support semantic synchronization review
+  
+  Reviewer: Codex. Reviewed committed synchronization/archive state c67bb87eee7acb6e38faa5ae5ef063be1527f94d against the approved change and implementation fee63d04b0fc8ccc885157a20b079a740756aa39.
+  
+  ## Scope and preservation
+  
+  Reviewed every added requirement and its scenarios against openspec/specs/tui-workflows/spec.md and the archived delta. All 12 additions and 43 scenarios are present under their original names with identical normative content. The canonical spec has one Requirements section and no delta operation headers. Its authoritative Purpose and all 24 pre-existing requirements/scenarios remain byte-for-byte unchanged. There are no modified, removed or renamed requirements, absent specs, new capabilities or intentionally omitted deltas.
+  
+  All five archived artifacts, including .openspec.yaml and the 19/19 completed tasks, match their pre-archive contents. The archive is openspec/changes/archive/2026-10-17-add-mouse-support.
+  
+  ## Requirement and scenario findings
+  
+  - Interactive sessions capture and restore mouse reporting (4): normal/handled-error exit, partial setup cleanup, keyboard-only operation and non-interactive commands preserve terminal/persistence boundaries.
+  - Mouse targets match the visible rendered surface (4): scrolled/filtered row identity, Unicode/clipping, refresh/resize invalidation and inert empty/header/border space remain distinct.
+  - Row selection is distinct from checkbox activation (4): inspection does not edit; toggles stage only; Source bulk eligibility and protected/read-only row rules remain intact.
+  - Disclosure and mode cells support direct activation (3): collapse/expand, filter-forced expansion and addressed Skill mode changes do not authorize child or non-Skill mode edits.
+  - Tabs support direct mouse navigation (4): exact non-adjacent destinations, dirty-save/discard/return guards, retained directory edits, overflow steps and active-tab no-op preserve existing scope ownership.
+  - Visible action commands are clickable (4): ordinary/fast save safeguards, explicit follower sync, selected-row Details/Edit and separate Library location commands reuse existing semantic actions.
+  - Modal choices are directly clickable (5): dirty outcomes, guarded decline, explicit Busy retry, nonzero failed-save acknowledgement and follower initialization Skip preserve confirmation and sequencing. Blocked work remains unauthorized.
+  - Choosers and editors accept mouse controls without changing text semantics (5): selection then Stage, duplicate rejection, custom-path validation/cancellation, completion without submit and literal q retain keyboard editor semantics.
+  - Overlays isolate mouse interaction (3): cancellation cannot click through; outside clicks/wheel cannot affect background; status-only Notice remains non-modal.
+  - Vertical wheel navigation follows the pointed surface (3): one visible row/suggestion/rendered line per event, bounded documents and ignored confirmation wheel input do not stage edits. Mouse entry from hidden filtered selection is normalized without changing legacy keyboard fallback behavior.
+  - A mouse press activates at most one action (3): press/release toggles once, unsupported gestures cannot authorize destructive choices and keyboard input continues on the resulting state.
+  - Mouse gestures remain discoverable (1): Help retains the full key/mode reference alongside gestures; documentation preserves keyboard text entry and terminal-specific selection bypass limitations.
+  
+  These additions are semantically additive to the existing staged, keyboard-oriented workflow; they introduce no persistence format or alternate save/sync path. No semantic mismatch or lost scenario found.
+  
+  ## Evidence and authorization
+  
+  Committed Git objects were compared with the reviewed canonical and archived content. Repository-pinned OpenSpec 1.11.0 strict validation passed all 12 main specs and all 15 archived changes. Post-archive full repository preflight passed. Implementation verification included regression tests and actual isolated macOS PTY mouse reports, resize/refresh, intended-scope save inspection, keyboard continuation and terminal restoration; no physical GUI pointing-device or live SSH-transfer proof is claimed.
+  
+  Copilot's current implementation-head review has zero open issues and requests final human review rather than saying Approval recommended. The user explicitly approved the implementation and authorized sync/archive under that review state. This receipt records Codex's semantic spec review, not a GitHub approval or merge authorization.
+no_spec_deltas: false
+archive_tree: 8ccea8a0efd530237e7e0cb7455d5bcddad0348a
+specs:
+  openspec/specs/tui-workflows/spec.md: 39079989c16e90f6dfaf21c36eecf91d4040e1c5
