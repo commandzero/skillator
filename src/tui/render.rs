@@ -238,7 +238,7 @@ fn controls_line(
     let padding = visible_width.saturating_sub(total_width);
     let mut cursor = 0usize;
     let mut spans = Vec::with_capacity(controls.len().saturating_mul(4));
-    let control_style = Style::default().fg(BONE).add_modifier(Modifier::BOLD);
+    let key_style = Style::default().fg(BONE).add_modifier(Modifier::BOLD);
     for (index, control) in controls.iter().enumerate() {
         let cells = control_width(control);
         if index > 0 {
@@ -261,9 +261,9 @@ fn controls_line(
                 control.action.clone(),
             );
         }
-        spans.push(Span::styled(control.key, control_style));
-        spans.push(Span::styled(" ", control_style));
-        spans.push(Span::styled(control.label, control_style));
+        spans.push(Span::styled(control.key, key_style));
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(control.label));
         cursor = end;
     }
     spans.push(Span::raw(" "));
@@ -331,15 +331,41 @@ pub fn render(frame: &mut Frame<'_>, model: &Model, interactions: &mut Interacti
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(labels)), areas[0]);
-    frame.render_widget(
-        Paragraph::new(target_tabs_for_width(
-            model,
-            areas[1].width,
-            areas[1],
-            interactions,
-        )),
-        areas[1],
-    );
+    let add_target_tab = model.workspace == Workspace::Target
+        && (scope == Scope::User || model.target_path.is_some());
+    let tabs_area = Rect {
+        width: areas[1]
+            .width
+            .saturating_sub(if add_target_tab { 3 } else { 0 }),
+        ..areas[1]
+    };
+    let tabs = target_tabs_for_width(model, tabs_area.width, tabs_area, interactions);
+    let add_x = add_target_tab.then(|| {
+        tabs_area
+            .x
+            .saturating_add(tabs.width().min(usize::from(tabs_area.width)) as u16)
+    });
+    frame.render_widget(Paragraph::new(tabs), tabs_area);
+    if let Some(add_x) = add_x {
+        let add_area = Rect::new(add_x, areas[1].y, 3, 1).intersection(areas[1]);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " + ",
+                Style::default()
+                    .fg(scope.color())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            add_area,
+        );
+        if visible_target(
+            Rect::new(add_x.saturating_add(1), areas[1].y, 1, 1),
+            add_area,
+        )
+        .is_some()
+        {
+            interactions.add(add_area, Action::NewTargetTab);
+        }
+    }
     let header = match model.workspace {
         Workspace::Target => TableRow::new(["", "Mode", "Skill", "Description", "Action"]),
         Workspace::Library => TableRow::new(["", "Mode", "Location", "Description", "Action"]),
@@ -931,7 +957,7 @@ fn render_help(
         ),
         (
             "Tabs / commands",
-            Some("Click a visible tab or labeled command"),
+            Some("Click a tab or command; + beside User/Repo tabs adds a directory"),
         ),
         (
             "Modal choices",

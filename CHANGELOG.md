@@ -6,7 +6,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ### Added
 
-- Use mouse clicks for TUI selection, staged controls, and explicit modal choices, with wheel navigation for rows and scrollable views (#41).
+- Use mouse clicks for TUI selection, staged controls, and explicit modal choices, with a `+` beside User/Repo tabs to add directories and wheel navigation for rows and scrollable views (#41).
 - Deliver only discovered skill directories—not whole registered repositories—to owned follower replicas: push authoritative leader content or pull fresh snapshots, with write-free previews, early local-input validation, pre-write SSH and filesystem capability checks, source permissions and content exclusions preserved, retryable ownership-marker creation, cleanup or retained-export diagnostics, and host-local selections (#38).
 - Filter agent-directory presets or enter custom paths with `Ctrl+T`; verify and stage Library followers over SSH, then browse their delivered replicas read-only (#39).
 - Sync a selected follower from its Library tab, with optional initialization after registration and confirmation before overwriting or deleting owned replica content (#39).
@@ -22,6 +22,7 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ### Fixed
 
+- Restore scope-colored bottom-border command labels and distinct bold hot-keys in the TUI (#41).
 - Follower Library discovery preserves leader Source Keys and skill paths in owned rsync replicas, restoring separate collapsible repository groups and resolution of saved selectors. First user activation works without an existing `~/.agents` directory.
 - User/Repo saves, source validation, inventory listing, and materialization checks use the same implicit default Library as the TUI when `library.yaml` is absent, so visible replica skills can be enabled on a fresh follower without a separate Library save.
 - Replica discovery prunes Git administrative subtrees, and Source Key collisions cannot be activated from User/Repo inventories while existing saved selections remain visible.

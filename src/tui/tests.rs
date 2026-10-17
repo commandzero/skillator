@@ -2393,6 +2393,114 @@ fn colliding_sources_cannot_activate_new_skills_and_keep_saved_choices_visible()
 }
 
 #[test]
+fn footer_keeps_scope_colored_labels_distinct_from_bold_hotkeys() {
+    for (scope, workspace, label_color) in [
+        (Scope::Library, Workspace::Library, Color::Indexed(245)),
+        (Scope::User, Workspace::Target, BLUE),
+        (Scope::Repo, Workspace::Target, PURPLE),
+    ] {
+        let mut model = Model::new(workspace, vec![]);
+        model.scope = scope;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 16)).unwrap();
+        let mut interactions = InteractionMap::default();
+        terminal
+            .draw(|frame| render(frame, &model, &mut interactions))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let y = buffer.area.height - 2;
+        let x = (0..buffer.area.width)
+            .find(|&x| interactions.action_at(x, y) == Some(Action::Save { fast: false }))
+            .expect("fully visible save control");
+        assert_eq!(buffer[(x, y)].fg, BONE);
+        assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(x + 2, y)].fg, label_color);
+        assert!(!buffer[(x + 2, y)].modifier.contains(Modifier::BOLD));
+    }
+}
+
+#[test]
+fn tab_plus_stages_a_directory_in_the_active_scope_even_with_empty_or_overflowing_tabs() {
+    for scope in [Scope::User, Scope::Repo] {
+        for empty in [true, false] {
+            for width in [2, 24, 100] {
+                let mut model = Model::new(Workspace::Target, vec![]);
+                model.scope = scope;
+                model.target_path = Some("/target".to_owned());
+                model.directory_labels = if empty {
+                    vec![]
+                } else {
+                    vec!["界e\u{301}".repeat(30), "second".to_owned()]
+                };
+                model.directory_scopes = vec![
+                    if scope == Scope::User {
+                        TargetTabScope::User
+                    } else {
+                        TargetTabScope::Repository
+                    };
+                    model.directory_labels.len()
+                ];
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 16)).unwrap();
+                let mut interactions = InteractionMap::default();
+                terminal
+                    .draw(|frame| render(frame, &model, &mut interactions))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let x = (0..width)
+                    .find(|&x| {
+                        buffer[(x, 1)].symbol() == "+"
+                            && interactions.action_at(x, 1) == Some(Action::NewTargetTab)
+                    })
+                    .expect("visible add control beside the tabs");
+                reduce(&mut model, interactions.action_at(x, 1).unwrap());
+                assert!(matches!(model.overlay, Overlay::DirectoryChooser { .. }));
+                assert_eq!(model.scope, scope);
+
+                terminal
+                    .draw(|frame| render(frame, &model, &mut interactions))
+                    .unwrap();
+                assert!(interactions.action_at(x, 1).is_none());
+                for character in "acceptance-skills".chars() {
+                    reduce(&mut model, Action::Input(character));
+                }
+                assert_eq!(
+                    click_rendered_action(&mut model, Action::Confirm),
+                    [Effect::ApplyDirectoryEdit {
+                        edit: false,
+                        value: "acceptance-skills".to_owned(),
+                    }]
+                );
+                assert_eq!(model.scope, scope);
+            }
+        }
+    }
+}
+
+#[test]
+fn tab_plus_has_no_hidden_target_or_unavailable_repository_action() {
+    for (scope, width) in [(Scope::User, 1), (Scope::Repo, 100), (Scope::Library, 100)] {
+        let mut model = Model::new(
+            if scope == Scope::Library {
+                Workspace::Library
+            } else {
+                Workspace::Target
+            },
+            vec![],
+        );
+        model.scope = scope;
+        model.target_path = None;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 16)).unwrap();
+        let mut interactions = InteractionMap::default();
+        terminal
+            .draw(|frame| render(frame, &model, &mut interactions))
+            .unwrap();
+        assert!((0..width).all(|x| interactions.action_at(x, 1) != Some(Action::NewTargetTab)));
+    }
+}
+
+#[test]
 fn directory_overflow_tracks_scoped_indices_and_unicode_cells() {
     let mut model = Model::new(Workspace::Target, vec![]);
     model.scope = Scope::Repo;
