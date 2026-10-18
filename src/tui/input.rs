@@ -1,7 +1,8 @@
 //! Key decoding and literal editor input; no persistence or scope lifecycle.
 
+use super::interaction::InteractionMap;
 use super::model::{Action, Model, Overlay};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::path::PathBuf;
 
 pub fn action_for_key(key: KeyEvent) -> Option<Action> {
@@ -55,6 +56,18 @@ pub fn action_for_key(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('n'), false) => Some(Action::ReturnToEditing),
         (KeyCode::Backspace, false) => Some(Action::Backspace),
         (KeyCode::Char(character), false) => Some(Action::Input(character)),
+        _ => None,
+    }
+}
+
+pub fn action_for_mouse(event: MouseEvent, interactions: &InteractionMap) -> Option<Action> {
+    if event.modifiers != KeyModifiers::NONE {
+        return None;
+    }
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => interactions.action_at(event.column, event.row),
+        MouseEventKind::ScrollUp => interactions.scroll_at(event.column, event.row, false),
+        MouseEventKind::ScrollDown => interactions.scroll_at(event.column, event.row, true),
         _ => None,
     }
 }
@@ -167,4 +180,64 @@ pub(super) fn chooser_matches(input: &str) -> Vec<(&'static str, &'static str)> 
     .into_iter()
     .filter(|(agent, path)| agent.to_ascii_lowercase().contains(&needle) || path.contains(&needle))
     .collect()
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn only_left_press_and_vertical_wheel_resolve_targets() {
+        let mut map = InteractionMap::default();
+        map.reset(Rect::new(0, 0, 20, 10));
+        map.add(Rect::new(2, 3, 1, 1), Action::Toggle);
+        map.add_scroll(Rect::new(0, 0, 20, 10), Action::MoveUp, Action::MoveDown);
+        let event = |kind, modifiers| MouseEvent {
+            kind,
+            column: 2,
+            row: 3,
+            modifiers,
+        };
+
+        assert_eq!(
+            action_for_mouse(
+                event(MouseEventKind::Down(MouseButton::Left), KeyModifiers::NONE),
+                &map
+            ),
+            Some(Action::Toggle)
+        );
+        assert_eq!(
+            action_for_mouse(
+                event(MouseEventKind::Up(MouseButton::Left), KeyModifiers::NONE),
+                &map
+            ),
+            None
+        );
+        assert_eq!(
+            action_for_mouse(
+                event(MouseEventKind::Drag(MouseButton::Left), KeyModifiers::NONE),
+                &map
+            ),
+            None
+        );
+        assert_eq!(
+            action_for_mouse(
+                event(MouseEventKind::Down(MouseButton::Right), KeyModifiers::NONE),
+                &map
+            ),
+            None
+        );
+        assert_eq!(
+            action_for_mouse(
+                event(MouseEventKind::Down(MouseButton::Left), KeyModifiers::SHIFT),
+                &map
+            ),
+            None
+        );
+        assert_eq!(
+            action_for_mouse(event(MouseEventKind::ScrollDown, KeyModifiers::NONE), &map),
+            Some(Action::MoveDown)
+        );
+    }
 }

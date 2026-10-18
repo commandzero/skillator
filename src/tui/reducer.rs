@@ -1,10 +1,10 @@
-//! Pure keyboard-driven state transitions; scope workflows execute returned effects.
+//! Pure semantic action transitions; scope workflows execute returned effects.
 
 use super::input::{chooser_matches, complete_path};
 use super::library::{refresh_library_action, refresh_library_visibility};
 use super::model::{
-    Action, CheckState, Effect, Model, Overlay, Row, RowKind, Scope, TargetTabScope, Workspace,
-    row_identity,
+    Action, CheckState, Effect, Model, Overlay, Row, RowAction, RowKind, Scope, TargetTabScope,
+    Workspace, row_identity,
 };
 use crate::acquisition::LibraryAcquisitionMode;
 use crate::domain::MaterializationKind;
@@ -41,6 +41,11 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
                 *selected = (*selected + 1).min(chooser_matches(input).len().saturating_sub(1))
             }
             Action::MoveUp => *selected = selected.saturating_sub(1),
+            Action::SelectSuggestion(index) => {
+                if index < chooser_matches(input).len() {
+                    *selected = index;
+                }
+            }
             Action::Confirm => {
                 let value = chooser_matches(input)
                     .get(*selected)
@@ -251,6 +256,61 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
         }
         return Vec::new();
     }
+    match action {
+        Action::ActivateRow { index, intent } => {
+            if !model.is_visible_index(index) {
+                return Vec::new();
+            }
+            let was_selected = model.selected == index;
+            model.selected = index;
+            match intent {
+                RowAction::Select
+                    if was_selected
+                        && model
+                            .rows
+                            .get(index)
+                            .is_some_and(|row| row.kind == RowKind::Skill) =>
+                {
+                    return reduce(model, Action::Confirm);
+                }
+                RowAction::Select => return Vec::new(),
+                RowAction::Toggle => return reduce(model, Action::Toggle),
+                RowAction::SwitchMode => return reduce(model, Action::SwitchMode),
+                RowAction::ToggleDisclosure => {
+                    if let Some(row) = model.rows.get(index)
+                        && row.kind == RowKind::Source
+                        && let Some(identity) = row_identity(row)
+                        && !model.collapsed.remove(identity)
+                    {
+                        model.collapsed.insert(identity.to_owned());
+                    }
+                    return Vec::new();
+                }
+            }
+        }
+        Action::SelectScope(destination) => return select_scope(model, destination, None),
+        Action::SelectHost(index) => {
+            if model.workspace != Workspace::Library || index >= model.host_labels.len() {
+                return Vec::new();
+            }
+            return select_directory_or_host(model, index, true);
+        }
+        Action::SelectDirectory(index) => {
+            if index >= model.directory_scopes.len() {
+                return Vec::new();
+            }
+            let valid_scope = match model.scope {
+                Scope::User => model.directory_scopes[index] == TargetTabScope::User,
+                Scope::Repo => model.directory_scopes[index] == TargetTabScope::Repository,
+                Scope::Library => false,
+            };
+            if !valid_scope {
+                return Vec::new();
+            }
+            return select_directory_or_host(model, index, false);
+        }
+        _ => {}
+    }
     if model.host_syncing {
         match action {
             Action::Escape => return vec![Effect::CancelFollowerSync],
@@ -387,27 +447,17 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
         }
         Action::NextDirectory | Action::PreviousDirectory => {
             if model.workspace == Workspace::Library {
-                let old = model.host_index;
-                let count = model.host_labels.len().max(1);
-                let next = if action == Action::NextDirectory {
-                    (old + 1) % count
-                } else {
-                    (old + count - 1) % count
-                };
-                if old != next && (model.dirty || model.host_dirty) {
-                    model.overlay = Overlay::ScopeSwitch {
-                        destination: Scope::Library,
-                        host_to: Some(next),
-                    };
+                let count = model.host_labels.len();
+                if count == 0 {
                     return Vec::new();
                 }
-                model.host_index = next;
-                return vec![Effect::DirectoryChanged {
-                    from: old,
-                    to: next,
-                }];
+                let next = if action == Action::NextDirectory {
+                    (model.host_index + 1) % count
+                } else {
+                    (model.host_index + count - 1) % count
+                };
+                return select_directory_or_host(model, next, true);
             }
-            let old = model.directory_index;
             let scoped: Vec<_> = model
                 .directory_scopes
                 .iter()
@@ -422,35 +472,22 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
             if scoped.is_empty() {
                 return Vec::new();
             }
-            let current = scoped.iter().position(|index| *index == old).unwrap_or(0);
+            let current = scoped
+                .iter()
+                .position(|index| *index == model.directory_index)
+                .unwrap_or(0);
             let next = scoped[if action == Action::NextDirectory {
                 (current + 1) % scoped.len()
             } else {
                 (current + scoped.len() - 1) % scoped.len()
             }];
-            model.directory_index = next;
-            return vec![Effect::DirectoryChanged {
-                from: old,
-                to: next,
-            }];
+            return select_directory_or_host(model, next, false);
         }
         Action::NextScope | Action::PreviousScope => {
             let destination = model
                 .scope
                 .cycle(if action == Action::NextScope { 1 } else { -1 });
-            if model.dirty || model.host_dirty {
-                model.overlay = Overlay::ScopeSwitch {
-                    destination,
-                    host_to: None,
-                };
-            } else {
-                return vec![Effect::SwitchToScope {
-                    destination,
-                    host_to: None,
-                    save: false,
-                    discard: false,
-                }];
-            }
+            return select_scope(model, destination, None);
         }
         Action::StartFilter => model.overlay = Overlay::Filter,
         Action::Save { fast } => {
@@ -587,7 +624,12 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
             }
         }
         Action::Escape if !model.filter.is_empty() => model.filter.clear(),
-        Action::Input(_)
+        Action::ActivateRow { .. }
+        | Action::SelectScope(_)
+        | Action::SelectDirectory(_)
+        | Action::SelectHost(_)
+        | Action::SelectSuggestion(_)
+        | Action::Input(_)
         | Action::Backspace
         | Action::CompletePath
         | Action::Escape
@@ -596,6 +638,53 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
         | Action::Acknowledge => {}
     }
     Vec::new()
+}
+
+fn select_scope(model: &mut Model, destination: Scope, host_to: Option<usize>) -> Vec<Effect> {
+    if model.scope == destination && host_to.is_none() {
+        return Vec::new();
+    }
+    if model.dirty || model.host_dirty {
+        model.overlay = Overlay::ScopeSwitch {
+            destination,
+            host_to,
+        };
+        Vec::new()
+    } else {
+        vec![Effect::SwitchToScope {
+            destination,
+            host_to,
+            save: false,
+            discard: false,
+        }]
+    }
+}
+
+fn select_directory_or_host(model: &mut Model, index: usize, host: bool) -> Vec<Effect> {
+    let current = if host {
+        model.host_index
+    } else {
+        model.directory_index
+    };
+    if index == current {
+        return Vec::new();
+    }
+    if host && (model.dirty || model.host_dirty) {
+        model.overlay = Overlay::ScopeSwitch {
+            destination: Scope::Library,
+            host_to: Some(index),
+        };
+        return Vec::new();
+    }
+    if host {
+        model.host_index = index;
+    } else {
+        model.directory_index = index;
+    }
+    vec![Effect::DirectoryChanged {
+        from: current,
+        to: index,
+    }]
 }
 
 fn toggle_selected(model: &mut Model) {
@@ -627,6 +716,7 @@ fn toggle_selected(model: &mut Model) {
             for candidate in &mut model.rows {
                 if candidate.kind == RowKind::Skill
                     && row_identity(candidate) == Some(identity.as_str())
+                    && candidate.check != Some(CheckState::User)
                     && candidate.valid
                     && !candidate.repository_candidate
                     && (all_enabled || candidate.available)
@@ -658,7 +748,9 @@ fn toggle_selected(model: &mut Model) {
                     .to_owned(),
             );
         }
-        RowKind::Skill if row.available || row.check == Some(CheckState::Checked) => {
+        RowKind::Skill
+            if (row.available && row.valid) || row.check == Some(CheckState::Checked) =>
+        {
             let group = row_identity(&row).map(str::to_owned);
             if let Some(candidate) = model.rows.get_mut(model.selected) {
                 candidate.check = Some(if candidate.check == Some(CheckState::Checked) {
@@ -714,4 +806,449 @@ fn refresh_staged_state(row: &mut Row) {
     } else {
         row.initial_action.clone()
     };
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::MaterializationKind;
+
+    fn skill(name: &str, enabled: bool) -> Row {
+        Row::skill(
+            "source",
+            name,
+            "",
+            enabled,
+            true,
+            MaterializationKind::Linked,
+            "",
+        )
+    }
+
+    #[test]
+    fn addressed_visibility_matches_displayed_indices() {
+        let mut location = Row::location("Tools");
+        location.location_index = Some(0);
+        let mut source = Row::source("source", CheckState::Unchecked);
+        source.location_index = Some(0);
+        let mut matching_skill = skill("Needle", false);
+        matching_skill.location_index = Some(0);
+        let mut pending_skill = skill("Pending child", false);
+        pending_skill.action = "Install".to_owned();
+        pending_skill.location_index = Some(1);
+        let mut other_location = Row::location("Other");
+        other_location.location_index = Some(1);
+        let mut diagnostic = Row::diagnostic("Problem");
+        diagnostic.location_index = Some(0);
+        let mut model = Model::new(
+            Workspace::Target,
+            vec![
+                location,
+                source,
+                matching_skill,
+                other_location,
+                pending_skill,
+                diagnostic,
+            ],
+        );
+
+        for (filter, collapsed) in [
+            ("", false),
+            ("needle", false),
+            ("PENDING", false),
+            ("pending actions", false),
+            ("nothing", false),
+            ("", true),
+            ("needle", true),
+        ] {
+            model.filter = filter.to_owned();
+            model.collapsed.clear();
+            if collapsed {
+                model.collapsed.insert("source".to_owned());
+            }
+            let displayed = model.visible_indices();
+            for index in 0..=model.rows.len() {
+                assert_eq!(
+                    model.is_visible_index(index),
+                    displayed.contains(&index),
+                    "filter={filter:?}, collapsed={collapsed}, index={index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn addressed_row_selects_and_toggles_only_that_visible_skill() {
+        let mut model = Model::new(
+            Workspace::Target,
+            vec![skill("first", false), skill("second", false)],
+        );
+        reduce(
+            &mut model,
+            Action::ActivateRow {
+                index: 1,
+                intent: RowAction::Toggle,
+            },
+        );
+        assert_eq!(model.selected, 1);
+        assert_eq!(model.rows[0].check, Some(CheckState::Unchecked));
+        assert_eq!(model.rows[1].check, Some(CheckState::Checked));
+    }
+
+    #[test]
+    fn addressed_selection_rejects_hidden_and_invalid_indices() {
+        let mut model = Model::new(
+            Workspace::Target,
+            vec![
+                Row::source("source", CheckState::Unchecked),
+                skill("child", false),
+            ],
+        );
+        model.collapsed.insert("source".to_owned());
+        reduce(
+            &mut model,
+            Action::ActivateRow {
+                index: 1,
+                intent: RowAction::Toggle,
+            },
+        );
+        assert_eq!(model.rows[1].check, Some(CheckState::Unchecked));
+        reduce(
+            &mut model,
+            Action::ActivateRow {
+                index: 500,
+                intent: RowAction::Toggle,
+            },
+        );
+        assert_eq!(model.selected, 0);
+    }
+
+    #[test]
+    fn direct_scope_selection_keeps_exact_dirty_destination() {
+        let mut model = Model::new(Workspace::Library, vec![]);
+        model.dirty = true;
+        assert!(reduce(&mut model, Action::SelectScope(Scope::Repo)).is_empty());
+        assert!(matches!(
+            model.overlay,
+            Overlay::ScopeSwitch {
+                destination: Scope::Repo,
+                host_to: None
+            }
+        ));
+    }
+
+    #[test]
+    fn direct_directory_selection_retains_staged_state_and_same_target_is_noop() {
+        let mut model = Model::new(Workspace::Target, vec![]);
+        model.scope = Scope::User;
+        model.directory_scopes = vec![TargetTabScope::User, TargetTabScope::User];
+        model.directory_index = 0;
+        model.dirty = true;
+        assert_eq!(
+            reduce(&mut model, Action::SelectDirectory(1)),
+            vec![Effect::DirectoryChanged { from: 0, to: 1 }]
+        );
+        assert!(model.dirty);
+        assert!(reduce(&mut model, Action::SelectDirectory(1)).is_empty());
+        assert!(reduce(&mut model, Action::SelectDirectory(20)).is_empty());
+    }
+    #[test]
+    fn suggestion_selection_only_changes_a_valid_chooser_match() {
+        let mut model = Model::new(Workspace::Target, vec![]);
+        model.overlay = Overlay::DirectoryChooser {
+            input: String::new(),
+            selected: 0,
+        };
+        let count = chooser_matches("").len();
+        assert!(count > 0);
+        reduce(&mut model, Action::SelectSuggestion(count - 1));
+        assert!(matches!(
+            model.overlay,
+            Overlay::DirectoryChooser {
+                selected,
+                ..
+            } if selected == count - 1
+        ));
+        reduce(&mut model, Action::SelectSuggestion(count));
+        assert!(matches!(
+            model.overlay,
+            Overlay::DirectoryChooser {
+                selected,
+                ..
+            } if selected == count - 1
+        ));
+    }
+    fn activate(model: &mut Model, index: usize, intent: RowAction) -> Vec<Effect> {
+        reduce(model, Action::ActivateRow { index, intent })
+    }
+
+    #[test]
+    fn addressed_mode_cycles_the_clicked_row_not_the_previous_selection() {
+        let first = skill("first", true);
+        let mut second = skill("second", true);
+        second.mode = Some(MaterializationKind::Copied);
+        let mut model = Model::new(Workspace::Target, vec![first, second]);
+
+        activate(&mut model, 1, RowAction::SwitchMode);
+
+        assert_eq!(model.selected, 1);
+        assert_eq!(model.rows[0].mode, Some(MaterializationKind::Linked));
+        assert_eq!(model.rows[1].mode, Some(MaterializationKind::Linked));
+    }
+
+    #[test]
+    fn source_bulk_toggle_covers_hidden_children_and_preserves_protected_rows() {
+        let mut inherited = Row::inherited_user("source", "inherited", "", true, "");
+        inherited.group = Some("source".into());
+        let mut invalid = skill("invalid", false);
+        invalid.valid = false;
+        let mut unavailable = skill("offline", false);
+        unavailable.available = false;
+        let mut owned = skill("owned", false);
+        owned.repository_candidate = true;
+        let mut other_source_skill = skill("outside", false);
+        other_source_skill.group = Some("other-source".into());
+        let mut model = Model::new(
+            Workspace::Target,
+            vec![
+                Row::source("source", CheckState::Mixed),
+                skill("checked", true),
+                skill("disabled", false),
+                unavailable,
+                inherited,
+                invalid,
+                owned,
+                Row::source("other-source", CheckState::Unchecked),
+                other_source_skill,
+            ],
+        );
+        assert_eq!(model.rows[7].check, Some(CheckState::Unchecked));
+        assert_eq!(model.rows[8].check, Some(CheckState::Unchecked));
+        model.collapsed.insert("source".into());
+        model.filter = "checked".into();
+        let preserved_mode = model.rows[1].mode;
+
+        activate(&mut model, 0, RowAction::Toggle);
+        assert_eq!(model.rows[7].check, Some(CheckState::Unchecked));
+        assert_eq!(model.rows[8].check, Some(CheckState::Unchecked));
+
+        assert_eq!(model.rows[1].check, Some(CheckState::Checked));
+        assert_eq!(model.rows[1].mode, preserved_mode);
+        assert_eq!(model.rows[2].check, Some(CheckState::Checked));
+        assert_eq!(model.rows[2].mode, Some(MaterializationKind::Linked));
+        assert_eq!(model.rows[3].check, Some(CheckState::Unchecked));
+        assert_eq!(model.rows[3].mode, Some(MaterializationKind::Linked));
+        assert_eq!(model.rows[4].check, Some(CheckState::User));
+        assert_eq!(model.rows[4].mode, None);
+        assert_eq!(model.rows[5].check, Some(CheckState::Unchecked));
+        assert_eq!(model.rows[5].mode, Some(MaterializationKind::Linked));
+        assert_eq!(model.rows[6].check, Some(CheckState::Unchecked));
+        assert_eq!(model.rows[6].mode, Some(MaterializationKind::Linked));
+    }
+
+    #[test]
+    fn addressed_protected_rows_keep_toggle_and_mode_constraints() {
+        let inherited = Row::inherited_user("source", "inherited", "", true, "");
+        let unavailable_inherited =
+            Row::inherited_user("source", "inherited-offline", "", false, "");
+        let mut owned = skill("owned", false);
+        owned.check = Some(CheckState::Repository);
+        owned.initial_check = Some(CheckState::Repository);
+        owned.repository_candidate = true;
+        let mut invalid = skill("invalid", false);
+        invalid.valid = false;
+        let mut unavailable = skill("unavailable", false);
+        unavailable.available = false;
+        let mut model = Model::new(
+            Workspace::Target,
+            vec![
+                inherited,
+                unavailable_inherited.clone(),
+                owned.clone(),
+                invalid.clone(),
+                unavailable.clone(),
+            ],
+        );
+
+        activate(&mut model, 0, RowAction::Toggle);
+        assert_eq!(model.rows[0].check, Some(CheckState::User));
+        assert!(matches!(model.overlay, Overlay::Notice(_)));
+        model.overlay = Overlay::None;
+        activate(&mut model, 0, RowAction::SwitchMode);
+        assert_eq!(model.rows[0].check, Some(CheckState::Checked));
+        assert_eq!(model.rows[0].mode, Some(MaterializationKind::Linked));
+        activate(&mut model, 1, RowAction::SwitchMode);
+        assert_eq!(model.rows[1], unavailable_inherited);
+        activate(&mut model, 2, RowAction::Toggle);
+        activate(&mut model, 2, RowAction::SwitchMode);
+        assert_eq!(model.rows[2], owned);
+        activate(&mut model, 3, RowAction::Toggle);
+        activate(&mut model, 3, RowAction::SwitchMode);
+        assert_eq!(model.rows[3], invalid);
+        activate(&mut model, 4, RowAction::Toggle);
+        activate(&mut model, 4, RowAction::SwitchMode);
+        assert_eq!(model.rows[4], unavailable);
+    }
+
+    #[test]
+    fn addressed_library_mode_cycles_only_the_clicked_acquisition() {
+        let mut first = skill("first", false);
+        first.acquisition_source = Some("first".into());
+        let mut second = skill("second", false);
+        second.acquisition_source = Some("second".into());
+        let mut model = Model::new(Workspace::Library, vec![first, second]);
+
+        activate(&mut model, 1, RowAction::SwitchMode);
+
+        assert_eq!(model.rows[0].acquisition_mode, None);
+        assert_eq!(
+            model.rows[1].acquisition_mode,
+            Some(LibraryAcquisitionMode::Move)
+        );
+        assert!(model.rows[1].acquisition_pending);
+        assert!(model.dirty);
+    }
+
+    #[test]
+    fn addressed_follower_rows_are_read_only() {
+        let mut model = Model::new(Workspace::Library, vec![skill("replica", false)]);
+        model.host_labels = vec!["Local".into(), "worker".into()];
+        model.host_index = 1;
+
+        activate(&mut model, 0, RowAction::Toggle);
+        assert_eq!(model.rows[0].check, Some(CheckState::Unchecked));
+        assert!(matches!(model.overlay, Overlay::Notice(_)));
+        assert!(!model.dirty);
+        model.overlay = Overlay::None;
+        activate(&mut model, 0, RowAction::SwitchMode);
+        assert_eq!(model.rows[0].acquisition_mode, None);
+        assert!(matches!(model.overlay, Overlay::Notice(_)));
+        assert!(!model.dirty);
+    }
+
+    #[test]
+    fn addressed_disclosure_changes_stored_state_during_filter_expansion() {
+        let mut model = Model::new(
+            Workspace::Target,
+            vec![
+                Row::source("source", CheckState::Unchecked),
+                skill("match", false),
+                skill("other", false),
+            ],
+        );
+        model.collapsed.insert("source".into());
+        model.filter = "match".into();
+        assert!(model.visible_indices().contains(&1));
+
+        activate(&mut model, 0, RowAction::ToggleDisclosure);
+        assert!(!model.collapsed.contains("source"));
+        model.filter.clear();
+        assert!(model.visible_indices().contains(&2));
+        activate(&mut model, 0, RowAction::ToggleDisclosure);
+        assert!(model.collapsed.contains("source"));
+        model.filter = "match".into();
+        assert!(model.visible_indices().contains(&1));
+        model.filter.clear();
+        assert!(!model.visible_indices().contains(&1));
+    }
+
+    #[test]
+    fn dirty_host_switch_preserves_exact_destination_for_each_outcome() {
+        for outcome in [
+            Action::Confirm,
+            Action::DeleteDirectory,
+            Action::ReturnToEditing,
+        ] {
+            let mut model = Model::new(Workspace::Library, vec![]);
+            model.host_labels = vec!["Local".into(), "one".into(), "two".into()];
+            model.host_dirty = true;
+            assert!(reduce(&mut model, Action::SelectHost(2)).is_empty());
+            assert_eq!(
+                model.overlay,
+                Overlay::ScopeSwitch {
+                    destination: Scope::Library,
+                    host_to: Some(2),
+                }
+            );
+
+            let effects = reduce(&mut model, outcome.clone());
+            match outcome {
+                Action::Confirm => assert_eq!(
+                    effects,
+                    [Effect::SwitchToScope {
+                        destination: Scope::Library,
+                        host_to: Some(2),
+                        save: true,
+                        discard: false,
+                    }]
+                ),
+                Action::DeleteDirectory => assert_eq!(
+                    effects,
+                    [Effect::SwitchToScope {
+                        destination: Scope::Library,
+                        host_to: Some(2),
+                        save: false,
+                        discard: true,
+                    }]
+                ),
+                Action::ReturnToEditing => {
+                    assert!(effects.is_empty());
+                    assert_eq!(model.overlay, Overlay::None);
+                    assert_eq!(model.host_index, 0);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn direct_selection_noops_for_active_invalid_and_selects_valid_scope() {
+        let mut model = Model::new(Workspace::Target, vec![]);
+        model.scope = Scope::User;
+        model.directory_scopes = vec![TargetTabScope::User, TargetTabScope::Repository];
+        assert!(reduce(&mut model, Action::SelectDirectory(0)).is_empty());
+        assert!(reduce(&mut model, Action::SelectDirectory(1)).is_empty());
+        assert!(reduce(&mut model, Action::SelectDirectory(99)).is_empty());
+        assert!(reduce(&mut model, Action::SelectHost(0)).is_empty());
+        assert!(reduce(&mut model, Action::SelectScope(Scope::User)).is_empty());
+        assert_eq!(
+            reduce(&mut model, Action::SelectScope(Scope::Repo)),
+            [Effect::SwitchToScope {
+                destination: Scope::Repo,
+                host_to: None,
+                save: false,
+                discard: false,
+            }]
+        );
+        assert_eq!(model.directory_index, 0);
+        assert_eq!(model.scope, Scope::User);
+
+        let mut library = Model::new(Workspace::Library, vec![]);
+        library.host_labels = vec!["Local".into()];
+        assert!(reduce(&mut library, Action::SelectHost(0)).is_empty());
+        assert!(reduce(&mut library, Action::SelectHost(1)).is_empty());
+        assert_eq!(library.host_index, 0);
+    }
+
+    #[test]
+    fn same_scope_directory_switch_preserves_staged_edits() {
+        let mut model = Model::new(Workspace::Target, vec![skill("staged", false)]);
+        model.scope = Scope::User;
+        model.directory_scopes = vec![
+            TargetTabScope::User,
+            TargetTabScope::User,
+            TargetTabScope::Repository,
+        ];
+        model.dirty = true;
+        activate(&mut model, 0, RowAction::Toggle);
+        assert_eq!(model.rows[0].check, Some(CheckState::Checked));
+
+        assert_eq!(
+            reduce(&mut model, Action::SelectDirectory(1)),
+            [Effect::DirectoryChanged { from: 0, to: 1 }]
+        );
+        assert!(model.dirty);
+        assert_eq!(model.rows[0].check, Some(CheckState::Checked));
+        assert!(reduce(&mut model, Action::SelectDirectory(2)).is_empty());
+        assert_eq!(model.directory_index, 1);
+    }
 }
