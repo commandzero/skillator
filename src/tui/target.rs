@@ -1797,4 +1797,134 @@ mod directory_edit_tests {
             BTreeSet::from([TargetTabScope::User, TargetTabScope::Repository])
         );
     }
+
+    fn click_rendered(model: &mut Model, expected: Action) -> Vec<Effect> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 32)).unwrap();
+        let mut interactions = crate::tui::interaction::InteractionMap::default();
+        terminal
+            .draw(|frame| crate::tui::render::render(frame, model, &mut interactions))
+            .unwrap();
+        for y in 0..32 {
+            for x in 0..100 {
+                if interactions.action_at(x, y).as_ref() == Some(&expected) {
+                    return reduce(model, interactions.action_at(x, y).unwrap());
+                }
+            }
+        }
+        panic!("rendered action has no mouse target: {expected:?}");
+    }
+
+    #[test]
+    fn mouse_staged_chooser_adds_only_selected_scope_and_preserves_other_edits() {
+        let (_home, paths, mut data) = empty_user_fixture();
+        let mut model = initial_target_model(&data.state.tabs);
+        let mut dirty = BTreeSet::new();
+
+        model.overlay = Overlay::DirectoryEditor {
+            edit: true,
+            input: "agents,.agents/skills,Renamed".to_owned(),
+        };
+        let effect = reduce(&mut model, Action::Confirm).pop().unwrap();
+        consume_edit(&mut model, &paths, &mut data, &mut dirty, effect);
+        let repository_before = data.state.tabs[0].clone();
+
+        activate_directory_scope(
+            &mut model,
+            &data.state.tabs,
+            &dirty,
+            Scope::User,
+            true,
+            None,
+        );
+        reduce(&mut model, Action::AddDirectory);
+        assert!(matches!(model.overlay, Overlay::DirectoryChooser { .. }));
+        assert!(click_rendered(&mut model, Action::SelectSuggestion(0)).is_empty());
+        assert!(matches!(
+            model.overlay,
+            Overlay::DirectoryChooser { selected: 0, .. }
+        ));
+        let effect = click_rendered(&mut model, Action::Confirm).pop().unwrap();
+        consume_edit(&mut model, &paths, &mut data, &mut dirty, effect);
+
+        assert_eq!(data.state.tabs.len(), 2);
+        assert_eq!(data.state.tabs[0].scope, repository_before.scope);
+        assert_eq!(data.state.tabs[0].directory, repository_before.directory);
+        assert_eq!(data.state.tabs[0].rows, repository_before.rows);
+        assert_eq!(data.state.tabs[1].scope, TargetTabScope::User);
+        assert_eq!(
+            data.state.tabs[1].directory.path().as_str(),
+            ".agents/skills"
+        );
+        assert_eq!(
+            dirty,
+            BTreeSet::from([TargetTabScope::Repository, TargetTabScope::User])
+        );
+        assert_eq!(model.scope, Scope::User);
+        assert_eq!(model.directory_index, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chooser_effect_consumer_rejects_duplicate_invalid_and_outside_paths() {
+        let (_home, paths, mut data) = empty_user_fixture();
+        let mut model = initial_target_model(&data.state.tabs);
+        let mut dirty = BTreeSet::new();
+        activate_directory_scope(
+            &mut model,
+            &data.state.tabs,
+            &dirty,
+            Scope::User,
+            true,
+            None,
+        );
+        consume_edit(
+            &mut model,
+            &paths,
+            &mut data,
+            &mut dirty,
+            Effect::ApplyDirectoryEdit {
+                edit: false,
+                value: ".claude/skills".to_owned(),
+            },
+        );
+        assert_eq!(data.state.tabs.len(), 2);
+        model.overlay = Overlay::DirectoryChooser {
+            input: "Claude".to_owned(),
+            selected: 0,
+        };
+        assert!(click_rendered(&mut model, Action::SelectSuggestion(0)).is_empty());
+        let effect = click_rendered(&mut model, Action::Confirm).pop().unwrap();
+        consume_edit(&mut model, &paths, &mut data, &mut dirty, effect);
+        assert!(
+            matches!(&model.overlay, Overlay::Notice(message) if message.contains("collision"))
+        );
+        assert_eq!(data.state.tabs.len(), 2);
+
+        for invalid in ["../escape", "bad//path"] {
+            model.overlay = Overlay::DirectoryChooser {
+                input: invalid.to_owned(),
+                selected: 0,
+            };
+            let effect = click_rendered(&mut model, Action::Confirm).pop().unwrap();
+            consume_edit(&mut model, &paths, &mut data, &mut dirty, effect);
+            assert!(matches!(model.overlay, Overlay::Notice(_)));
+            assert_eq!(data.state.tabs.len(), 2);
+        }
+
+        std::fs::remove_dir_all(paths.home().join(".agents")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), paths.home().join(".agents")).unwrap();
+        model.overlay = Overlay::DirectoryChooser {
+            input: String::new(),
+            selected: 0,
+        };
+        assert!(click_rendered(&mut model, Action::SelectSuggestion(0)).is_empty());
+        let effect = click_rendered(&mut model, Action::Confirm).pop().unwrap();
+        consume_edit(&mut model, &paths, &mut data, &mut dirty, effect);
+        assert!(
+            matches!(&model.overlay, Overlay::Notice(message) if message.contains("symbolic link"))
+        );
+        assert_eq!(data.state.tabs.len(), 2);
+    }
 }

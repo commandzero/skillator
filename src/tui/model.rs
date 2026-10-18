@@ -499,15 +499,74 @@ impl Model {
         self.rows.get(self.selected)
     }
 
+    pub(super) fn is_visible_index(&self, index: usize) -> bool {
+        let Some(row) = self.rows.get(index) else {
+            return false;
+        };
+        if row.kind == RowKind::Diagnostic {
+            return false;
+        }
+
+        let pending_only = self.filter.eq_ignore_ascii_case("pending")
+            || self.filter.eq_ignore_ascii_case("pending actions");
+        let filtering = !self.filter.is_empty();
+        match row.kind {
+            RowKind::Location if filtering => {
+                row_matches_filter(row, &self.filter, pending_only)
+                    || row.location_index.is_some_and(|location| {
+                        self.rows.iter().any(|candidate| {
+                            candidate.location_index == Some(location)
+                                && match candidate.kind {
+                                    RowKind::Skill => {
+                                        row_matches_filter(candidate, &self.filter, pending_only)
+                                    }
+                                    RowKind::Source => {
+                                        row_matches_filter(candidate, &self.filter, pending_only)
+                                            || row_identity(candidate).is_some_and(|identity| {
+                                                self.rows.iter().any(|skill| {
+                                                    skill.kind == RowKind::Skill
+                                                        && row_identity(skill) == Some(identity)
+                                                        && row_matches_filter(
+                                                            skill,
+                                                            &self.filter,
+                                                            pending_only,
+                                                        )
+                                                })
+                                            })
+                                    }
+                                    _ => false,
+                                }
+                        })
+                    })
+            }
+            RowKind::Source if filtering => {
+                row_matches_filter(row, &self.filter, pending_only)
+                    || row_identity(row).is_some_and(|identity| {
+                        self.rows.iter().any(|candidate| {
+                            candidate.kind == RowKind::Skill
+                                && row_identity(candidate) == Some(identity)
+                                && row_matches_filter(candidate, &self.filter, pending_only)
+                        })
+                    })
+            }
+            RowKind::Skill if filtering => row_matches_filter(row, &self.filter, pending_only),
+            RowKind::Skill => {
+                !row_identity(row).is_some_and(|identity| self.collapsed.contains(identity))
+            }
+            _ => true,
+        }
+    }
+
     pub(super) fn visible_indices(&self) -> Vec<usize> {
-        let needle = self.filter.to_ascii_lowercase();
+        let needle = self.filter.as_str();
         let filtering = !needle.is_empty();
-        let pending_only = matches!(needle.as_str(), "pending" | "pending actions");
+        let pending_only = needle.eq_ignore_ascii_case("pending")
+            || needle.eq_ignore_ascii_case("pending actions");
         let matching_groups: BTreeSet<_> = self
             .rows
             .iter()
             .filter(|row| {
-                row.kind == RowKind::Skill && row_matches_filter(row, &needle, pending_only)
+                row.kind == RowKind::Skill && row_matches_filter(row, needle, pending_only)
             })
             .filter_map(|row| row_identity(row).map(str::to_owned))
             .collect();
@@ -516,11 +575,11 @@ impl Model {
             .iter()
             .filter(|row| match row.kind {
                 RowKind::Source => {
-                    row_matches_filter(row, &needle, pending_only)
+                    row_matches_filter(row, needle, pending_only)
                         || row_identity(row)
                             .is_some_and(|identity| matching_groups.contains(identity))
                 }
-                RowKind::Skill => row_matches_filter(row, &needle, pending_only),
+                RowKind::Skill => row_matches_filter(row, needle, pending_only),
                 _ => false,
             })
             .filter_map(|row| row.location_index)
@@ -530,7 +589,7 @@ impl Model {
             .enumerate()
             .filter_map(|(index, row)| match row.kind {
                 RowKind::Diagnostic => None,
-                RowKind::Location if filtering => (row_matches_filter(row, &needle, pending_only)
+                RowKind::Location if filtering => (row_matches_filter(row, needle, pending_only)
                     || row
                         .location_index
                         .is_some_and(|location| matching_locations.contains(&location)))
@@ -538,9 +597,9 @@ impl Model {
                 RowKind::Source if filtering => row_identity(row)
                     .is_some_and(|identity| matching_groups.contains(identity))
                     .then_some(index)
-                    .or_else(|| row_matches_filter(row, &needle, pending_only).then_some(index)),
+                    .or_else(|| row_matches_filter(row, needle, pending_only).then_some(index)),
                 RowKind::Skill if filtering => {
-                    row_matches_filter(row, &needle, pending_only).then_some(index)
+                    row_matches_filter(row, needle, pending_only).then_some(index)
                 }
                 RowKind::Skill => (!row_identity(row)
                     .is_some_and(|identity| self.collapsed.contains(identity)))
@@ -623,10 +682,26 @@ fn row_matches_filter(row: &Row, needle: &str, pending_only: bool) -> bool {
     if pending_only {
         !row.action.is_empty()
     } else {
-        row.name.to_ascii_lowercase().contains(needle)
-            || row.description.to_ascii_lowercase().contains(needle)
-            || row.action.to_ascii_lowercase().contains(needle)
+        ascii_contains(&row.name, needle)
+            || ascii_contains(&row.description, needle)
+            || ascii_contains(&row.action, needle)
     }
+}
+
+fn ascii_contains(haystack: &str, needle: &str) -> bool {
+    needle.is_empty()
+        || haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|candidate| candidate.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowAction {
+    Select,
+    Toggle,
+    SwitchMode,
+    ToggleDisclosure,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -641,6 +716,11 @@ pub enum Action {
     Expand,
     Toggle,
     SwitchMode,
+    ActivateRow { index: usize, intent: RowAction },
+    SelectScope(Scope),
+    SelectDirectory(usize),
+    SelectHost(usize),
+    SelectSuggestion(usize),
     NextDirectory,
     NextScope,
     PreviousScope,
