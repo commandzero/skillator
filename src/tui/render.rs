@@ -949,7 +949,7 @@ fn render_help(
         ("Mouse", None),
         (
             "Row body",
-            Some("Select and inspect; pending actions are never run"),
+            Some("Select; click an already-selected Skill to open Details"),
         ),
         (
             "Checkbox",

@@ -1,4 +1,4 @@
-//! Pure keyboard-driven state transitions; scope workflows execute returned effects.
+//! Pure semantic action transitions; scope workflows execute returned effects.
 
 use super::input::{chooser_matches, complete_path};
 use super::library::{refresh_library_action, refresh_library_visibility};
@@ -261,8 +261,18 @@ pub fn reduce(model: &mut Model, action: Action) -> Vec<Effect> {
             if !model.is_visible_index(index) {
                 return Vec::new();
             }
+            let was_selected = model.selected == index;
             model.selected = index;
             match intent {
+                RowAction::Select
+                    if was_selected
+                        && model
+                            .rows
+                            .get(index)
+                            .is_some_and(|row| row.kind == RowKind::Skill) =>
+                {
+                    return reduce(model, Action::Confirm);
+                }
                 RowAction::Select => return Vec::new(),
                 RowAction::Toggle => return reduce(model, Action::Toggle),
                 RowAction::SwitchMode => return reduce(model, Action::SwitchMode),

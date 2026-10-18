@@ -44,7 +44,94 @@ fn rendered_checkbox_and_row_body_address_the_visible_row() {
     reduce(&mut model, select);
     assert_eq!(model.selected_row().unwrap().name(), "skill");
     assert_eq!(model.rows()[1].check(), Some(CheckState::Checked));
+    assert!(matches!(
+        model.overlay(),
+        Overlay::Details { title, document, .. }
+            if title == "skill" && document == "Description"
+    ));
 }
+
+#[test]
+fn skill_body_click_selects_before_inspecting_without_changing_desired_state() {
+    let mut model = Model::new(
+        Workspace::Target,
+        vec![
+            Row::source("source", CheckState::Unchecked),
+            Row::skill(
+                "source",
+                "first",
+                "First info",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "",
+            ),
+            Row::skill(
+                "source",
+                "second",
+                "Second info",
+                false,
+                true,
+                MaterializationKind::Linked,
+                "",
+            ),
+        ],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+    let mut interactions = InteractionMap::default();
+    for label in ["source", "first", "second"] {
+        terminal
+            .draw(|frame| render(frame, &model, &mut interactions))
+            .unwrap();
+        let (x, y) = rendered_text_location(terminal.backend().buffer(), label);
+        let action = action_for_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), x, y),
+            &interactions,
+        )
+        .expect("visible row body");
+        reduce(&mut model, action);
+        assert_eq!(model.selected_row().unwrap().name(), label);
+        assert_eq!(model.overlay(), &Overlay::None);
+    }
+
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let (x, y) = rendered_text_location(terminal.backend().buffer(), "second");
+    let inspect = action_for_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), x, y),
+        &interactions,
+    )
+    .expect("already-selected skill body");
+    reduce(&mut model, inspect);
+    assert!(matches!(
+        model.overlay(),
+        Overlay::Details { title, document, .. }
+            if title == "second" && document == "Second info"
+    ));
+    assert!(
+        model
+            .rows()
+            .iter()
+            .filter_map(|row| row.check())
+            .all(|check| check == CheckState::Unchecked)
+    );
+
+    reduce(&mut model, Action::Escape);
+    terminal
+        .draw(|frame| render(frame, &model, &mut interactions))
+        .unwrap();
+    let x = rendered_checkbox_x(terminal.backend().buffer(), y);
+    let toggle = action_for_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), x, y),
+        &interactions,
+    )
+    .expect("selected skill checkbox");
+    reduce(&mut model, toggle);
+    assert_eq!(model.rows()[2].check(), Some(CheckState::Checked));
+    assert_eq!(model.overlay(), &Overlay::None);
+}
+
 fn rendered_row(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<u16> {
     (0..buffer.area.height).find(|&y| {
         let line: String = (0..buffer.area.width)
