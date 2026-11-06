@@ -81,7 +81,10 @@ fn help_and_version_are_successful_text_on_stdout() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("skillator 0.1.0"));
+        .stdout(predicate::str::contains(concat!(
+            "skillator ",
+            env!("CARGO_PKG_VERSION")
+        )));
 }
 
 #[test]

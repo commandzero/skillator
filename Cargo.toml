@@ -1,6 +1,6 @@
 [package]
 name = "skillator"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.97"
 description = "A terminal UI and CLI for managing agent skills across Git repositories"
