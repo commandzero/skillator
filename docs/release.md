@@ -24,9 +24,12 @@ The next release uses this matrix. The workflow runs natively on each target; th
 
 | Target | Build and test host | Supported binary baseline |
 | --- | --- | --- |
-| aarch64-apple-darwin | macOS 14 arm64 | macOS 14, deployment target 14.0 |
+| aarch64-apple-darwin | macOS 15 arm64 | macOS 14, deployment target 14.0 |
 | x86_64-unknown-linux-gnu | Ubuntu 24.04 x86_64 | Ubuntu 24.04, glibc 2.39 |
 | aarch64-unknown-linux-gnu | Ubuntu 24.04 arm64 | Ubuntu 24.04, glibc 2.39 |
+
+GitHub-hosted macOS tests run on macOS 15 after retirement of the macOS 14 runner.
+The deployment target remains 14.0; hosted CI does not directly test execution on macOS 14.
 
 Newer compatible systems may run these binaries. Other Linux distributions need their own installation checks.
 WSL uses the Linux build on its Linux filesystem; mounted Windows filesystems can lack required rename or link capabilities.
