@@ -4,6 +4,8 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-05
+
 ### Added
 
 - Use mouse clicks for TUI selection, selected-skill details, staged controls, and explicit modal choices, with a `+` beside User/Repo tabs to add directories and wheel navigation for rows and scrollable views (#41).
@@ -51,5 +53,6 @@ Notable user-facing changes are recorded here. Version headings link to the corr
 - Preview and force controls, deterministic JSON/YAML reports, drift detection, and guarded filesystem recovery.
 - Rust source installation and an MIT license.
 
-[Unreleased]: https://github.com/commandzero/skillator/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/commandzero/skillator/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/commandzero/skillator/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/commandzero/skillator/releases/tag/v0.1.0
