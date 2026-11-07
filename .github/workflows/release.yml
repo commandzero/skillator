@@ -81,6 +81,14 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: release-${{ runner.os }}-${{ runner.arch }}-1.97.1-${{ hashFiles('Cargo.lock') }}
+      - name: Install rsync
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            brew install rsync
+          else
+            sudo apt-get update
+            sudo apt-get install --yes rsync
+          fi
       - run: bash scripts/preflight.sh test
       - name: Build
         shell: bash
