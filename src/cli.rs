@@ -342,6 +342,10 @@ pub fn run() -> ExitCode {
         let _ = error.print();
         return ExitCode::from(code);
     }
+    run_cli(cli)
+}
+
+fn run_cli(cli: Cli) -> ExitCode {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return diagnostic(
             5,
@@ -407,48 +411,8 @@ fn validate_output(output: &OutputArgs) -> Result<(), ExitCode> {
 
 fn run_library_command(paths: &AppPaths, command: LibraryCommand) -> ExitCode {
     match command {
-        LibraryCommand::Rsync(arguments) => {
-            if arguments.prepare_export {
-                let mut stdout = std::io::stdout().lock();
-                return match crate::remote::prepare_export(paths, &mut stdout) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(error) => diagnostic(error.code, &error.to_string()),
-                };
-            }
-            if let Err(code) = validate_output(&arguments.output) {
-                return code;
-            }
-            let options = crate::remote::Options {
-                hosts: arguments.hosts,
-                check: arguments.check,
-            };
-            match crate::remote::run(paths, options) {
-                Ok(report) => {
-                    let rendered = match arguments.output.format {
-                        OutputFormat::Text => Ok(report.text_with_color(color_enabled(
-                            arguments.output.color.unwrap_or(ColorPolicy::Auto),
-                        ))),
-                        OutputFormat::Json => render_json(&report),
-                        OutputFormat::Yaml => render_serialized_yaml(&report),
-                    };
-                    write_rendered(rendered, report.exit_status)
-                }
-                Err(error) => diagnostic(error.code, &error.to_string()),
-            }
-        }
-        LibraryCommand::Update(arguments) => {
-            if let Err(code) = validate_output(&arguments.output.output) {
-                return code;
-            }
-            finish_report(
-                crate::library_update::run(
-                    paths,
-                    arguments.output.check,
-                    std::time::Duration::from_secs(u64::from(arguments.timeout)),
-                ),
-                &arguments.output.output,
-            )
-        }
+        LibraryCommand::Rsync(arguments) => run_library_rsync(paths, arguments),
+        LibraryCommand::Update(arguments) => run_library_update(paths, arguments),
         LibraryCommand::Add {
             location,
             allow_overlap,
@@ -508,6 +472,50 @@ fn run_library_command(paths: &AppPaths, command: LibraryCommand) -> ExitCode {
             }
         }
     }
+}
+
+fn run_library_rsync(paths: &AppPaths, arguments: RsyncArgs) -> ExitCode {
+    if arguments.prepare_export {
+        let mut stdout = std::io::stdout().lock();
+        return match crate::remote::prepare_export(paths, &mut stdout) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => diagnostic(error.code, &error.to_string()),
+        };
+    }
+    if let Err(code) = validate_output(&arguments.output) {
+        return code;
+    }
+    let options = crate::remote::Options {
+        hosts: arguments.hosts,
+        check: arguments.check,
+    };
+    match crate::remote::run(paths, options) {
+        Ok(report) => {
+            let rendered = match arguments.output.format {
+                OutputFormat::Text => Ok(report.text_with_color(color_enabled(
+                    arguments.output.color.unwrap_or(ColorPolicy::Auto),
+                ))),
+                OutputFormat::Json => render_json(&report),
+                OutputFormat::Yaml => render_serialized_yaml(&report),
+            };
+            write_rendered(rendered, report.exit_status)
+        }
+        Err(error) => diagnostic(error.code, &error.to_string()),
+    }
+}
+
+fn run_library_update(paths: &AppPaths, arguments: LibraryUpdateArgs) -> ExitCode {
+    if let Err(code) = validate_output(&arguments.output.output) {
+        return code;
+    }
+    finish_report(
+        crate::library_update::run(
+            paths,
+            arguments.output.check,
+            std::time::Duration::from_secs(u64::from(arguments.timeout)),
+        ),
+        &arguments.output.output,
+    )
 }
 
 fn run_target_command(paths: &AppPaths, command: TargetCommand) -> ExitCode {
@@ -773,34 +781,26 @@ fn run_sync_command(paths: &AppPaths, arguments: SyncCommandArgs) -> ExitCode {
 }
 
 fn run_target_sync(paths: &AppPaths, arguments: SyncArgs) -> ExitCode {
-    if arguments.output.format != OutputFormat::Text && arguments.output.color.is_some() {
-        let mut command = Cli::command();
-        let error = command.error(
-            ErrorKind::ArgumentConflict,
-            "--color cannot be used with --format=json or --format=yaml",
-        );
-        let _ = error.print();
-        return ExitCode::from(2);
-    }
-    let directory = arguments
-        .directory
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("."));
-    let mode = if arguments.output.check {
-        SyncMode::Check
-    } else {
-        SyncMode::Apply {
-            force: arguments.output.force,
-        }
-    };
-    let report = match SyncWorkflow::run(paths, &directory, mode) {
-        Ok(report) => report,
-        Err(error) => return diagnostic(error.exit_status(), &error.to_string()),
-    };
-    render_report(arguments, report)
+    run_sync_workflow(paths, arguments, |paths, directory, mode| {
+        SyncWorkflow::run(paths, directory, mode)
+    })
 }
 
 fn run_worktree_sync(paths: &AppPaths, arguments: SyncArgs) -> ExitCode {
+    run_sync_workflow(paths, arguments, |paths, directory, mode| {
+        WorktreeSyncWorkflow::run(paths, directory, mode)
+    })
+}
+
+fn run_sync_workflow(
+    paths: &AppPaths,
+    arguments: SyncArgs,
+    workflow: fn(
+        &AppPaths,
+        &std::path::Path,
+        SyncMode,
+    ) -> Result<CommandReport, crate::app::WorkflowError>,
+) -> ExitCode {
     if arguments.output.format != OutputFormat::Text && arguments.output.color.is_some() {
         let mut command = Cli::command();
         let error = command.error(
@@ -821,7 +821,7 @@ fn run_worktree_sync(paths: &AppPaths, arguments: SyncArgs) -> ExitCode {
             force: arguments.output.force,
         }
     };
-    let report = match WorktreeSyncWorkflow::run(paths, &directory, mode) {
+    let report = match workflow(paths, &directory, mode) {
         Ok(report) => report,
         Err(error) => return diagnostic(error.exit_status(), &error.to_string()),
     };
@@ -861,28 +861,32 @@ fn render_inventory(report: LibraryInventoryReport, arguments: &OutputArgs) -> E
     let rendered = match arguments.format {
         OutputFormat::Text => {
             let mut text = String::new();
-            for source in &report.sources {
-                text.push_str(&source.key);
-                text.push('\n');
-                for skill in &source.skills {
-                    text.push_str("  ");
-                    text.push_str(&skill.path);
-                    if let Some(name) = &skill.name {
-                        text.push_str("  ");
-                        text.push_str(name);
-                    }
-                    if !skill.valid {
-                        text.push_str("  invalid");
-                    }
-                    text.push('\n');
-                }
-            }
+            append_inventory_text(&report, &mut text);
             Ok(text)
         }
         OutputFormat::Json => render_json(&report),
         OutputFormat::Yaml => render_serialized_yaml(&report),
     };
     write_rendered(rendered, 0)
+}
+
+fn append_inventory_text(report: &LibraryInventoryReport, text: &mut String) {
+    for source in &report.sources {
+        text.push_str(&source.key);
+        text.push('\n');
+        for skill in &source.skills {
+            text.push_str("  ");
+            text.push_str(&skill.path);
+            if let Some(name) = &skill.name {
+                text.push_str("  ");
+                text.push_str(name);
+            }
+            if !skill.valid {
+                text.push_str("  invalid");
+            }
+            text.push('\n');
+        }
+    }
 }
 
 fn render_locations(report: LibraryLocationsReport, arguments: &OutputArgs) -> ExitCode {
@@ -1031,6 +1035,12 @@ pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
     if report.status == ReportStatus::InSync {
         output.push_str("In sync.\n");
     }
+    append_text_changes(report, color, &mut output);
+    append_text_diagnostics(report, color, &mut output);
+    output
+}
+
+fn append_text_changes(report: &CommandReport, color: bool, output: &mut String) {
     for change in &report.changes {
         let marker = match change.outcome {
             crate::app::ReportOutcome::Unchanged => "Unchanged",
@@ -1067,6 +1077,9 @@ pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
             output.push_str(&format!("{marker}: {} ({action})\n", change.path));
         }
     }
+}
+
+fn append_text_diagnostics(report: &CommandReport, color: bool, output: &mut String) {
     for diagnostic in &report.diagnostics {
         if color {
             output.push_str(&format!(
@@ -1081,7 +1094,6 @@ pub fn render_text(report: &CommandReport, color: ColorPolicy) -> String {
             ));
         }
     }
-    output
 }
 
 pub fn render_yaml(report: &CommandReport) -> Result<String, String> {
@@ -1100,50 +1112,59 @@ fn render_yaml_value(value: &Value) -> Result<String, String> {
 
 fn emit_yaml(value: &Value, indent: usize, output: &mut String) -> Result<(), String> {
     match value {
-        Value::Object(values) => {
-            if values.is_empty() {
-                output.push_str(&" ".repeat(indent));
-                output.push_str("{}\n");
-            } else {
-                for (key, value) in values {
-                    output.push_str(&" ".repeat(indent));
-                    output
-                        .push_str(&serde_json::to_string(key).map_err(|error| error.to_string())?);
-                    output.push(':');
-                    if scalar(value) || empty_collection(value) {
-                        output.push(' ');
-                        emit_scalar(value, output)?;
-                        output.push('\n');
-                    } else {
-                        output.push('\n');
-                        emit_yaml(value, indent + 2, output)?;
-                    }
-                }
-            }
-        }
-        Value::Array(values) => {
-            if values.is_empty() {
-                output.push_str(&" ".repeat(indent));
-                output.push_str("[]\n");
-            } else {
-                for value in values {
-                    output.push_str(&" ".repeat(indent));
-                    output.push('-');
-                    if scalar(value) || empty_collection(value) {
-                        output.push(' ');
-                        emit_scalar(value, output)?;
-                        output.push('\n');
-                    } else {
-                        output.push('\n');
-                        emit_yaml(value, indent + 2, output)?;
-                    }
-                }
-            }
-        }
+        Value::Object(values) => emit_yaml_object(values, indent, output)?,
+        Value::Array(values) => emit_yaml_array(values, indent, output)?,
         _ => {
             output.push_str(&" ".repeat(indent));
             emit_scalar(value, output)?;
             output.push('\n');
+        }
+    }
+    Ok(())
+}
+
+fn emit_yaml_object(
+    values: &serde_json::Map<String, Value>,
+    indent: usize,
+    output: &mut String,
+) -> Result<(), String> {
+    if values.is_empty() {
+        output.push_str(&" ".repeat(indent));
+        output.push_str("{}\n");
+    } else {
+        for (key, value) in values {
+            output.push_str(&" ".repeat(indent));
+            output.push_str(&serde_json::to_string(key).map_err(|error| error.to_string())?);
+            output.push(':');
+            if scalar(value) || empty_collection(value) {
+                output.push(' ');
+                emit_scalar(value, output)?;
+                output.push('\n');
+            } else {
+                output.push('\n');
+                emit_yaml(value, indent + 2, output)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn emit_yaml_array(values: &[Value], indent: usize, output: &mut String) -> Result<(), String> {
+    if values.is_empty() {
+        output.push_str(&" ".repeat(indent));
+        output.push_str("[]\n");
+    } else {
+        for value in values {
+            output.push_str(&" ".repeat(indent));
+            output.push('-');
+            if scalar(value) || empty_collection(value) {
+                output.push(' ');
+                emit_scalar(value, output)?;
+                output.push('\n');
+            } else {
+                output.push('\n');
+                emit_yaml(value, indent + 2, output)?;
+            }
         }
     }
     Ok(())
