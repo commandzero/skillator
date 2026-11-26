@@ -1,5 +1,11 @@
 //! Library discovery and immutable snapshots.
 
+mod metadata;
+use metadata::read_skill;
+pub(crate) use metadata::{inspect_skill_metadata, validated_skill_name_at};
+mod discovery;
+use discovery::scan_location;
+
 use crate::config::{LibraryConfig, LibraryLocationConfig};
 use crate::domain::{SkillKey, SourceKey};
 use crate::git::GitRepository;
@@ -228,77 +234,28 @@ pub fn scan_library(
         diagnostics: Vec::new(),
         overlap_advisory_locations: BTreeSet::new(),
     };
-    let mut resolved_locations = Vec::<(usize, PathBuf, bool)>::new();
+    let context = LocationEnvironment {
+        config_parent: config_path.parent().unwrap_or_else(|| Path::new(".")),
+        home,
+        environment,
+    };
+    let mut resolved_locations = Vec::new();
     for (location_index, location_config) in config.locations().iter().enumerate() {
-        let expanded = match expand_location(
-            location_config.path(),
-            config_path.parent().unwrap_or_else(|| Path::new(".")),
-            home,
-            environment,
-        ) {
+        let canonical = match context.resolve(location_config) {
             Ok(path) => path,
-            Err(message) => {
-                snapshot.locations.push(LibraryLocation {
-                    expression: location_config.path().to_owned(),
-                    resolved: None,
-                    available: false,
-                });
-                snapshot.diagnostics.push(LibraryDiagnostic {
-                    code: "location_expansion_failed",
-                    message,
-                    path: None,
-                });
+            Err(failure) => {
+                snapshot.locations.push(failure.location);
+                snapshot.diagnostics.push(failure.diagnostic);
                 continue;
             }
         };
-        let canonical = match expanded.canonicalize() {
-            Ok(path) if path.is_dir() => path,
-            _ => {
-                snapshot.locations.push(LibraryLocation {
-                    expression: location_config.path().to_owned(),
-                    resolved: Some(expanded.clone()),
-                    available: false,
-                });
-                snapshot.diagnostics.push(LibraryDiagnostic {
-                    code: "location_unavailable",
-                    message: format!("library folder is unavailable: {}", expanded.display()),
-                    path: Some(expanded),
-                });
-                continue;
-            }
+        let candidate = ResolvedLocation {
+            index: location_index,
+            path: canonical.clone(),
+            allow_overlap: location_config.allow_overlap(),
         };
-        for (other_index, other, other_allowed) in &resolved_locations {
-            if path_overlap(&canonical, other) {
-                let allowed = location_config.allow_overlap() && *other_allowed;
-                snapshot.diagnostics.push(LibraryDiagnostic {
-                    code: if allowed {
-                        "overlapping_locations_allowed"
-                    } else {
-                        "overlapping_locations"
-                    },
-                    message: format!(
-                        "library folders overlap{}: {} and {}",
-                        if allowed {
-                            " as allowed in the configuration"
-                        } else {
-                            ""
-                        },
-                        other.display(),
-                        canonical.display()
-                    ),
-                    path: Some(canonical.clone()),
-                });
-                if allowed {
-                    snapshot.overlap_advisory_locations.insert(location_index);
-                    snapshot.overlap_advisory_locations.insert(*other_index);
-                }
-            }
-        }
-        resolved_locations.push((
-            location_index,
-            canonical.clone(),
-            location_config.allow_overlap(),
-        ));
+        check_location_overlaps(&mut snapshot, &candidate, &resolved_locations);
+        resolved_locations.push(candidate);
         snapshot.locations.push(LibraryLocation {
             expression: location_config.path().to_owned(),
             resolved: Some(canonical.clone()),
@@ -350,9 +307,9 @@ pub(crate) fn expand_location(
 }
 
 pub(crate) fn suggested_source_key(root: &Path, origin: Option<&str>) -> SourceKey {
-    if let Some(origin) = origin
-        && let Some(candidate) = key_from_remote(origin)
-        && let Ok(key) = SourceKey::parse(candidate)
+    if let Some(key) = origin
+        .and_then(key_from_remote)
+        .and_then(|candidate| SourceKey::parse(candidate).ok())
     {
         return key;
     }
@@ -370,509 +327,6 @@ fn path_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
-fn scan_location(
-    location_index: usize,
-    config: &LibraryLocationConfig,
-    root: &Path,
-    snapshot: &mut LibrarySnapshot,
-) {
-    let exclusions = build_exclusions(root, config.exclusions(), &mut snapshot.diagnostics);
-    let mut discovered = Vec::new();
-    if discover_replica(
-        root,
-        root,
-        &exclusions,
-        &mut discovered,
-        &mut snapshot.diagnostics,
-    ) {
-        // An owned replica is a container, not a source of its own.
-    } else if is_git_root(root) {
-        discover_source(root, root, SourceKind::Git, &exclusions, &mut discovered);
-    } else {
-        let mut local =
-            DiscoveredSource::new(root.to_owned(), PathBuf::from("."), SourceKind::Local);
-        let is_local_library = location_index == 0;
-        let contains_replica = discover_tree(
-            root,
-            root,
-            &exclusions,
-            &mut local,
-            &mut discovered,
-            is_local_library,
-        );
-        if !contains_replica || !local.skills.is_empty() {
-            discovered.push(local);
-        } else {
-            snapshot.diagnostics.append(&mut local.diagnostics);
-        }
-    }
-
-    for mut discovered_source in discovered {
-        snapshot
-            .diagnostics
-            .append(&mut discovered_source.diagnostics);
-        insert_discovered_source(snapshot, location_index, discovered_source);
-    }
-}
-
-fn build_exclusions(
-    root: &Path,
-    patterns: &[String],
-    diagnostics: &mut Vec<LibraryDiagnostic>,
-) -> Gitignore {
-    let mut builder = GitignoreBuilder::new(root);
-    for pattern in patterns {
-        if let Err(error) = builder.add_line(None, pattern) {
-            diagnostics.push(LibraryDiagnostic {
-                code: "invalid_exclusion",
-                message: error.to_string(),
-                path: Some(root.to_owned()),
-            });
-        }
-    }
-    builder.build().unwrap_or_else(|_| Gitignore::empty())
-}
-
-#[derive(Debug)]
-struct DiscoveredSource {
-    root: PathBuf,
-    relative: PathBuf,
-    kind: SourceKind,
-    origin: Option<String>,
-    source_key: Option<SourceKey>,
-    skills: Vec<LibrarySkill>,
-    diagnostics: Vec<LibraryDiagnostic>,
-}
-
-impl DiscoveredSource {
-    fn new(root: PathBuf, relative: PathBuf, kind: SourceKind) -> Self {
-        let origin = (kind == SourceKind::Git)
-            .then(|| {
-                GitRepository::discover(&root)
-                    .ok()
-                    .and_then(|git| git.origin().ok().flatten())
-            })
-            .flatten();
-        Self {
-            root,
-            relative,
-            kind,
-            origin,
-            source_key: None,
-            skills: Vec::new(),
-            diagnostics: Vec::new(),
-        }
-    }
-}
-
-fn discover_source(
-    location_root: &Path,
-    source_root: &Path,
-    kind: SourceKind,
-    exclusions: &Gitignore,
-    sources: &mut Vec<DiscoveredSource>,
-) -> bool {
-    let relative = source_root
-        .strip_prefix(location_root)
-        .unwrap_or(Path::new("."))
-        .to_owned();
-    let relative = if relative.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        relative
-    };
-    let mut source = DiscoveredSource::new(source_root.to_owned(), relative, kind);
-    let contains_replica = discover_tree(
-        source_root,
-        location_root,
-        exclusions,
-        &mut source,
-        sources,
-        false,
-    );
-    sources.push(source);
-    contains_replica
-}
-
-fn discover_tree(
-    directory: &Path,
-    location_root: &Path,
-    exclusions: &Gitignore,
-    current: &mut DiscoveredSource,
-    sources: &mut Vec<DiscoveredSource>,
-    follow_root_skill_links: bool,
-) -> bool {
-    let mut contains_replica = false;
-    let relative_to_source = directory
-        .strip_prefix(&current.root)
-        .unwrap_or(Path::new("."));
-    if directory.join("SKILL.md").is_file() {
-        current
-            .skills
-            .push(read_skill(directory, relative_to_source));
-    }
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) => {
-            current.diagnostics.push(discovery_error(directory, error));
-            return false;
-        }
-    };
-    let mut entries: Vec<_> = entries
-        .filter_map(|entry| match entry {
-            Ok(entry) => Some(entry),
-            Err(error) => {
-                current.diagnostics.push(discovery_error(directory, error));
-                None
-            }
-        })
-        .collect();
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        if entry.file_name() == OsStr::new(".git") {
-            continue;
-        }
-        let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(kind) => kind,
-            Err(error) => {
-                current.diagnostics.push(discovery_error(&path, error));
-                continue;
-            }
-        };
-        if file_type.is_symlink()
-            && follow_root_skill_links
-            && directory == current.root
-            && path.join("SKILL.md").is_file()
-        {
-            let relative_to_location = path.strip_prefix(location_root).unwrap_or(&path);
-            if !exclusions
-                .matched_path_or_any_parents(relative_to_location, true)
-                .is_ignore()
-            {
-                current.skills.push(read_skill(&path, relative_to_location));
-            }
-            continue;
-        }
-        if !file_type.is_dir() || file_type.is_symlink() {
-            continue;
-        }
-        let relative_to_location = path.strip_prefix(location_root).unwrap_or(&path);
-        if exclusions
-            .matched_path_or_any_parents(relative_to_location, true)
-            .is_ignore()
-        {
-            continue;
-        }
-        if current.source_key.is_none()
-            && discover_replica(
-                &path,
-                location_root,
-                exclusions,
-                sources,
-                &mut current.diagnostics,
-            )
-        {
-            contains_replica = true;
-        } else if current.source_key.is_none() && is_git_root(&path) {
-            contains_replica |=
-                discover_source(location_root, &path, SourceKind::Git, exclusions, sources);
-        } else {
-            contains_replica |= discover_tree(
-                &path,
-                location_root,
-                exclusions,
-                current,
-                sources,
-                follow_root_skill_links,
-            );
-        }
-    }
-    contains_replica
-}
-
-/// Recognize ownership before ordinary discovery can flatten a replica.
-/// Invalid markers also establish a boundary, but never provide inventory.
-fn discover_replica(
-    root: &Path,
-    location_root: &Path,
-    exclusions: &Gitignore,
-    sources: &mut Vec<DiscoveredSource>,
-    diagnostics: &mut Vec<LibraryDiagnostic>,
-) -> bool {
-    let marker = root.join(MARKER_NAME);
-    let valid = match fs::symlink_metadata(&marker) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            match fs::read(&marker) {
-                Ok(bytes) => bytes == MARKER_CONTENT.as_bytes(),
-                Err(error) => {
-                    diagnostics.push(discovery_error(&marker, error));
-                    false
-                }
-            }
-        }
-        Ok(_) => false,
-        Err(error) => {
-            diagnostics.push(discovery_error(&marker, error));
-            false
-        }
-    };
-    if valid {
-        discover_replica_sources(root, root, location_root, exclusions, sources, diagnostics);
-    } else {
-        diagnostics.push(LibraryDiagnostic {
-            code: "invalid_replica_marker",
-            message: format!("replica ownership marker is invalid: {}", marker.display()),
-            path: Some(marker),
-        });
-    }
-    true
-}
-
-fn discover_replica_sources(
-    directory: &Path,
-    replica_root: &Path,
-    location_root: &Path,
-    exclusions: &Gitignore,
-    sources: &mut Vec<DiscoveredSource>,
-    diagnostics: &mut Vec<LibraryDiagnostic>,
-) {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) => {
-            diagnostics.push(discovery_error(directory, error));
-            return;
-        }
-    };
-    let mut entries: Vec<_> = entries
-        .filter_map(|entry| match entry {
-            Ok(entry) => Some(entry),
-            Err(error) => {
-                diagnostics.push(discovery_error(directory, error));
-                None
-            }
-        })
-        .collect();
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        if entry.file_name() == OsStr::new(".git") {
-            continue;
-        }
-        let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(kind) => kind,
-            Err(error) => {
-                diagnostics.push(discovery_error(&path, error));
-                continue;
-            }
-        };
-        if !file_type.is_dir() || file_type.is_symlink() {
-            continue;
-        }
-        let relative_to_location = path.strip_prefix(location_root).unwrap_or(&path);
-        if exclusions
-            .matched_path_or_any_parents(relative_to_location, true)
-            .is_ignore()
-        {
-            continue;
-        }
-        if entry.file_name() == OsStr::new("_skills") {
-            let relative_to_replica = directory.strip_prefix(replica_root).unwrap_or(directory);
-            let key = match SourceKey::parse(path_text(relative_to_replica)) {
-                Ok(key) => key,
-                Err(error) => {
-                    diagnostics.push(LibraryDiagnostic {
-                        code: "invalid_replica_source",
-                        message: error.to_string(),
-                        path: Some(path),
-                    });
-                    continue;
-                }
-            };
-            let mut source = DiscoveredSource::new(
-                path.clone(),
-                relative_to_location.to_owned(),
-                SourceKind::Local,
-            );
-            source.source_key = Some(key);
-            discover_tree(
-                &path,
-                location_root,
-                exclusions,
-                &mut source,
-                sources,
-                false,
-            );
-            sources.push(source);
-        } else {
-            discover_replica_sources(
-                &path,
-                replica_root,
-                location_root,
-                exclusions,
-                sources,
-                diagnostics,
-            );
-        }
-    }
-}
-
-fn is_git_root(path: &Path) -> bool {
-    let marker = path.join(".git");
-    marker.is_dir() || marker.is_file()
-}
-
-#[derive(Deserialize)]
-struct SkillFrontmatter {
-    name: String,
-    description: String,
-}
-
-pub(crate) struct SkillMetadata {
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) errors: Vec<String>,
-    pub(crate) warnings: Vec<String>,
-}
-
-fn read_skill(directory: &Path, relative: &Path) -> LibrarySkill {
-    let path = path_text(relative);
-    let absolute_path = directory.canonicalize().ok();
-    let fingerprint = absolute_path
-        .as_deref()
-        .map(skill_fingerprint)
-        .unwrap_or(EntryFingerprint::Uninspectable);
-    let bytes = fs::read(directory.join("SKILL.md"));
-    let directory_name = (!relative.as_os_str().is_empty() && relative != Path::new("."))
-        .then(|| directory.file_name().and_then(OsStr::to_str))
-        .flatten();
-    let metadata = match bytes {
-        Ok(bytes) => inspect_skill_metadata(&bytes, directory_name),
-        Err(error) => Err(format!("cannot read SKILL.md: {error}")),
-    };
-    match metadata {
-        Ok(metadata) => {
-            let diagnostics = metadata.errors;
-            LibrarySkill {
-                path,
-                name: Some(metadata.name),
-                description: Some(metadata.description),
-                validity: if diagnostics.is_empty() {
-                    SkillValidity::Valid
-                } else {
-                    SkillValidity::Invalid
-                },
-                available: true,
-                diagnostics,
-                warnings: metadata.warnings,
-                absolute_path,
-                fingerprint,
-            }
-        }
-        Err(error) => LibrarySkill {
-            path,
-            name: None,
-            description: None,
-            validity: SkillValidity::Invalid,
-            available: true,
-            diagnostics: vec![error],
-            warnings: Vec::new(),
-            absolute_path,
-            fingerprint,
-        },
-    }
-}
-
-fn parse_frontmatter(bytes: &[u8]) -> Result<SkillFrontmatter, String> {
-    let text =
-        std::str::from_utf8(bytes).map_err(|error| format!("SKILL.md is not UTF-8: {error}"))?;
-    let mut lines = text.lines();
-    if lines.next() != Some("---") {
-        return Err("SKILL.md must start with YAML metadata between --- lines".to_owned());
-    }
-    let mut yaml = String::new();
-    let mut closed = false;
-    for line in lines {
-        if line == "---" {
-            closed = true;
-            break;
-        }
-        yaml.push_str(line);
-        yaml.push('\n');
-    }
-    if !closed {
-        return Err("SKILL.md metadata is missing its closing --- line".to_owned());
-    }
-    serde_saphyr::from_str(&yaml).map_err(|error| error.to_string())
-}
-
-pub(crate) fn inspect_skill_metadata(
-    bytes: &[u8],
-    directory_name: Option<&str>,
-) -> Result<SkillMetadata, String> {
-    let metadata = parse_frontmatter(bytes)?;
-    let mut errors = Vec::new();
-    let mut warnings = Vec::new();
-    let safe_name = safe_skill_name(&metadata.name);
-    if !safe_name {
-        errors.push(
-            "SKILL.md name must be a nonempty, safe directory name of at most 255 UTF-8 bytes"
-                .to_owned(),
-        );
-    } else if !valid_skill_name(&metadata.name) {
-        warnings.push("SKILL.md name should be 1 to 64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen".to_owned());
-    }
-    if let Some(directory_name) = directory_name
-        && safe_name
-        && directory_name != metadata.name
-    {
-        warnings.push(format!(
-            "SKILL.md name `{}` does not match directory",
-            metadata.name
-        ));
-    }
-    if metadata.description.trim().is_empty() {
-        errors.push("SKILL.md description is empty".to_owned());
-    }
-    Ok(SkillMetadata {
-        name: metadata.name,
-        description: metadata.description,
-        errors,
-        warnings,
-    })
-}
-
-pub(crate) fn validated_skill_metadata_at(directory: &Path) -> Option<(String, String)> {
-    let bytes = fs::read(directory.join("SKILL.md")).ok()?;
-    let metadata = parse_frontmatter(&bytes).ok()?;
-    (safe_skill_name(&metadata.name) && !metadata.description.trim().is_empty())
-        .then_some((metadata.name, metadata.description))
-}
-
-fn safe_skill_name(name: &str) -> bool {
-    name.len() <= 255
-        && !name.trim().is_empty()
-        && !matches!(name, "." | "..")
-        && !name
-            .chars()
-            .any(|character| matches!(character, '/' | '\\') || character.is_control())
-}
-
-pub(crate) fn validated_skill_name_at(directory: &Path) -> Option<String> {
-    validated_skill_metadata_at(directory).map(|(name, _)| name)
-}
-
-fn valid_skill_name(name: &str) -> bool {
-    (1..=64).contains(&name.len())
-        && !name.starts_with('-')
-        && !name.ends_with('-')
-        && !name.contains("--")
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
-
 fn path_text(path: &Path) -> String {
     if path.as_os_str().is_empty() || path == Path::new(".") {
         ".".to_owned()
@@ -882,73 +336,6 @@ fn path_text(path: &Path) -> String {
             .collect::<Vec<_>>()
             .join("/")
     }
-}
-
-fn insert_discovered_source(
-    snapshot: &mut LibrarySnapshot,
-    location_index: usize,
-    source: DiscoveredSource,
-) {
-    let suggested = suggest_source_key(&source);
-    let key_text = suggested.as_str().to_owned();
-    let relative_path = path_text(&source.relative);
-    if snapshot.sources.contains_key(&key_text) {
-        snapshot.diagnostics.push(LibraryDiagnostic {
-            code: "source_key_collision",
-            message: format!("More than one source uses the name `{suggested}`"),
-            path: Some(source.root.clone()),
-        });
-        let inventory_key = format!(
-            "collision:{location_index}:{}",
-            source.root.to_string_lossy()
-        );
-        snapshot.sources.insert(
-            inventory_key,
-            LibrarySource {
-                key: suggested.clone(),
-                suggested_key: suggested,
-                kind: source.kind,
-                available: true,
-                root: Some(source.root),
-                origin: source.origin,
-                skills: source
-                    .skills
-                    .into_iter()
-                    .map(|skill| (skill.path.clone(), skill))
-                    .collect(),
-                location_index,
-                relative_path,
-                key_collision: true,
-            },
-        );
-        return;
-    }
-    snapshot.sources.insert(
-        key_text,
-        LibrarySource {
-            key: suggested.clone(),
-            suggested_key: suggested,
-            kind: source.kind,
-            available: true,
-            root: Some(source.root),
-            origin: source.origin,
-            skills: source
-                .skills
-                .into_iter()
-                .map(|skill| (skill.path.clone(), skill))
-                .collect(),
-            location_index,
-            relative_path,
-            key_collision: false,
-        },
-    );
-}
-
-fn suggest_source_key(source: &DiscoveredSource) -> SourceKey {
-    source
-        .source_key
-        .clone()
-        .unwrap_or_else(|| suggested_source_key(&source.root, source.origin.as_deref()))
 }
 
 fn key_from_remote(remote: &str) -> Option<String> {
@@ -970,10 +357,91 @@ fn key_from_remote(remote: &str) -> Option<String> {
     })
 }
 
-fn discovery_error(path: &Path, error: std::io::Error) -> LibraryDiagnostic {
-    LibraryDiagnostic {
-        code: "discovery_incomplete",
-        message: format!("cannot inspect {}: {error}", path.display()),
-        path: Some(path.to_owned()),
+struct LocationEnvironment<'a> {
+    config_parent: &'a Path,
+    home: &'a Path,
+    environment: &'a BTreeMap<String, String>,
+}
+
+struct LocationFailure {
+    location: LibraryLocation,
+    diagnostic: LibraryDiagnostic,
+}
+
+impl LocationEnvironment<'_> {
+    fn resolve(&self, config: &LibraryLocationConfig) -> Result<PathBuf, LocationFailure> {
+        let expanded = expand_location(
+            config.path(),
+            self.config_parent,
+            self.home,
+            self.environment,
+        )
+        .map_err(|message| LocationFailure {
+            location: LibraryLocation {
+                expression: config.path().to_owned(),
+                resolved: None,
+                available: false,
+            },
+            diagnostic: LibraryDiagnostic {
+                code: "location_expansion_failed",
+                message,
+                path: None,
+            },
+        })?;
+        match expanded.canonicalize() {
+            Ok(path) if path.is_dir() => Ok(path),
+            _ => Err(LocationFailure {
+                location: LibraryLocation {
+                    expression: config.path().to_owned(),
+                    resolved: Some(expanded.clone()),
+                    available: false,
+                },
+                diagnostic: LibraryDiagnostic {
+                    code: "location_unavailable",
+                    message: format!("library folder is unavailable: {}", expanded.display()),
+                    path: Some(expanded),
+                },
+            }),
+        }
+    }
+}
+
+struct ResolvedLocation {
+    index: usize,
+    path: PathBuf,
+    allow_overlap: bool,
+}
+
+fn check_location_overlaps(
+    snapshot: &mut LibrarySnapshot,
+    candidate: &ResolvedLocation,
+    previous: &[ResolvedLocation],
+) {
+    for other in previous {
+        if path_overlap(&candidate.path, &other.path) {
+            let allowed = candidate.allow_overlap && other.allow_overlap;
+            snapshot.diagnostics.push(LibraryDiagnostic {
+                code: if allowed {
+                    "overlapping_locations_allowed"
+                } else {
+                    "overlapping_locations"
+                },
+                message: format!(
+                    "library folders overlap{}: {} and {}",
+                    if allowed {
+                        " as allowed in the configuration"
+                    } else {
+                        ""
+                    },
+                    other.path.display(),
+                    candidate.path.display()
+                ),
+                path: Some(candidate.path.clone()),
+            });
+            if allowed {
+                snapshot.overlap_advisory_locations.insert(candidate.index);
+                snapshot.overlap_advisory_locations.insert(other.index);
+            }
+        }
     }
 }
